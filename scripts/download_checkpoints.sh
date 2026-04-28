@@ -36,11 +36,11 @@ download_hf_model() {
 
     echo "Downloading ${name}..."
     mkdir -p "$target_dir"
-    huggingface-cli download $HF_REPO "${name}/${ckpt_name}" --local-dir checkpoints/ || \
+    hf download $HF_REPO "${name}/${ckpt_name}" --local-dir checkpoints/ || \
         { echo "Failed to download ${name}. Try: huggingface-cli login"; return 1; }
 
     # Download hydra config
-    huggingface-cli download $HF_REPO "${name}/.hydra/config.yaml" --local-dir checkpoints/ 2>/dev/null || true
+    hf download $HF_REPO "${name}/.hydra/config.yaml" --local-dir checkpoints/ 2>/dev/null || true
 
     echo -e "${GREEN}✓${NC} ${name} downloaded to ${target_dir}/"
 }

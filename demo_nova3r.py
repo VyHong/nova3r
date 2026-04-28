@@ -4,6 +4,7 @@
 
 import sys
 import os
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 import argparse
@@ -24,29 +25,25 @@ from nova3r.inference import inference_nova3r
 
 def parse_args():
     parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
-    parser.add_argument("--images", nargs="+", required=True,
-                        help="Path to 1 or 2 input images")
-    parser.add_argument("--ckpt", required=True,
-                        help="Path to model checkpoint")
-    parser.add_argument("--output_dir", default="demo/outputs/",
-                        help="Output directory (default: demo/outputs/)")
-    parser.add_argument("--num_queries", type=int, default=50000,
-                        help="Number of query points (default: 50000)")
-    parser.add_argument("--resolution", type=int, nargs='+', default=[518, 392],
-                        help="Resolution as W H (default: 518 392)")
-    parser.add_argument("--device", default="cuda",
-                        help="Device (default: cuda)")
+    parser.add_argument("--images", nargs="+", required=True, help="Path to 1 or 2 input images")
+    parser.add_argument("--ckpt", required=True, help="Path to model checkpoint")
+    parser.add_argument("--output_dir", default="demo/outputs/", help="Output directory (default: demo/outputs/)")
+    parser.add_argument("--num_queries", type=int, default=50000, help="Number of query points (default: 50000)")
+    parser.add_argument(
+        "--resolution", type=int, nargs="+", default=[518, 392], help="Resolution as W H (default: 518 392)"
+    )
+    parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
     args = parser.parse_args()
 
-    if len(args.images) > 2:
-        parser.error("At most 2 images are supported")
+    # if len(args.images) > 2:
+    #     parser.error("At most 2 images are supported")
 
     return args
 
 
 def load_model(ckpt_path, device):
     """Load model from checkpoint with its Hydra config."""
-    ckpt = torch.load(ckpt_path, map_location=device)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
 
     config_dir = os.path.join(os.path.dirname(ckpt_path), ".hydra")
     if os.path.exists(os.path.join(config_dir, "config.yaml")):
@@ -74,8 +71,8 @@ def load_model(ckpt_path, device):
 def save_pointcloud(pts3d, output_dir):
     """Save point cloud as PLY."""
     combined_pts = pts3d.reshape(-1, 3).cpu().numpy()
-
     pcd = o3d.geometry.PointCloud()
+    combined_pts = np.ascontiguousarray(combined_pts, dtype=np.float64)
     pcd.points = o3d.utility.Vector3dVector(combined_pts)
     ply_path = os.path.join(output_dir, "pointcloud.ply")
     o3d.io.write_point_cloud(ply_path, pcd)
@@ -83,13 +80,17 @@ def save_pointcloud(pts3d, output_dir):
     return ply_path
 
 
-def render_360_video(ply_path, output_dir, flip_axis="y", color_type="plasma",
-                     num_frames=180, fps=30, elevation=20, radius=0.003):
+def render_360_video(
+    ply_path, output_dir, flip_axis="y", color_type="plasma", num_frames=180, fps=30, elevation=20, radius=0.003
+):
     """Render 360 turntable video from a PLY file."""
     from demo.visualization.render_points import (
-        load_ply_pointcloud, flip_axis as flip_axis_fn,
-        build_colored_pointcloud, render_turntable_video,
+        load_ply_pointcloud,
+        flip_axis as flip_axis_fn,
+        build_colored_pointcloud,
+        render_turntable_video,
     )
+
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     point_cloud = load_ply_pointcloud(ply_path, device=device, remove_outlier=True)
     if flip_axis:
@@ -99,8 +100,10 @@ def render_360_video(ply_path, output_dir, flip_axis="y", color_type="plasma",
     video_path = os.path.join(output_dir, "pointcloud.mp4")
     render_turntable_video(
         point_cloud,
-        num_frames=num_frames, fps=fps,
-        elevation=elevation, radius=radius,
+        num_frames=num_frames,
+        fps=fps,
+        elevation=elevation,
+        radius=radius,
         outfile=video_path,
     )
     return video_path
@@ -128,30 +131,39 @@ def predict(ckpt_path, image_paths, device="cuda", resolution=(518, 392), output
 
     target_W, target_H = resolution
 
-    img_norm = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-    ])
+    img_norm = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+        ]
+    )
 
     img_paths = image_paths if len(image_paths) == 2 else [image_paths[0], image_paths[0]]
     images = []
     for i, p in enumerate(img_paths):
         img = PIL.Image.open(p).convert("RGB")
         img = img.resize((target_W, target_H), PIL.Image.LANCZOS)
-        images.append(dict(
-            img=img_norm(img)[None],
-            true_shape=np.int32([target_H, target_W]),
-            idx=i, instance=str(i),
-            view_label=f"input_{i}",
-        ))
+        images.append(
+            dict(
+                img=img_norm(img)[None],
+                true_shape=np.int32([target_H, target_W]),
+                idx=i,
+                instance=str(i),
+                view_label=f"input_{i}",
+            )
+        )
 
     symmetrize = len(image_paths) == 1
     pairs = make_pairs(images, scene_graph="complete", prefilter=None, symmetrize=symmetrize)
 
     with torch.no_grad():
         output = inference_nova3r(
-            cfg, pairs, model, device,
-            batch_size=1, num_queries=20000,
+            cfg,
+            pairs,
+            model,
+            device,
+            batch_size=1,
+            num_queries=20000,
             method=cfg.get("fm_sampling", "euler"),
         )
 
@@ -200,33 +212,45 @@ def main():
                     target_W = target_H = args.resolution[0]
             else:
                 target_W = target_H = resolution
-            img_norm = transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-            ])
+            img_norm = transforms.Compose(
+                [
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+                ]
+            )
             images = []
             for i, p in enumerate(img_paths):
                 img = PIL.Image.open(p).convert("RGB")
                 W, H = img.size
                 img = img.resize((target_W, target_H), PIL.Image.LANCZOS)
                 print(f" - adding {p} with resolution {W}x{H} --> {target_W}x{target_H}")
-                images.append(dict(
-                    img=img_norm(img)[None],
-                    true_shape=np.int32([target_H, target_W]),
-                    idx=i, instance=str(i),
-                    view_label=f"input_{i}",
-                ))
+                images.append(
+                    dict(
+                        img=img_norm(img)[None],
+                        true_shape=np.int32([target_H, target_W]),
+                        idx=i,
+                        instance=str(i),
+                        view_label=f"input_{i}",
+                    )
+                )
         # For 2-view input, don't symmetrize — run one pass with both views
         symmetrize = len(args.images) == 1
         pairs = make_pairs(images, scene_graph="complete", prefilter=None, symmetrize=symmetrize)
+        if len(args.images) > 2:
+            pairs = [tuple(images)]
 
         start_time = time.time()
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
 
         output = inference_nova3r(
-            cfg, pairs, model, args.device,
-            batch_size=1, num_queries=args.num_queries,
+            cfg,
+            pairs,
+            model,
+            args.device,
+            batch_size=1,
+            num_queries=args.num_queries,
+            n_views=len(args.images),
             method=cfg.get("fm_sampling", "euler"),
         )
 
@@ -245,8 +269,8 @@ def main():
         ply_path = save_pointcloud(pts3d, scene_dir)
         render_360_video(ply_path, scene_dir)
 
-        if len(args.images) == 2:
-            break
+        # if len(args.images) == 2:
+        break
 
     print("Done!")
 

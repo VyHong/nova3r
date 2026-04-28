@@ -24,84 +24,84 @@ from einops import rearrange
 
 path = AffineProbPath(scheduler=CosineScheduler())
 
-amp_dtype_mapping = {
-    "fp16": torch.float16, 
-    "bf16": torch.bfloat16, 
-    "fp32": torch.float32, 
-    'tf32': torch.float32
-}
-
+amp_dtype_mapping = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32, "tf32": torch.float32}
 
 
 def get_all_pts3d(gt_list, mode=None, down_resolution=112):
     """Extract and optionally downsample/FPS-sample ground truth 3D points from a batch."""
-    if mode == 'cube':
-        pts_xyz = gt_list[0]['global_center_xyz']
+    if mode == "cube":
+        pts_xyz = gt_list[0]["global_center_xyz"]
 
         valid = torch.ones_like(pts_xyz[..., 0]).bool()  # B, N
-        in_camera1 = inv(gt_list[0]['camera_pose'])
+        in_camera1 = inv(gt_list[0]["camera_pose"])
         gt_pts = geotrf(in_camera1, pts_xyz)
 
-    elif mode == 'src_complete':
+    elif mode == "src_complete":
         gt_pts, valid = get_complete_pts3d(gt_list)
 
-    elif 'src_complete_fps' in mode:
-        batch_size = int(mode.split('_')[-1])
-        gt_pts, valid = get_complete_pts3d(gt_list)
-        # run fps_fast
-        gt_pts, valid = sampling_train_gen_target(gt_pts, valid, None, target_sampling='fps_fast', batch_size=batch_size)
-
-    elif 'src_complete_fps_edge' in mode:
-        batch_size = int(mode.split('_')[-1])
+    elif "src_complete_fps" in mode:
+        batch_size = int(mode.split("_")[-1])
         gt_pts, valid = get_complete_pts3d(gt_list)
         # run fps_fast
-        gt_pts, valid = sampling_train_gen_target(gt_pts, valid, None, target_sampling='fps_edge_fast', batch_size=batch_size)
+        gt_pts, valid = sampling_train_gen_target(
+            gt_pts, valid, None, target_sampling="fps_fast", batch_size=batch_size
+        )
 
-    elif mode == 'cube_global':
-        pts_xyz = gt_list[0]['global_center_xyz']
+    elif "src_complete_fps_edge" in mode:
+        batch_size = int(mode.split("_")[-1])
+        gt_pts, valid = get_complete_pts3d(gt_list)
+        # run fps_fast
+        gt_pts, valid = sampling_train_gen_target(
+            gt_pts, valid, None, target_sampling="fps_edge_fast", batch_size=batch_size
+        )
+
+    elif mode == "cube_global":
+        pts_xyz = gt_list[0]["global_center_xyz"]
         valid = torch.ones_like(pts_xyz[..., 0]).bool()  # B, N
         gt_pts = pts_xyz
 
-    elif mode == 'src_view':
-        gt_pts_list = [gt['pts3d'] for gt in gt_list]
+    elif mode == "src_view":
+        gt_pts_list = [gt["pts3d"] for gt in gt_list]
 
-        in_camera1 = inv(gt_list[0]['camera_pose'])
-        gt_pts_list = [geotrf(in_camera1, gt['pts3d']) for gt in gt_list]
-
-        gt_pts = torch.stack(gt_pts_list, dim=1)
-        B, H, W, C = gt_pts_list[0].shape
-        gt_pts = rearrange(gt_pts, 'b s h w c -> (b s) c h w')
-        gt_pts = F.interpolate(gt_pts, size=down_resolution, mode='nearest')
-
-        gt_pts = rearrange(gt_pts, '(b s) c h w -> b (s h w) c', b=B)
-
-        valid_list = [gt['valid_mask'].clone() for gt in gt_list]
-        valid = torch.stack(valid_list, dim=1).float()
-        valid = rearrange(valid, 'b s h w -> (b s) 1 h w')  # Add channel dimension
-        valid = F.interpolate(valid, size=down_resolution, mode='nearest')
-        valid = rearrange(valid, '(b s) 1 h w -> b (s h w)', b=B).bool()
-
-    elif 'src_view_fps' in mode:
-        batch_size = int(mode.split('_')[-1])
-        gt_pts_list = [gt['pts3d'] for gt in gt_list]
-
-        in_camera1 = inv(gt_list[0]['camera_pose'])
-        gt_pts_list = [geotrf(in_camera1, gt['pts3d']) for gt in gt_list]
+        in_camera1 = inv(gt_list[0]["camera_pose"])
+        gt_pts_list = [geotrf(in_camera1, gt["pts3d"]) for gt in gt_list]
 
         gt_pts = torch.stack(gt_pts_list, dim=1)
         B, H, W, C = gt_pts_list[0].shape
-        gt_pts = rearrange(gt_pts, 'b s h w c -> (b s) c h w')
-        gt_pts = F.interpolate(gt_pts, size=down_resolution, mode='nearest')
+        gt_pts = rearrange(gt_pts, "b s h w c -> (b s) c h w")
+        gt_pts = F.interpolate(gt_pts, size=down_resolution, mode="nearest")
 
-        gt_pts = rearrange(gt_pts, '(b s) c h w -> b (s h w) c', b=B)
+        gt_pts = rearrange(gt_pts, "(b s) c h w -> b (s h w) c", b=B)
 
-        valid_list = [gt['valid_mask'].clone() for gt in gt_list]
+        valid_list = [gt["valid_mask"].clone() for gt in gt_list]
         valid = torch.stack(valid_list, dim=1).float()
-        valid = rearrange(valid, 'b s h w -> (b s) 1 h w')  # Add channel dimension
-        valid = F.interpolate(valid, size=down_resolution, mode='nearest')
-        valid = rearrange(valid, '(b s) 1 h w -> b (s h w)', b=B).bool()
+        valid = rearrange(valid, "b s h w -> (b s) 1 h w")  # Add channel dimension
+        valid = F.interpolate(valid, size=down_resolution, mode="nearest")
+        valid = rearrange(valid, "(b s) 1 h w -> b (s h w)", b=B).bool()
 
-        gt_pts, valid = sampling_train_gen_target(gt_pts, valid, None, target_sampling='fps_fast', batch_size=batch_size)
+    elif "src_view_fps" in mode:
+        batch_size = int(mode.split("_")[-1])
+        gt_pts_list = [gt["pts3d"] for gt in gt_list]
+
+        in_camera1 = inv(gt_list[0]["camera_pose"])
+        gt_pts_list = [geotrf(in_camera1, gt["pts3d"]) for gt in gt_list]
+
+        gt_pts = torch.stack(gt_pts_list, dim=1)
+        B, H, W, C = gt_pts_list[0].shape
+        gt_pts = rearrange(gt_pts, "b s h w c -> (b s) c h w")
+        gt_pts = F.interpolate(gt_pts, size=down_resolution, mode="nearest")
+
+        gt_pts = rearrange(gt_pts, "(b s) c h w -> b (s h w) c", b=B)
+
+        valid_list = [gt["valid_mask"].clone() for gt in gt_list]
+        valid = torch.stack(valid_list, dim=1).float()
+        valid = rearrange(valid, "b s h w -> (b s) 1 h w")  # Add channel dimension
+        valid = F.interpolate(valid, size=down_resolution, mode="nearest")
+        valid = rearrange(valid, "(b s) 1 h w -> b (s h w)", b=B).bool()
+
+        gt_pts, valid = sampling_train_gen_target(
+            gt_pts, valid, None, target_sampling="fps_fast", batch_size=batch_size
+        )
 
     else:
         raise NotImplementedError
@@ -110,19 +110,19 @@ def get_all_pts3d(gt_list, mode=None, down_resolution=112):
 
 def get_complete_pts3d(gt_list, valid_front=False):
     """Get complete (amodal) 3D point clouds from all views, transformed to camera 1 coordinates."""
-    pts_xyz = [gt['pts3d_complete'] for gt in gt_list]
-    in_camera1 = inv(gt_list[0]['camera_pose'])
+    pts_xyz = [gt["pts3d_complete"] for gt in gt_list]
+    in_camera1 = inv(gt_list[0]["camera_pose"])
     pts_xyz = [geotrf(in_camera1, pts) for pts in pts_xyz]  # B, N, 3
     gt_pts = torch.stack(pts_xyz, dim=1)  # B, S, N, 3
 
-    valid_num_list = [gt['pts3d_complete_valid_num'] for gt in gt_list]  # B, S
+    valid_num_list = [gt["pts3d_complete_valid_num"] for gt in gt_list]  # B, S
     valid = torch.zeros_like(gt_pts[..., 0]).bool()  # B, S, N
     for i in range(len(gt_list)):
         for j in range(valid_num_list[i].shape[0]):
-            valid[j, i, :valid_num_list[i][j]] = True
+            valid[j, i, : valid_num_list[i][j]] = True
 
-    gt_pts = rearrange(gt_pts, 'b s n c -> b (s n) c')  # B, S*N, 3
-    valid = rearrange(valid, 'b s n -> b (s n)')  # B, S*N
+    gt_pts = rearrange(gt_pts, "b s n c -> b (s n) c")  # B, S*N, 3
+    valid = rearrange(valid, "b s n -> b (s n)")  # B, S*N
 
     if valid_front:
         reordered_pts = []
@@ -149,17 +149,16 @@ def get_complete_pts3d(gt_list, valid_front=False):
         return gt_pts, valid
 
 
-def normalize_input(pts3d_src, valid_src, pts3d_trg, valid_trg, mode='none'):
-    """Normalize the input points
-    """
-    if mode == 'none':
+def normalize_input(pts3d_src, valid_src, pts3d_trg, valid_trg, mode="none"):
+    """Normalize the input points"""
+    if mode == "none":
         return pts3d_src, pts3d_trg
 
-    elif 'median' in mode:
-        if mode == 'median':
+    elif "median" in mode:
+        if mode == "median":
             target_median = 1.0
         else:
-            target_median = float(mode.split('_')[-1])
+            target_median = float(mode.split("_")[-1])
 
         pts3d_src_new = []
         pts3d_trg_new = []
@@ -194,11 +193,11 @@ def normalize_input(pts3d_src, valid_src, pts3d_trg, valid_trg, mode='none'):
         pts3d_trg_new = torch.stack(pts3d_trg_new, dim=0)  # B, N, 3
         return pts3d_src_new, pts3d_trg_new
 
-    elif 'cube' in mode:
-        if mode == 'cube':
+    elif "cube" in mode:
+        if mode == "cube":
             target_scale = 1.0
         else:
-            target_scale = float(mode.split('_')[-1])
+            target_scale = float(mode.split("_")[-1])
 
         pts3d_src_new = []
         pts3d_trg_new = []
@@ -229,9 +228,11 @@ def normalize_input(pts3d_src, valid_src, pts3d_trg, valid_trg, mode='none'):
         return pts3d_src, pts3d_trg
 
 
-def loss_of_one_batch_lari(args, batch, model, criterion, device, use_amp=False, ret=None, num_queries=20000, model_wrapper=None, **kwargs):
+def loss_of_one_batch_lari(
+    args, batch, model, criterion, device, use_amp=False, ret=None, num_queries=20000, model_wrapper=None, **kwargs
+):
     """Compute evaluation metrics (Chamfer Distance, F-Score) for trained models."""
-    ignore_keys = set(['dataset', 'label', 'instance', 'idx', 'true_shape', 'rng', 'view_label'])
+    ignore_keys = set(["dataset", "label", "instance", "idx", "true_shape", "rng", "view_label"])
 
     for view in batch:
         for name in view.keys():  # pseudo_focal
@@ -243,45 +244,44 @@ def loss_of_one_batch_lari(args, batch, model, criterion, device, use_amp=False,
 
     img_src_list = []
     for view in batch:
-        if 'input' in view['view_label'][0]:
-            view['img'] = view['img'] * 0.5 + 0.5
-            img = view['img']
+        if "input" in view["view_label"][0]:
+            view["img"] = view["img"] * 0.5 + 0.5
+            img = view["img"]
             img_src_list.append(img)
 
     images = torch.stack(img_src_list, dim=1)
 
     # prepare the diffusion data
-    if 'query_source' in args.model.params.cfg.pts3d_head.params:
+    if "query_source" in args.model.params.cfg.pts3d_head.params:
         query_src = args.model.params.cfg.pts3d_head.params.query_source
     else:
-        query_src = 'src_complete'
+        query_src = "src_complete"
 
-    if 'down_resolution' in args.model.params.cfg.pts3d_head.params:
+    if "down_resolution" in args.model.params.cfg.pts3d_head.params:
         down_resolution = args.model.params.cfg.pts3d_head.params.down_resolution
     else:
         down_resolution = 224
 
-    if 'norm_mode' in args.model.params.cfg.pts3d_head.params:
+    if "norm_mode" in args.model.params.cfg.pts3d_head.params:
         norm_mode = args.model.params.cfg.pts3d_head.params.norm_mode
     else:
-        norm_mode = 'none'
+        norm_mode = "none"
 
-    if 'fm_sampling' in args:
+    if "fm_sampling" in args:
         fm_sampling = args.fm_sampling
     else:
-        fm_sampling = 'euler'
+        fm_sampling = "euler"
 
     pts3d_src, valid_src = get_all_pts3d(batch, mode=query_src, down_resolution=down_resolution)
 
     pts3d_src_norm, _ = normalize_input(pts3d_src, valid_src, pts3d_src, valid_src, mode=norm_mode)
 
-
-    def process_point(args, images, pts3d_src, token_mask, num_queries, device, model_wrapper=None, method='euler'):
+    def process_point(args, images, pts3d_src, token_mask, num_queries, device, model_wrapper=None, method="euler"):
         step_size = args.fm_step_size
         num_steps = int(1 // args.fm_step_size)
         point_size = num_queries
 
-        cfg_scale = args.cfg_scale if 'cfg_scale' in args else 1.0
+        cfg_scale = args.cfg_scale if "cfg_scale" in args else 1.0
         B = images.shape[0]
 
         T = torch.linspace(0, 1, num_steps).to(device)
@@ -295,7 +295,7 @@ def loss_of_one_batch_lari(args, batch, model, criterion, device, use_amp=False,
         x_init = torch.rand((B, point_size, 3), dtype=torch.float32, device=device) * 2 - 1
         solver = ODESolver(velocity_model=wrapped_vf)
 
-        if hasattr(model, 'module'):
+        if hasattr(model, "module"):
             encoder_data = model.module._encode(images=images, pointmaps=pts3d_src, test=True, cfg_scale=cfg_scale)
         else:
             encoder_data = model._encode(images=images, pointmaps=pts3d_src, test=True, cfg_scale=cfg_scale)
@@ -309,22 +309,31 @@ def loss_of_one_batch_lari(args, batch, model, criterion, device, use_amp=False,
             images=images.detach(),
             token_mask=token_mask,
             encoder_data=encoder_data,
-            pointmaps=pts3d_src.detach()
+            pointmaps=pts3d_src.detach(),
         )
         return sol
 
     with torch.no_grad():
         with torch.cuda.amp.autocast(enabled=True, dtype=amp_dtype_mapping[args.amp_dtype]):
-            pts3d_xyz_list = process_point(args, images, pts3d_src_norm, token_mask, num_queries, device, model_wrapper=model_wrapper, method=fm_sampling)
+            pts3d_xyz_list = process_point(
+                args,
+                images,
+                pts3d_src_norm,
+                token_mask,
+                num_queries,
+                device,
+                model_wrapper=model_wrapper,
+                method=fm_sampling,
+            )
 
-    pts3d_xyz = pts3d_xyz_list[-1] 
+    pts3d_xyz = pts3d_xyz_list[-1]
     pred_dict = {}
-    pred_dict['pts3d_xyz'] = pts3d_xyz
-    pred_dict['pts3d_xyz_list'] = pts3d_xyz_list
+    pred_dict["pts3d_xyz"] = pts3d_xyz
+    pred_dict["pts3d_xyz_list"] = pts3d_xyz_list
     pred_dict["images"] = images
 
-    pred_dict['input_pts3d'] = pts3d_src
-    pred_dict['input_valid'] = valid_src
+    pred_dict["input_pts3d"] = pts3d_src
+    pred_dict["input_valid"] = valid_src
 
     with torch.cuda.amp.autocast(enabled=bool(use_amp), dtype=amp_dtype_mapping[args.amp_dtype]):
         pts3d_data, loss = criterion(batch, pred_dict) if criterion is not None else None
@@ -333,9 +342,22 @@ def loss_of_one_batch_lari(args, batch, model, criterion, device, use_amp=False,
     return result[ret] if ret else result
 
 
-def loss_of_one_batch_demo(args, batch, model, criterion, device, use_amp=False, ret=None, num_queries=20000, model_wrapper=None, n_views=2, method='euler', pointmaps=None):
+def loss_of_one_batch_demo(
+    args,
+    batch,
+    model,
+    criterion,
+    device,
+    use_amp=False,
+    ret=None,
+    num_queries=20000,
+    model_wrapper=None,
+    n_views=2,
+    method="euler",
+    pointmaps=None,
+):
     """Run inference for demo/visualization -- generates 3D point clouds from images."""
-    ignore_keys = set(['dataset', 'label', 'instance', 'idx', 'true_shape', 'rng', 'view_label'])
+    ignore_keys = set(["dataset", "label", "instance", "idx", "true_shape", "rng", "view_label"])
 
     for view in batch:
         for name in view.keys():  # pseudo_focal
@@ -347,16 +369,15 @@ def loss_of_one_batch_demo(args, batch, model, criterion, device, use_amp=False,
 
     img_src_list = []
     for view in batch:
-        if 'input' in view['view_label'][0]:
-            view['img'] = view['img'] * 0.5 + 0.5
-            img = view['img']
+        if "input" in view["view_label"][0]:
+            view["img"] = view["img"] * 0.5 + 0.5
+            img = view["img"]
             img_src_list.append(img)
-
 
     images = torch.stack(img_src_list, dim=1)
     images = images[:, :n_views, ...]  # Use only n_views
 
-    def process_point(args, images, pts3d_src, token_mask, num_queries, device, model_wrapper=None, method='euler'):
+    def process_point(args, images, pts3d_src, token_mask, num_queries, device, model_wrapper=None, method="euler"):
         step_size = args.fm_step_size
         num_steps = int(1 // args.fm_step_size)
         point_size = num_queries
@@ -374,7 +395,7 @@ def loss_of_one_batch_demo(args, batch, model, criterion, device, use_amp=False,
         x_init = torch.rand((B, point_size, 3), dtype=torch.float32, device=device) * 2 - 1
         solver = ODESolver(velocity_model=wrapped_vf)
 
-        if hasattr(model, 'module'):
+        if hasattr(model, "module"):
             encoder_data = model.module._encode(images=images, pointmaps=pts3d_src)
         else:
             encoder_data = model._encode(images=images, pointmaps=pts3d_src)
@@ -388,33 +409,36 @@ def loss_of_one_batch_demo(args, batch, model, criterion, device, use_amp=False,
             images=images,
             token_mask=token_mask,
             encoder_data=encoder_data,
-            pointmaps=pts3d_src
+            pointmaps=pts3d_src,
         )
         return sol[-1] if isinstance(sol, list) else sol
 
     if pointmaps is not None:
-        norm_mode = args.model.params.cfg.pts3d_head.params.get('norm_mode', 'none')
+        norm_mode = args.model.params.cfg.pts3d_head.params.get("norm_mode", "none")
         valid = torch.ones(pointmaps.shape[0], pointmaps.shape[1], dtype=torch.bool, device=device)
         pointmaps, _ = normalize_input(pointmaps, valid, pointmaps, valid, mode=norm_mode)
 
     with torch.no_grad():
         with torch.cuda.amp.autocast(enabled=True):
-            pts3d_xyz = process_point(args, images, pointmaps, token_mask, num_queries, device, model_wrapper=model_wrapper, method=method)
+            pts3d_xyz = process_point(
+                args, images, pointmaps, token_mask, num_queries, device, model_wrapper=model_wrapper, method=method
+            )
 
     pred_dict = {}
-    pred_dict['pts3d_xyz'] = pts3d_xyz
+    pred_dict["pts3d_xyz"] = pts3d_xyz
     pred_dict["images"] = images
 
     result = dict(view=batch, pred=pred_dict)
     return result[ret] if ret else result
 
 
-
 @torch.no_grad()
-def inference_nova3r(args, pairs, model, device, batch_size=8, verbose=True, num_queries=20000, n_views=2, method='euler', pointmaps=None):
+def inference_nova3r(
+    args, pairs, model, device, batch_size=8, verbose=True, num_queries=20000, n_views=2, method="euler", pointmaps=None
+):
     """Run batched Nova3r inference on image pairs, returning predicted 3D point clouds."""
     if verbose:
-        print(f'>> Inference with model on {len(pairs)} image pairs')
+        print(f">> Inference with model on {len(pairs)} image pairs")
     result = []
 
     # first, check if all images have the same size
@@ -423,7 +447,17 @@ def inference_nova3r(args, pairs, model, device, batch_size=8, verbose=True, num
         batch_size = 1
 
     for i in tqdm.trange(0, len(pairs), batch_size, disable=not verbose):
-        res = loss_of_one_batch_demo(args, collate_with_cat(pairs[i:i + batch_size]), model, None, device, num_queries=num_queries, n_views=n_views, method=method, pointmaps=pointmaps)
+        res = loss_of_one_batch_demo(
+            args,
+            collate_with_cat(pairs[i : i + batch_size]),
+            model,
+            None,
+            device,
+            num_queries=num_queries,
+            n_views=n_views,
+            method=method,
+            pointmaps=pointmaps,
+        )
         result.append(to_cpu(res))
 
     result = collate_with_cat(result, lists=multiple_shapes)
@@ -432,8 +466,7 @@ def inference_nova3r(args, pairs, model, device, batch_size=8, verbose=True, num
 
 
 def check_if_same_size(pairs):
-    shapes1 = [img1['img'].shape[-2:] for img1, img2 in pairs]
-    shapes2 = [img2['img'].shape[-2:] for img1, img2 in pairs]
+    return True
+    shapes1 = [img1["img"].shape[-2:] for img1, img2 in pairs]
+    shapes2 = [img2["img"].shape[-2:] for img1, img2 in pairs]
     return all(shapes1[0] == s for s in shapes1) and all(shapes2[0] == s for s in shapes2)
-
-
