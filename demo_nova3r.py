@@ -29,10 +29,9 @@ def parse_args():
     parser.add_argument("--ckpt", required=True, help="Path to model checkpoint")
     parser.add_argument("--output_dir", default="demo/outputs/", help="Output directory (default: demo/outputs/)")
     parser.add_argument("--num_queries", type=int, default=50000, help="Number of query points (default: 50000)")
-    parser.add_argument(
-        "--resolution", type=int, nargs="+", default=[518, 392], help="Resolution as W H (default: 518 392)"
-    )
+    parser.add_argument("--resolution", type=int, nargs="+", default=[518, 392], help="Resolution as W H (default: 518 392)")
     parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
+    parser.add_argument("--aggregator_ckpt", default="./checkpoints/scene_n2/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
     args = parser.parse_args()
 
     # if len(args.images) > 2:
@@ -41,7 +40,7 @@ def parse_args():
     return args
 
 
-def load_model(ckpt_path, device):
+def load_model(ckpt_path, device, **kw):
     """Load model from checkpoint with its Hydra config."""
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
 
@@ -50,17 +49,14 @@ def load_model(ckpt_path, device):
         cfg = OmegaConf.load(os.path.join(config_dir, "config.yaml"))
         cfg = cfg.experiment
     else:
-        raise FileNotFoundError(
-            f"No .hydra/config.yaml found at {config_dir}. "
-            "Please ensure the checkpoint directory contains the Hydra config."
-        )
+        raise FileNotFoundError(f"No .hydra/config.yaml found at {config_dir}. " "Please ensure the checkpoint directory contains the Hydra config.")
 
     model_config = cfg.model
     model = eval(model_config["name"])(**model_config["params"])
     model.to(device)
 
     if "model" in ckpt:
-        model.load_state_dict(ckpt["model"], strict=True)
+        model.load_state_dict(ckpt["model"], strict=True, **kw)
     else:
         model.load_state_dict(ckpt, strict=True)
 
@@ -80,9 +76,7 @@ def save_pointcloud(pts3d, output_dir):
     return ply_path
 
 
-def render_360_video(
-    ply_path, output_dir, flip_axis="y", color_type="plasma", num_frames=180, fps=30, elevation=20, radius=0.003
-):
+def render_360_video(ply_path, output_dir, flip_axis="y", color_type="plasma", num_frames=180, fps=30, elevation=20, radius=0.003):
     """Render 360 turntable video from a PLY file."""
     from demo.visualization.render_points import (
         load_ply_pointcloud,
@@ -185,7 +179,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     print(f"Loading checkpoint: {args.ckpt}")
-    model, cfg = load_model(args.ckpt, args.device)
+    model, cfg = load_model(args.ckpt, args.device, aggregator_ckpt=args.aggregator_ckpt)
 
     # Set inference defaults if not in the saved config
     OmegaConf.set_struct(cfg, False)

@@ -54,6 +54,7 @@ class DinoV2(nn.Module):
             qknorm_start=qknorm_start,
             rope_start=rope_start,
             cat_token=cat_token,
+            token_3d=kwargs.get("token_3d", None),
         )
 
     def forward(self, x, **kwargs):

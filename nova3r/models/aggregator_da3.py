@@ -19,6 +19,7 @@ import torch.nn as nn
 from addict import Dict
 from omegaconf import DictConfig, OmegaConf
 
+from depth_anything_3.model.utils.attention import Mlp
 from depth_anything_3.cfg import create_object
 from depth_anything_3.model.utils.transform import pose_encoding_to_extri_intri
 from depth_anything_3.utils.alignment import (
@@ -63,17 +64,19 @@ class DepthAnything3Net(nn.Module):
     # Patch size for feature extraction
     PATCH_SIZE = 14
 
-    def __init__(self, net, head, cam_dec=None, cam_enc=None, gs_head=None, gs_adapter=None):
+    def __init__(self, net, head, cam_dec=None, cam_enc=None, gs_head=None, gs_adapter=None, token_3d=None, **kwargs):
         """
         Initialize DepthAnything3Net with given yaml-initialized configuration.
         """
         super().__init__()
         self.backbone = net if isinstance(net, nn.Module) else create_object(_wrap_cfg(net))
         self.head = head if isinstance(head, nn.Module) else create_object(_wrap_cfg(head))
+
         self.cam_dec, self.cam_enc = None, None
         if cam_dec is not None:
             self.cam_dec = cam_dec if isinstance(cam_dec, nn.Module) else create_object(_wrap_cfg(cam_dec))
             self.cam_enc = cam_enc if isinstance(cam_enc, nn.Module) else create_object(_wrap_cfg(cam_enc))
+
         self.gs_adapter, self.gs_head = None, None
         if gs_head is not None and gs_adapter is not None:
             self.gs_adapter = gs_adapter if isinstance(gs_adapter, nn.Module) else create_object(_wrap_cfg(gs_adapter))
@@ -82,9 +85,7 @@ class DepthAnything3Net(nn.Module):
                 assert gs_head.out_dim == gs_out_dim, f"gs_head.out_dim should be {gs_out_dim}, got {gs_head.out_dim}"
                 self.gs_head = gs_head
             else:
-                assert (
-                    gs_head["output_dim"] == gs_out_dim
-                ), f"gs_head output_dim should set to {gs_out_dim}, got {gs_head['output_dim']}"
+                assert gs_head["output_dim"] == gs_out_dim, f"gs_head output_dim should set to {gs_out_dim}, got {gs_head['output_dim']}"
                 self.gs_head = create_object(_wrap_cfg(gs_head))
 
     def forward(
@@ -119,9 +120,9 @@ class DepthAnything3Net(nn.Module):
         else:
             cam_token = None
 
-        feats, aux_feats = self.backbone(
-            x, cam_token=cam_token, export_feat_layers=export_feat_layers, ref_view_strategy=ref_view_strategy
-        )
+        feats, output_3d_list, aux_feats = self.backbone(x, cam_token=cam_token, export_feat_layers=export_feat_layers, ref_view_strategy=ref_view_strategy)
+
+        return feats, output_3d_list, aux_feats, []
         # feats = [[item for item in feat] for feat in feats]
         H, W = x.shape[-2], x.shape[-1]
 
@@ -164,9 +165,7 @@ class DepthAnything3Net(nn.Module):
         output.depth, _ = set_sky_regions_to_max_depth(output.depth, None, non_sky_mask, max_depth=non_sky_max)
         return output
 
-    def _process_ray_pose_estimation(
-        self, output: Dict[str, torch.Tensor], height: int, width: int
-    ) -> Dict[str, torch.Tensor]:
+    def _process_ray_pose_estimation(self, output: Dict[str, torch.Tensor], height: int, width: int) -> Dict[str, torch.Tensor]:
         """Process ray pose estimation if ray pose decoder is available."""
         if "ray" in output and "ray_conf" in output:
             pred_extrinsic, pred_focal_lengths, pred_principal_points = get_extrinsic_from_camray(
@@ -177,12 +176,7 @@ class DepthAnything3Net(nn.Module):
             )
             pred_extrinsic = affine_inverse(pred_extrinsic)  # w2c -> c2w
             pred_extrinsic = pred_extrinsic[:, :, :3, :]
-            pred_intrinsic = (
-                torch.eye(3, 3)[None, None]
-                .repeat(pred_extrinsic.shape[0], pred_extrinsic.shape[1], 1, 1)
-                .clone()
-                .to(pred_extrinsic.device)
-            )
+            pred_intrinsic = torch.eye(3, 3)[None, None].repeat(pred_extrinsic.shape[0], pred_extrinsic.shape[1], 1, 1).clone().to(pred_extrinsic.device)
             pred_intrinsic[:, :, 0, 0] = pred_focal_lengths[:, :, 0] / 2 * width
             pred_intrinsic[:, :, 1, 1] = pred_focal_lengths[:, :, 1] / 2 * height
             pred_intrinsic[:, :, 0, 2] = pred_principal_points[:, :, 0] * width * 0.5
@@ -197,9 +191,7 @@ class DepthAnything3Net(nn.Module):
         """Process features through the depth prediction head."""
         return self.head(feats, H, W, patch_start_idx=0)
 
-    def _process_camera_estimation(
-        self, feats: list[torch.Tensor], H: int, W: int, output: Dict[str, torch.Tensor]
-    ) -> Dict[str, torch.Tensor]:
+    def _process_camera_estimation(self, feats: list[torch.Tensor], H: int, W: int, output: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Process camera pose estimation if camera decoder is available."""
         if self.cam_dec is not None:
             pose_enc = self.cam_dec(feats[-1][1])
@@ -270,9 +262,7 @@ class DepthAnything3Net(nn.Module):
 
         return output
 
-    def _extract_auxiliary_features(
-        self, feats: list[torch.Tensor], feat_layers: list[int], H: int, W: int
-    ) -> Dict[str, torch.Tensor]:
+    def _extract_auxiliary_features(self, feats: list[torch.Tensor], feat_layers: list[int], H: int, W: int) -> Dict[str, torch.Tensor]:
         """Extract auxiliary features from specified layers."""
         aux_features = Dict()
         assert len(feats) == len(feat_layers)
@@ -364,9 +354,7 @@ class NestedDepthAnything3Net(nn.Module):
 
         return output
 
-    def _apply_metric_scaling(
-        self, output: Dict[str, torch.Tensor], metric_output: Dict[str, torch.Tensor]
-    ) -> Dict[str, torch.Tensor]:
+    def _apply_metric_scaling(self, output: Dict[str, torch.Tensor], metric_output: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Apply metric scaling to the metric depth output."""
         # Scale metric depth based on camera intrinsics
         metric_output.depth = apply_metric_scaling(
@@ -375,9 +363,7 @@ class NestedDepthAnything3Net(nn.Module):
         )
         return output
 
-    def _apply_depth_alignment(
-        self, output: Dict[str, torch.Tensor], metric_output: Dict[str, torch.Tensor]
-    ) -> Dict[str, torch.Tensor]:
+    def _apply_depth_alignment(self, output: Dict[str, torch.Tensor], metric_output: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Apply depth alignment using least squares scaling."""
         # Compute non-sky mask
         non_sky_mask = compute_sky_mask(metric_output.sky, threshold=0.3)
@@ -391,9 +377,7 @@ class NestedDepthAnything3Net(nn.Module):
         median_conf = torch.quantile(depth_conf_sampled, 0.5)
 
         # Compute alignment mask
-        align_mask = compute_alignment_mask(
-            output.depth_conf, non_sky_mask, output.depth, metric_output.depth, median_conf
-        )
+        align_mask = compute_alignment_mask(output.depth_conf, non_sky_mask, output.depth, metric_output.depth, median_conf)
 
         # Compute scale factor using least squares
         valid_depth = output.depth[align_mask]
@@ -428,8 +412,6 @@ class NestedDepthAnything3Net(nn.Module):
         non_sky_max = min(torch.quantile(sampled_depth, 0.99), sky_depth_def)
 
         # Set sky regions to maximum depth and high confidence
-        output.depth, output.depth_conf = set_sky_regions_to_max_depth(
-            output.depth, output.depth_conf, non_sky_mask, max_depth=non_sky_max
-        )
+        output.depth, output.depth_conf = set_sky_regions_to_max_depth(output.depth, output.depth_conf, non_sky_mask, max_depth=non_sky_max)
 
         return output

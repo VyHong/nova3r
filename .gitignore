@@ -4,3 +4,4 @@ __pycache__/
 datasets
 demo
 checkpoints
+experimentation/nova3r_results
