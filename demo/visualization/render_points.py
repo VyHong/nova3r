@@ -15,47 +15,47 @@ from pytorch3d.renderer import (
     PointsRenderer,
     PointsRasterizer,
     AlphaCompositor,
-    NormWeightedCompositor
+    NormWeightedCompositor,
 )
 from pytorch3d.ops import knn_points
 import matplotlib.pyplot as plt
 import imageio.v2 as imageio
 
-def smooth_pointcloud_surface(point_cloud: Pointclouds, device: torch.device, 
-                             num_iterations: int = 3, 
-                             neighbor_size: int = 30) -> Pointclouds:
+
+def smooth_pointcloud_surface(
+    point_cloud: Pointclouds, device: torch.device, num_iterations: int = 3, neighbor_size: int = 30
+) -> Pointclouds:
     """
     Smooth point cloud surface using iterative neighbor averaging.
-    
+
     Args:
         point_cloud: Input point cloud
         device: Device to perform computation
         num_iterations: Number of smoothing iterations
         neighbor_size: Number of neighbors to consider for averaging
-        
+
     Returns:
         Smoothed point cloud with same features
     """
     print(f"Smoothing point cloud with {num_iterations} iterations and {neighbor_size} neighbors...")
     points = point_cloud.unsqueeze(0).to(device)  # [1, N, 3]
     # features = point_cloud.features_packed()
-    
+
     for _ in range(num_iterations):
         # Find k nearest neighbors
         knn_result = knn_points(points, points, K=neighbor_size + 1)
         knn_idx = knn_result.idx[0, :, 1:]  # [N, K], exclude self
-        
+
         # Average neighbor positions
         neighbor_points = points[0, knn_idx]  # [N, K, 3]
         smoothed_points = neighbor_points.mean(dim=1)  # [N, 3]
-        
+
         # Blend with original (Laplacian smoothing)
         points = 0.5 * points + 0.5 * smoothed_points.unsqueeze(0)
         # points = points.unsqueeze(0)
-    
+
     return points[0]
 
-    
     # return Pointclouds(points=[points[0].to(device)], features=[features])
 
 
@@ -66,7 +66,7 @@ def load_ply_pointcloud(ply_path: str, device: torch.device, remove_outlier: boo
         import open3d as o3d
 
         pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(verts.cpu().numpy())
+        pcd.points = o3d.utility.Vector3dVector(np.ascontiguousarray(verts.cpu().numpy(), dtype=np.float64))
         cl, ind = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
         verts = torch.from_numpy(np.asarray(pcd.points)[ind]).to(verts.dtype)
 
@@ -142,7 +142,6 @@ def place_on_floor(point_cloud: Pointclouds, axis: str = "y") -> Pointclouds:
     shifted[:, axis_idx] = shifted[:, axis_idx] - min_val
     # reverse y
 
-
     return Pointclouds(points=[shifted], features=[feats])
 
 
@@ -164,10 +163,11 @@ def center_pointcloud(point_cloud: Pointclouds) -> Pointclouds:
     return Pointclouds(points=[centered], features=[feats])
 
 
-def build_colored_pointcloud(point_cloud: Pointclouds, device: torch.device,
-                                   normal_neighbors: int = 60, color_type='normal') -> Pointclouds:
+def build_colored_pointcloud(
+    point_cloud: Pointclouds, device: torch.device, normal_neighbors: int = 60, color_type="normal"
+) -> Pointclouds:
     # Estimate normals on CPU to avoid GPU OOM for large point clouds
-    if color_type == 'normal':
+    if color_type == "normal":
         pc_cpu = point_cloud.to("cpu")
         normals = estimate_pointcloud_normals(pc_cpu, neighborhood_size=normal_neighbors)
 
@@ -181,7 +181,7 @@ def build_colored_pointcloud(point_cloud: Pointclouds, device: torch.device,
             features = [normal_colors[0].to(device)]
         else:
             features = normal_colors.to(device)
-    elif color_type in ['plasma', 'viridis']:
+    elif color_type in ["plasma", "viridis"]:
         pts = point_cloud.points_list()[0]
         feats = point_cloud.features_list()[0]
 
@@ -192,35 +192,32 @@ def build_colored_pointcloud(point_cloud: Pointclouds, device: torch.device,
         evals, evecs = torch.linalg.eigh(cov)
         order = torch.argsort(evals, descending=False)
         evecs = evecs[:, order]
-        
+
         # Project onto first principal component
         pca_coords = centered @ evecs[:, 0]
-        
+
         # Normalize to [0, 1] using quantiles
         coord_min, coord_max = torch.quantile(pca_coords, 0.02), torch.quantile(pca_coords, 0.98)
         z_normalized = (pca_coords - coord_min) / (coord_max - coord_min + 1e-8)
         # Use plasma colormap
         plasma_cmap = plt.cm.get_cmap(color_type)
-        height_colors = torch.from_numpy(
-            plasma_cmap(z_normalized.cpu().numpy())[:, :3]
-        ).float()
+        height_colors = torch.from_numpy(plasma_cmap(z_normalized.cpu().numpy())[:, :3]).float()
         features = [height_colors.to(device)]
-    elif color_type == 'xyz':
+    elif color_type == "xyz":
         pts = point_cloud.points_list()[0]
         xyz_min = pts.min(dim=0).values
         xyz_max = pts.max(dim=0).values
         xyz_norm = (pts - xyz_min) / (xyz_max - xyz_min + 1e-8)
         features = [xyz_norm.clamp(0.0, 1.0).to(device)]
     else:
-        raise ValueError(
-            f"Unknown color_type '{color_type}'. Use 'normal', 'plasma', 'viridis', or 'xyz'."
-        )
+        raise ValueError(f"Unknown color_type '{color_type}'. Use 'normal', 'plasma', 'viridis', or 'xyz'.")
 
     return Pointclouds(points=point_cloud.points_list(), features=features)
 
-def add_bounding_box_points(point_cloud: Pointclouds, device: torch.device,
-                            color=(1.0, 0.0, 0.0), steps: int = 100,
-                            pca_clip: float = 0.0) -> Pointclouds:
+
+def add_bounding_box_points(
+    point_cloud: Pointclouds, device: torch.device, color=(1.0, 0.0, 0.0), steps: int = 100, pca_clip: float = 0.0
+) -> Pointclouds:
     try:
         import open3d as o3d
     except Exception as exc:
@@ -271,19 +268,21 @@ def add_bounding_box_points(point_cloud: Pointclouds, device: torch.device,
     return Pointclouds(points=[merged_pts.to(device)], features=[merged_feats.to(device)])
 
 
-def render_turntable_video(point_cloud: Pointclouds,
-                            num_frames: int = 120,
-                            distance: float = 20,
-                            elevation: float = 10,
-                            azim_start: float = 0,
-                            azim_end: float = 360,
-                            fps: int = 30,
-                            image_size: int = 512,
-                            radius: float = 0.003,
-                            points_per_pixel: int = 10,
-                            background_color=(1.0, 1.0, 1.0),
-                            compositor: str = "alpha",
-                            outfile: str = "outputs/pointcloud_360_normals.mp4"):
+def render_turntable_video(
+    point_cloud: Pointclouds,
+    num_frames: int = 120,
+    distance: float = 20,
+    elevation: float = 10,
+    azim_start: float = 0,
+    azim_end: float = 360,
+    fps: int = 30,
+    image_size: int = 512,
+    radius: float = 0.003,
+    points_per_pixel: int = 10,
+    background_color=(1.0, 1.0, 1.0),
+    compositor: str = "alpha",
+    outfile: str = "outputs/pointcloud_360_normals.mp4",
+):
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
 
     raster_settings = PointsRasterizationSettings(
@@ -333,26 +332,35 @@ def parse_args():
     p.add_argument("--distance", type=float, default=20)
     p.add_argument("--elevation", type=float, default=10)
     p.add_argument("--azim-start", type=float, default=0.0, help="Starting azimuth angle (degrees)")
-    p.add_argument("--azim-end", type=float, default=None,
-                   help="Ending azimuth angle (degrees). If unset, uses azim_start + 360.")
+    p.add_argument(
+        "--azim-end", type=float, default=None, help="Ending azimuth angle (degrees). If unset, uses azim_start + 360."
+    )
     p.add_argument("--radius", type=float, default=0.005)
     p.add_argument("--points-per-pixel", type=int, default=10)
     p.add_argument("--normal-neighbors", type=int, default=60)
-    p.add_argument("--compositor", choices=["alpha", "normweighted"], default="alpha",
-                   help="Compositor type for point blending")
-    p.add_argument("--color-type", choices=["normal", "plasma", "viridis", "xyz"], default="viridis",
-                   help="Point color scheme")
+    p.add_argument(
+        "--compositor", choices=["alpha", "normweighted"], default="alpha", help="Compositor type for point blending"
+    )
+    p.add_argument(
+        "--color-type", choices=["normal", "plasma", "viridis", "xyz"], default="viridis", help="Point color scheme"
+    )
     p.add_argument("--bbox", action="store_true", help="Draw oriented bounding box")
     p.add_argument("--bbox-steps", type=int, default=100, help="Samples per bbox edge")
-    p.add_argument("--bbox-color", type=float, nargs=3, default=[1.0, 0.0, 0.0],
-                   help="BBox color as three floats in [0,1]")
-    p.add_argument("--bbox-pca-clip", type=float, default=0.0,
-                   help="Drop top/bottom quantile along first PCA axis for OBB (e.g. 0.01)")
+    p.add_argument(
+        "--bbox-color", type=float, nargs=3, default=[1.0, 0.0, 0.0], help="BBox color as three floats in [0,1]"
+    )
+    p.add_argument(
+        "--bbox-pca-clip",
+        type=float,
+        default=0.0,
+        help="Drop top/bottom quantile along first PCA axis for OBB (e.g. 0.01)",
+    )
     p.add_argument("--pca", action="store_true", help="Align point cloud to PCA axes before rendering")
     p.add_argument("--obb", action="store_true", help="Align point cloud to Open3D OBB axes before rendering")
     p.add_argument("--floor", action="store_true", help="Shift point cloud so min z is at 0")
-    p.add_argument("--flip-axis", choices=["x", "y", "z"], default=None,
-                   help="Flip point cloud along axis (useful if upside-down)")
+    p.add_argument(
+        "--flip-axis", choices=["x", "y", "z"], default=None, help="Flip point cloud along axis (useful if upside-down)"
+    )
     p.add_argument("--center", action="store_true", help="Center point cloud at origin")
     return p.parse_args()
 
@@ -384,8 +392,7 @@ def main():
         if args.center:
             point_cloud = center_pointcloud(point_cloud)
         point_cloud_normals = build_colored_pointcloud(
-            point_cloud, device=device, normal_neighbors=args.normal_neighbors,
-            color_type=args.color_type
+            point_cloud, device=device, normal_neighbors=args.normal_neighbors, color_type=args.color_type
         )
         if args.bbox:
             point_cloud_normals = add_bounding_box_points(

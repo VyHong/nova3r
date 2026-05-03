@@ -1,4 +1,7 @@
-datasets
 __pycache__/
-checkpoints
+*.py[cod]
+
+datasets
 demo
+checkpoints
+experimentation/nova3r_results
