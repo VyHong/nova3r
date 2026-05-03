@@ -1,6 +1,6 @@
 # Core dependencies
-torch
-torchvision
+#torch
+#torchvision
 einops
 scipy
 numpy

@@ -82,7 +82,8 @@ if [[ "$CONDA_DEFAULT_ENV" != "$ENV_NAME" ]]; then
     exit 1
 fi
 echo -e "${GREEN}✓${NC} Activated: $ENV_NAME"
-
+echo "Python version:"
+python --version
 # Install PyTorch
 echo ""
 echo "Installing PyTorch with CUDA 12.1 support..."
@@ -121,7 +122,7 @@ echo -e "${GREEN}✓${NC} Pip dependencies installed"
 # Install torch-cluster (needs special index for CUDA builds)
 echo ""
 echo "Installing torch-cluster..."
-TORCH_SHORT=$(python -c "import torch; v=torch.__version__.split('+')[0].rsplit('.',1)[0]; print(v.replace('.',''))")
+TORCH_SHORT=$(python -c "import torch; v=torch.__version__.split('+')[0]; print('.'.join(v.split('.')[:2]))")
 pip install torch-cluster -f "https://data.pyg.org/whl/torch-${TORCH_SHORT}.0+cu121.html" 2>/dev/null || \
 pip install torch-cluster
 echo -e "${GREEN}✓${NC} torch-cluster installed"

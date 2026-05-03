@@ -46,7 +46,7 @@ def parse_args():
 
 def load_model(ckpt_path, device):
     """Load model from checkpoint with its Hydra config."""
-    ckpt = torch.load(ckpt_path, map_location=device)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
 
     config_dir = os.path.join(os.path.dirname(ckpt_path), ".hydra")
     if os.path.exists(os.path.join(config_dir, "config.yaml")):
