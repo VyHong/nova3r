@@ -3,6 +3,15 @@ import torch
 import os
 from training.training_utils import loss_of_one_batch_train
 from training.validation_utils import generate_example
+import tracemalloc
+tracemalloc.start()
+def check_leak():
+    snapshot = tracemalloc.take_snapshot()
+    top_stats = snapshot.statistics('lineno')
+    print("[ Top 5 Memory Consumers ]")
+    for stat in top_stats[:5]:
+        print(stat)
+
 def save_points_ply(points, filename):
     pts = points.reshape(-1, 3).detach().cpu().numpy()
     header = f"ply\nformat ascii 1.0\nelement vertex {len(pts)}\nproperty float x\nproperty float y\nproperty float z\nend_header\n"
@@ -64,6 +73,7 @@ class Nova3RLightningModule(pl.LightningModule):
 
     def on_validation_epoch_start(self):
         self.val_batch_to_log = None
+        check_leak()
 
     def validation_step(self, batch, batch_idx):
         if not hasattr(self, "val_batch_to_log") or self.val_batch_to_log is None:
@@ -73,17 +83,18 @@ class Nova3RLightningModule(pl.LightningModule):
         return output_dict["loss"]["loss"]
 
     def on_validation_epoch_end(self):
-        if hasattr(self, "val_batch_to_log") and self.val_batch_to_log is not None:
-            generate_example(
-                cfg=self.cfg,
-                model=self.model,
-                images=self.val_batch_to_log["images"],
-                num_queries=200000,
-                log_dir=self.logger.log_dir if self.logger else "logs",
-                device=self.device,
-                current_epoch=self.current_epoch
-            )
-            self.val_batch_to_log = None
+        pass
+        # if hasattr(self, "val_batch_to_log") and self.val_batch_to_log is not None:
+        #     generate_example(
+        #         cfg=self.cfg,
+        #         model=self.model,
+        #         images=self.val_batch_to_log["images"],
+        #         num_queries=200000,
+        #         log_dir=self.logger.log_dir if self.logger else "logs",
+        #         device=self.device,
+        #         current_epoch=self.current_epoch
+        #     )
+        #     self.val_batch_to_log = None
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate)

@@ -45,3 +45,18 @@ python demo_nova3r.py \
 
 ## Python Path
 export PYTHONPATH=$PYTHONPATH:/absolute/path/to/nova3r
+
+
+
+[ Top 5 Memory Consumers ]
+<frozen importlib._bootstrap_external>:757: size=13.4 MiB, count=94763, average=148 B
+<frozen importlib._bootstrap>:488: size=1020 KiB, count=9896, average=106 B
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/networkx/utils/decorators.py:793: size=978 KiB, count=2520, average=397 B
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/networkx/utils/decorators.py:783: size=377 KiB, count=3385, average=114 B
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/google/protobuf/text_format.py:344: size=291 KiB, count=12, average=24.2 KiB
+[ Top 5 Memory Consumers ]
+<frozen importlib._bootstrap_external>:757: size=13.9 MiB, count=99675, average=147 B
+/opt/conda/envs/nova3r/lib/python3.12/abc.py:123: size=1186 KiB, count=13109, average=93 B
+<frozen importlib._bootstrap>:488: size=1020 KiB, count=9887, average=106 B
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/networkx/utils/decorators.py:793: size=978 KiB, count=2520, average=397 B
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/networkx/utils/decorators.py:783: size=377 KiB, count=3385, average=114 B

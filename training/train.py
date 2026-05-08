@@ -27,6 +27,8 @@ def load_data_config(ckpt_path):
     else:
         raise FileNotFoundError(f"No .hydra/config.yaml found at {config_dir}. "
                                f"Please ensure the checkpoint directory contains the Hydra config.")
+
+
 def main():
     # Set up data
     torch.cuda.memory._record_memory_history()
@@ -64,8 +66,8 @@ def main():
         callbacks=[checkpoint_callback, lr_monitor],
         precision=cfg.amp_dtype,
         log_every_n_steps=10,
-        
     )
+
     # # --- THE ULTIMATE SMOKE TEST ---
     # print("1. Initializing Model & Data...")
     # device = torch.device("cuda")
