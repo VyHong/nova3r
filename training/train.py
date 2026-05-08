@@ -3,31 +3,53 @@ from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
 import argparse
 import os
-
+from omegaconf import OmegaConf
+import torch
 from lightning_module import Nova3RLightningModule
 from lightning_data import Nova3RDataModule
+from demo_nova3r import load_model
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
+    parser.add_argument("--ckpt", default="checkpoints/scene_n2/checkpoint-last.pth", help="Path to model checkpoint")
+    #parser.add_argument("--output_dir", default="demo/outputs/", help="Output directory (default: demo/outputs/)")
+    parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
+    parser.add_argument("--aggregator_ckpt", default="./checkpoints/scene_n2/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
+    args = parser.parse_args()
 
-def main(args):
+    return args
+
+def load_data_config(ckpt_path):
+    config_dir = os.path.join(os.path.dirname(ckpt_path), ".hydra")
+    if os.path.exists(os.path.join(config_dir, "config.yaml")):
+        cfg = OmegaConf.load(os.path.join(config_dir, "config.yaml"))
+        return cfg.data
+    else:
+        raise FileNotFoundError(f"No .hydra/config.yaml found at {config_dir}. "
+                               f"Please ensure the checkpoint directory contains the Hydra config.")
+def main():
     # Set up data
+    torch.cuda.memory._record_memory_history()
+    args = parse_args()
+
+    model, cfg = load_model(args.ckpt, args.device, aggregator_ckpt=args.aggregator_ckpt)
+
+    data_cfg = load_data_config(args.ckpt)
+
     datamodule = Nova3RDataModule(
-        train_list=args.train_list, val_list=args.val_list, root_dir=args.data_root, batch_size=args.batch_size, num_workers=args.num_workers
+       data_cfg,
     )
 
-    # Set up model
-    model_kwargs = {
-        # Populate with actual model configuration
-    }
-    model = Nova3RLightningModule(model_kwargs=model_kwargs, learning_rate=args.lr)
+    module = Nova3RLightningModule(cfg, model)
 
     # Set up logger & callbacks
-    os.makedirs(args.log_dir, exist_ok=True)
-    logger = TensorBoardLogger(save_dir=args.log_dir, name="nova3r_training")
+    os.makedirs(cfg.output_dir, exist_ok=True)
+    logger = TensorBoardLogger(save_dir=cfg.output_dir, name="nova3r_training")
 
     checkpoint_callback = ModelCheckpoint(
-        dirpath=os.path.join(args.log_dir, "checkpoints"),
+        dirpath=os.path.join(cfg.output_dir, "checkpoints"),
         filename="{epoch:02d}-{val_loss:.2f}",
-        save_top_k=3,
+        save_top_k=1,
         monitor="val_loss",
         mode="min",
     )
@@ -35,31 +57,39 @@ def main(args):
 
     # Initialize trainer
     trainer = pl.Trainer(
-        max_epochs=args.epochs,
-        accelerator="gpu" if args.gpus > 0 else "cpu",
-        devices=args.gpus,
+        max_epochs=cfg.epochs,
+        accelerator=args.device,
+        devices=cfg.gpus,
         logger=logger,
         callbacks=[checkpoint_callback, lr_monitor],
-        precision=16 if args.use_fp16 else 32,
+        precision=cfg.amp_dtype,
         log_every_n_steps=10,
+        
     )
+    # # --- THE ULTIMATE SMOKE TEST ---
+    # print("1. Initializing Model & Data...")
+    # device = torch.device("cuda")
+    # module.to(device)
 
-    # Start training
-    trainer.fit(model, datamodule=datamodule)
+    # print("2. Testing DataLoader Initialization...")
+    # datamodule.setup()
+    # train_loader = datamodule.train_dataloader() # or your datamodule.train_dataloader()
+    # iterator = iter(train_loader)
+
+    # print("3. Attempting to fetch ONE batch...")
+    # # This is where 90% of "100% CPU" hangs happen
+    # batch = next(iterator) 
+    # print("Batch fetched successfully!")
+
+    # print("4. Attempting ONE forward pass...")
+    # # This is the other 10%
+    # with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
+    #     module.train()
+    #     output = module.training_step(batch, 0)
+    #     print("Forward pass successful!")
+    # # -------------------------------
+    trainer.fit(module, datamodule=datamodule)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--train_list", type=str, required=True, help="Path to training data list JSON")
-    parser.add_argument("--val_list", type=str, required=True, help="Path to validation data list JSON")
-    parser.add_argument("--data_root", type=str, default=".", help="Root directory for dataset")
-    parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs to use")
-    parser.add_argument("--use_fp16", action="store_true", help="Use 16-bit mixed precision")
-    parser.add_argument("--log_dir", type=str, default="logs", help="Directory for logs and checkpoints")
-
-    args = parser.parse_args()
-    main(args)
+    main()

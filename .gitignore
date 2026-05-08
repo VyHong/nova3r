@@ -5,3 +5,5 @@ datasets
 demo
 checkpoints
 experimentation/nova3r_results
+exp_output
+debug_points

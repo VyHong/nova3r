@@ -80,10 +80,10 @@ def sample_farthest_points(
         for n in range(N):
             # pyre-fixme[6]: For 1st param expected `int` but got `Tensor`.
             start_idxs[n] = torch.randint(high=lengths[n], size=(1,)).item()
-
+            
     with torch.no_grad():
         # pyre-fixme[16]: `pytorch3d_._C` has no attribute `sample_farthest_points`.
-        idx = _C.sample_farthest_points(points, lengths, K, start_idxs)
+        idx = _C.sample_farthest_points(points, lengths, K, start_idxs ,-1)
     sampled_points = masked_gather(points, idx)
 
     return sampled_points, idx

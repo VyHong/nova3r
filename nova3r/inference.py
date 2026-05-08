@@ -359,20 +359,23 @@ def loss_of_one_batch_demo(
     """Run inference for demo/visualization -- generates 3D point clouds from images."""
     ignore_keys = set(["dataset", "label", "instance", "idx", "true_shape", "rng", "view_label"])
 
-    for view in batch:
-        for name in view.keys():  # pseudo_focal
-            if name in ignore_keys:
-                continue
-            view[name] = view[name].to(device, non_blocking=True)
-
     token_mask = None
+    if isinstance(batch[0], torch.Tensor):
+        img_src_list = batch
+    else:
+        for view in batch:
+            for name in view.keys():  # pseudo_focal
+                if name in ignore_keys:
+                    continue
+                view[name] = view[name].to(device, non_blocking=True)
 
-    img_src_list = []
-    for view in batch:
-        if "input" in view["view_label"][0]:
-            view["img"] = view["img"] * 0.5 + 0.5
-            img = view["img"]
-            img_src_list.append(img)
+
+        img_src_list = []
+        for view in batch:
+            if "input" in view["view_label"][0]:
+                view["img"] = view["img"] * 0.5 + 0.5
+                img = view["img"]
+                img_src_list.append(img)
 
     images = torch.stack(img_src_list, dim=1)
     images = images[:, :n_views, ...]  # Use only n_views
