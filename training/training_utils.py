@@ -5,7 +5,7 @@ from collections import defaultdict
 import tqdm
 import torch
 import torch.nn.functional as F
-
+import numpy as np
 from dust3r.utils.device import to_cpu, collate_with_cat
 from dust3r.utils.misc import invalid_to_zeros
 from dust3r.utils.geometry import geotrf, inv
@@ -19,6 +19,23 @@ from einops import rearrange
 path = AffineProbPath(scheduler=CosineScheduler())
 
 amp_dtype_mapping = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32, "tf32": torch.float32}
+
+def save_points_ply(points, filename):
+    pts = points.reshape(-1, 3).detach().cpu().numpy()
+    header = f"ply\nformat ascii 1.0\nelement vertex {len(pts)}\nproperty float x\nproperty float y\nproperty float z\nend_header\n"
+    with open(filename, 'w') as f:
+        f.write(header)
+        for p in pts:
+            f.write(f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")
+
+def save_batch_images(images, filename):
+    try:
+        from torchvision.utils import save_image
+        # images is expected to be [B, V, C, H, W], we take the first batch item
+        v_images = images[0] # [V, C, H, W]
+        save_image(v_images, filename, normalize=True)
+    except Exception as e:
+        print("Could not save images:", e)
 
 def get_all_pts3d(gt_list, mode=None, down_resolution=112):
     """Extract and optionally downsample/FPS-sample ground truth 3D points from a batch."""
@@ -260,6 +277,8 @@ def loss_of_one_batch_train(
 
 
     images = torch.stack(batch["images"], dim=1)
+    # debug
+    #images = torch.zeros_like(images) # Replace with black images
     token_mask = None
 
     if "query_source" in args.model.params.cfg.pts3d_head.params:
@@ -285,13 +304,30 @@ def loss_of_one_batch_train(
     pts3d_src, valid_src = get_all_pts3d(batch, mode=query_src, down_resolution=down_resolution)
     pts3d_trg, valid_trg = get_all_pts3d(batch, mode=target_src, down_resolution=down_resolution)
     pts3d_src_norm, pts3d_trg_norm = normalize_input(pts3d_src, valid_src, pts3d_trg, valid_trg, mode=norm_mode)
+    pts3d_trg_norm = pts3d_trg_norm.to(dtype=torch.float32)  
 
-    pts3d_trg_norm = pts3d_trg_norm.to(device)
+    # Replace target with a simple deterministic unit sphere for overfitting
+    # import math
+    # B_trg, N_trg, C_trg = pts3d_trg_norm.shape
+    # g = torch.Generator(device=pts3d_trg_norm.device)
+    # g.manual_seed(42)
+    # phi = torch.acos(1 - 2 * torch.rand(1, N_trg, generator=g, device=pts3d_trg_norm.device))
+    # theta = 2 * math.pi * torch.rand(1, N_trg, generator=g, device=pts3d_trg_norm.device)
+    # dummy_x = torch.sin(phi) * torch.cos(theta)
+    # dummy_y = torch.sin(phi) * torch.sin(theta)
+    # dummy_z = torch.cos(phi)
+    # simple_shape = torch.stack([dummy_x, dummy_y, dummy_z], dim=-1) # [1, N, 3]
+    # pts3d_trg_norm = simple_shape.expand(B_trg, N_trg, C_trg).contiguous()
+
+    #save_points_ply(pts3d_trg_norm[0], f"debug_points/debug_shape.ply")    
+    #save_batch_images(images, f"debug_points/{batch['seq_name'][0]}_images.png")
+
     B = images.shape[0]
-    x_0 = torch.randn_like(pts3d_trg_norm,device=device)
+    # Use uniform noise [-1, 1]^3 to match inference.py prior instead of Gaussian
+    x_0 = torch.rand_like(pts3d_trg_norm, device=device) * 2 - 1
     t = torch.rand(B, device=device)
 
-    fm_path = AffineProbPath(scheduler=CosineScheduler())
+    fm_path = path
     path_sample = fm_path.sample(x_0=x_0, x_1=pts3d_trg_norm, t=t)
     x_t = path_sample.x_t
     dx_t = path_sample.dx_t
@@ -310,6 +346,7 @@ def loss_of_one_batch_train(
     )
 
     point_loss = F.mse_loss(v_pred, dx_t, reduction="none").mean(dim=-1)  # B, N
+    #point_loss = F.l1_loss(v_pred, dx_t, reduction="none").mean(dim=-1)  # B, N
     if valid_trg is not None:
         valid_mask = valid_trg.bool()
         denom = torch.clamp(valid_mask.sum(), min=1)
@@ -358,5 +395,4 @@ def loss_of_one_batch_train(
 
     loss = loss_dict
 
-    result = dict(view=batch, pred=pred_dict, data=pts3d_data, loss=loss)
-    return result
+    return loss

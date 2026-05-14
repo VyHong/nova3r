@@ -1,0 +1,694 @@
+Traceback (most recent call last):
+  File "/mnt/home/vyhong/projects/nova3r/training/train.py", line 1, in <module>
+    import pytorch_lightning as pl
+ModuleNotFoundError: No module named 'pytorch_lightning'
+Image nova3r already exists, skipping import.
+Starting container...
+019f6b00d01c37f9a7642541a4b7cd32d767bc75f14aa07f0f3e573f32658301
+Mon May 11 14:07:03 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.105.08             Driver Version: 580.105.08     CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H200 NVL                Off |   00000000:4E:00.0 Off |                    0 |
+| N/A   33C    P0             72W /  600W |       4MiB / 143771MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+Setting up environment and running commands inside container...
+Num GPUs: 1
+Mounting dataset using FUSE...
+Starting mount process...
+--------------------------
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/frl_apartment_0_000.zip
+Mount point: /tmp/datasets/replica_pano/frl_apartment_0_000
+✅ Mounted: frl_apartment_0_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/frl_apartment_2_000.zip
+Mount point: /tmp/datasets/replica_pano/frl_apartment_2_000
+✅ Mounted: frl_apartment_2_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/frl_apartment_3_000.zip
+Mount point: /tmp/datasets/replica_pano/frl_apartment_3_000
+✅ Mounted: frl_apartment_3_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/frl_apartment_4_000.zip
+Mount point: /tmp/datasets/replica_pano/frl_apartment_4_000
+✅ Mounted: frl_apartment_4_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/frl_apartment_5_000.zip
+Mount point: /tmp/datasets/replica_pano/frl_apartment_5_000
+✅ Mounted: frl_apartment_5_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/hotel_0_000.zip
+Mount point: /tmp/datasets/replica_pano/hotel_0_000
+✅ Mounted: hotel_0_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_000.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_000
+✅ Mounted: large_apartment_0_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_001.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_001
+✅ Mounted: large_apartment_0_001
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_002.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_002
+✅ Mounted: large_apartment_0_002
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_003.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_003
+✅ Mounted: large_apartment_0_003
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_004.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_004
+✅ Mounted: large_apartment_0_004
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_005.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_005
+✅ Mounted: large_apartment_0_005
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_006.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_006
+✅ Mounted: large_apartment_0_006
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_007.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_007
+✅ Mounted: large_apartment_0_007
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_1_000.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_1_000
+✅ Mounted: large_apartment_1_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_1_001.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_1_001
+✅ Mounted: large_apartment_1_001
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_2_000.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_2_000
+✅ Mounted: large_apartment_2_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_2_001.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_2_001
+✅ Mounted: large_apartment_2_001
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_2_002.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_2_002
+✅ Mounted: large_apartment_2_002
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_2_003.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_2_003
+✅ Mounted: large_apartment_2_003
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/office_0_000.zip
+Mount point: /tmp/datasets/replica_pano/office_0_000
+✅ Mounted: office_0_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/office_2_000.zip
+Mount point: /tmp/datasets/replica_pano/office_2_000
+✅ Mounted: office_2_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/office_3_000.zip
+Mount point: /tmp/datasets/replica_pano/office_3_000
+✅ Mounted: office_3_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/office_4_000.zip
+Mount point: /tmp/datasets/replica_pano/office_4_000
+✅ Mounted: office_4_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/room_0_000.zip
+Mount point: /tmp/datasets/replica_pano/room_0_000
+✅ Mounted: room_0_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/room_1_000.zip
+Mount point: /tmp/datasets/replica_pano/room_1_000
+✅ Mounted: room_1_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/room_2_000.zip
+Mount point: /tmp/datasets/replica_pano/room_2_000
+✅ Mounted: room_2_000
+--------------------------
+All done! Mounts are available in /tmp/datasets/replica_pano
+Running training...
+Using bfloat16 Automatic Mixed Precision (AMP)
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+💡 Tip: For seamless cloud logging and experiment tracking, try installing [litlogger](https://pypi.org/project/litlogger/) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Experiments platform.
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/callbacks/model_checkpoint.py:881: Checkpoint directory /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/checkpoints exists and is not empty.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/utilities/model_summary/model_summary.py:242: Precision bf16-mixed is not supported by the model summary.  Estimated model size in MB will not be accurate. Using 32 bits instead.
+┏━━━┳━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃   ┃ Name  ┃ Type          ┃ Params ┃ Mode  ┃ FLOPs ┃
+┡━━━╇━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ 0 │ model │ Nova3rImgCond │  718 M │ train │     0 │
+└───┴───────┴───────────────┴────────┴───────┴───────┘
+Trainable params: 715 M                                                         
+Non-trainable params: 2.4 M                                                     
+Total params: 718 M                                                             
+Total estimated model params size (MB): 2.9 K                                   
+Modules in train mode: 1239                                                     
+Modules in eval mode: 0                                                         
+Total FLOPs: 0                                                                  
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/utilities/_pytree.py:21: `isinstance(treespec, LeafSpec)` is deprecated, use `isinstance(treespec, TreeSpec) and treespec.is_leaf()` instead.
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]/mnt/home/vyhong/projects/nova3r/nova3r/inference.py:425: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(enabled=True):
+100%|██████████| 1/1 [00:02<00:00,  2.64s/it]100%|██████████| 1/1 [00:02<00:00,  2.64s/it]
+Inference: 2.67s | Peak memory: 4863 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_0/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_0/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.88s/it]100%|██████████| 1/1 [00:01<00:00,  1.88s/it]
+Inference: 1.91s | Peak memory: 6573 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_0/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_0/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.89s/it]100%|██████████| 1/1 [00:01<00:00,  1.89s/it]
+Inference: 1.91s | Peak memory: 6573 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_1/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_1/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.84s/it]100%|██████████| 1/1 [00:01<00:00,  1.84s/it]
+Inference: 1.86s | Peak memory: 6573 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_2/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_2/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.79s/it]100%|██████████| 1/1 [00:01<00:00,  1.79s/it]
+Inference: 1.81s | Peak memory: 6573 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_3/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_3/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.89s/it]100%|██████████| 1/1 [00:01<00:00,  1.89s/it]
+Inference: 1.91s | Peak memory: 6573 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_4/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_4/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.80s/it]100%|██████████| 1/1 [00:01<00:00,  1.80s/it]
+Inference: 1.82s | Peak memory: 6573 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_5/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_5/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.85s/it]100%|██████████| 1/1 [00:01<00:00,  1.85s/it]
+Inference: 1.87s | Peak memory: 6573 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_6/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_6/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.90s/it]100%|██████████| 1/1 [00:01<00:00,  1.91s/it]
+Inference: 1.93s | Peak memory: 6573 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_7/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_7/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.88s/it]100%|██████████| 1/1 [00:01<00:00,  1.88s/it]
+Inference: 1.90s | Peak memory: 6573 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_8/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_8/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.90s/it]100%|██████████| 1/1 [00:01<00:00,  1.90s/it]
+Inference: 1.93s | Peak memory: 6573 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_9/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_9/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.77s/it]100%|██████████| 1/1 [00:01<00:00,  1.77s/it]
+Inference: 1.80s | Peak memory: 6573 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_10/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_10/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.85s/it]100%|██████████| 1/1 [00:01<00:00,  1.85s/it]
+Inference: 1.88s | Peak memory: 6573 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_11/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_11/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.84s/it]100%|██████████| 1/1 [00:01<00:00,  1.84s/it]
+Inference: 1.86s | Peak memory: 6573 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_12/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_12/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.83s/it]100%|██████████| 1/1 [00:01<00:00,  1.83s/it]
+Inference: 1.85s | Peak memory: 6573 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_13/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_13/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.91s/it]100%|██████████| 1/1 [00:01<00:00,  1.91s/it]
+Inference: 1.94s | Peak memory: 6573 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_14/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_14/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.88s/it]100%|██████████| 1/1 [00:01<00:00,  1.88s/it]
+Inference: 1.91s | Peak memory: 6573 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_15/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_15/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.77s/it]100%|██████████| 1/1 [00:01<00:00,  1.77s/it]
+Inference: 1.80s | Peak memory: 6573 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_16/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_16/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.86s/it]100%|██████████| 1/1 [00:01<00:00,  1.86s/it]
+Inference: 1.88s | Peak memory: 6573 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_17/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_17/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.85s/it]100%|██████████| 1/1 [00:01<00:00,  1.85s/it]
+Inference: 1.88s | Peak memory: 6573 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_18/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_18/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.89s/it]100%|██████████| 1/1 [00:01<00:00,  1.89s/it]
+Inference: 1.92s | Peak memory: 6573 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_19/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_24/val_points/epoch_19/pointcloud.mp4
+Done!
+`Trainer.fit` stopped: `max_epochs=20` reached.
+Epoch 19/19 ━━━━━━━━━━━━━━━━━ 67/67 0:08:57 • 0:00:00 0.13it/s v_num: 24.000    
+                                                               train_loss_step: 
+                                                               1.424 val_loss:  
+                                                               1.378            
+                                                               train_loss_epoch:
+                                                               1.473            
+Cleaning up...
+time="2026-05-11T13:16:41-04:00" level=warning msg="StopSignal SIGTERM failed to stop container nova3r-run in 10 seconds, resorting to SIGKILL"
+nova3r-run
+Image nova3r already exists, skipping import.
+Starting container...
+77edfab55e574a39a9660fb5aca8f3e2d63a48c01526f7e0958c4f1f98da1215
+Mon May 11 18:46:13 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.105.08             Driver Version: 580.105.08     CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H200 NVL                Off |   00000000:4E:00.0 Off |                    0 |
+| N/A   31C    P0             71W /  600W |       4MiB / 143771MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+Setting up environment and running commands inside container...
+Num GPUs: 1
+Mounting dataset using FUSE...
+Starting mount process...
+--------------------------
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/frl_apartment_0_000.zip
+Mount point: /tmp/datasets/replica_pano/frl_apartment_0_000
+✅ Mounted: frl_apartment_0_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/frl_apartment_2_000.zip
+Mount point: /tmp/datasets/replica_pano/frl_apartment_2_000
+✅ Mounted: frl_apartment_2_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/frl_apartment_3_000.zip
+Mount point: /tmp/datasets/replica_pano/frl_apartment_3_000
+✅ Mounted: frl_apartment_3_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/frl_apartment_4_000.zip
+Mount point: /tmp/datasets/replica_pano/frl_apartment_4_000
+✅ Mounted: frl_apartment_4_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/frl_apartment_5_000.zip
+Mount point: /tmp/datasets/replica_pano/frl_apartment_5_000
+✅ Mounted: frl_apartment_5_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/hotel_0_000.zip
+Mount point: /tmp/datasets/replica_pano/hotel_0_000
+✅ Mounted: hotel_0_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_000.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_000
+✅ Mounted: large_apartment_0_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_001.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_001
+✅ Mounted: large_apartment_0_001
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_002.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_002
+✅ Mounted: large_apartment_0_002
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_003.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_003
+✅ Mounted: large_apartment_0_003
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_004.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_004
+✅ Mounted: large_apartment_0_004
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_005.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_005
+✅ Mounted: large_apartment_0_005
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_006.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_006
+✅ Mounted: large_apartment_0_006
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_007.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_007
+✅ Mounted: large_apartment_0_007
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_1_000.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_1_000
+✅ Mounted: large_apartment_1_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_1_001.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_1_001
+✅ Mounted: large_apartment_1_001
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_2_000.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_2_000
+✅ Mounted: large_apartment_2_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_2_001.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_2_001
+✅ Mounted: large_apartment_2_001
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_2_002.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_2_002
+✅ Mounted: large_apartment_2_002
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_2_003.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_2_003
+✅ Mounted: large_apartment_2_003
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/office_0_000.zip
+Mount point: /tmp/datasets/replica_pano/office_0_000
+✅ Mounted: office_0_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/office_2_000.zip
+Mount point: /tmp/datasets/replica_pano/office_2_000
+✅ Mounted: office_2_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/office_3_000.zip
+Mount point: /tmp/datasets/replica_pano/office_3_000
+✅ Mounted: office_3_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/office_4_000.zip
+Mount point: /tmp/datasets/replica_pano/office_4_000
+✅ Mounted: office_4_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/room_0_000.zip
+Mount point: /tmp/datasets/replica_pano/room_0_000
+✅ Mounted: room_0_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/room_1_000.zip
+Mount point: /tmp/datasets/replica_pano/room_1_000
+✅ Mounted: room_1_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/room_2_000.zip
+Mount point: /tmp/datasets/replica_pano/room_2_000
+✅ Mounted: room_2_000
+--------------------------
+All done! Mounts are available in /tmp/datasets/replica_pano
+Running training...
+Using bfloat16 Automatic Mixed Precision (AMP)
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+💡 Tip: For seamless cloud logging and experiment tracking, try installing [litlogger](https://pypi.org/project/litlogger/) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Experiments platform.
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/callbacks/model_checkpoint.py:881: Checkpoint directory /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/checkpoints exists and is not empty.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/utilities/model_summary/model_summary.py:242: Precision bf16-mixed is not supported by the model summary.  Estimated model size in MB will not be accurate. Using 32 bits instead.
+┏━━━┳━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃   ┃ Name  ┃ Type          ┃ Params ┃ Mode  ┃ FLOPs ┃
+┡━━━╇━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ 0 │ model │ Nova3rImgCond │  718 M │ train │     0 │
+└───┴───────┴───────────────┴────────┴───────┴───────┘
+Trainable params: 715 M                                                         
+Non-trainable params: 2.4 M                                                     
+Total params: 718 M                                                             
+Total estimated model params size (MB): 2.9 K                                   
+Modules in train mode: 1239                                                     
+Modules in eval mode: 0                                                         
+Total FLOPs: 0                                                                  
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/utilities/_pytree.py:21: `isinstance(treespec, LeafSpec)` is deprecated, use `isinstance(treespec, TreeSpec) and treespec.is_leaf()` instead.
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]/mnt/home/vyhong/projects/nova3r/nova3r/inference.py:425: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(enabled=True):
+100%|██████████| 1/1 [00:02<00:00,  2.23s/it]100%|██████████| 1/1 [00:02<00:00,  2.23s/it]
+Inference: 2.26s | Peak memory: 4863 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_0/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_0/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.80s/it]100%|██████████| 1/1 [00:01<00:00,  1.80s/it]
+Inference: 1.83s | Peak memory: 6560 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_0/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_0/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.86s/it]100%|██████████| 1/1 [00:01<00:00,  1.86s/it]
+Inference: 1.89s | Peak memory: 6560 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_1/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_1/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.87s/it]100%|██████████| 1/1 [00:01<00:00,  1.87s/it]
+Inference: 1.90s | Peak memory: 6560 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_2/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_2/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.87s/it]100%|██████████| 1/1 [00:01<00:00,  1.87s/it]
+Inference: 1.89s | Peak memory: 6560 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_3/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_3/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.86s/it]100%|██████████| 1/1 [00:01<00:00,  1.86s/it]
+Inference: 1.89s | Peak memory: 6560 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_4/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_4/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.85s/it]100%|██████████| 1/1 [00:01<00:00,  1.85s/it]
+Inference: 1.87s | Peak memory: 6560 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_5/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_5/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.84s/it]100%|██████████| 1/1 [00:01<00:00,  1.84s/it]
+Inference: 1.86s | Peak memory: 6560 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_6/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_6/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.85s/it]100%|██████████| 1/1 [00:01<00:00,  1.85s/it]
+Inference: 1.88s | Peak memory: 6560 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_7/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_7/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.78s/it]100%|██████████| 1/1 [00:01<00:00,  1.78s/it]
+Inference: 1.80s | Peak memory: 6560 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_8/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_8/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.86s/it]100%|██████████| 1/1 [00:01<00:00,  1.86s/it]
+Inference: 1.89s | Peak memory: 6560 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_9/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_25/val_points/epoch_9/pointcloud.mp4
+Done!
+`Trainer.fit` stopped: `max_epochs=10` reached.
+Epoch 9/9  ━━━━━━━━━━━━━━━━━ 50/50 0:03:01 • 0:00:00 0.28it/s v_num: 25.000     
+                                                              train_loss_step:  
+                                                              1.855 val_loss:   
+                                                              1.464             
+                                                              train_loss_epoch: 
+                                                              1.523             
+Cleaning up...
+time="2026-05-11T15:21:29-04:00" level=warning msg="StopSignal SIGTERM failed to stop container nova3r-run in 10 seconds, resorting to SIGKILL"
+nova3r-run
+Image nova3r already exists, skipping import.
+Starting container...
+c3c7d982fbcc14826c622dee3cff1b38a56da0e58ef8a43787b633820a976fd8
+Mon May 11 19:27:05 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.105.08             Driver Version: 580.105.08     CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H200 NVL                Off |   00000000:4E:00.0 Off |                    0 |
+| N/A   31C    P0             71W /  600W |       4MiB / 143771MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+Setting up environment and running commands inside container...
+Num GPUs: 1
+Mounting dataset using FUSE...
+Starting mount process...
+--------------------------
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/frl_apartment_0_000.zip
+Mount point: /tmp/datasets/replica_pano/frl_apartment_0_000
+✅ Mounted: frl_apartment_0_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/frl_apartment_2_000.zip
+Mount point: /tmp/datasets/replica_pano/frl_apartment_2_000
+✅ Mounted: frl_apartment_2_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/frl_apartment_3_000.zip
+Mount point: /tmp/datasets/replica_pano/frl_apartment_3_000
+✅ Mounted: frl_apartment_3_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/frl_apartment_4_000.zip
+Mount point: /tmp/datasets/replica_pano/frl_apartment_4_000
+✅ Mounted: frl_apartment_4_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/frl_apartment_5_000.zip
+Mount point: /tmp/datasets/replica_pano/frl_apartment_5_000
+✅ Mounted: frl_apartment_5_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/hotel_0_000.zip
+Mount point: /tmp/datasets/replica_pano/hotel_0_000
+✅ Mounted: hotel_0_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_000.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_000
+✅ Mounted: large_apartment_0_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_001.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_001
+✅ Mounted: large_apartment_0_001
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_002.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_002
+✅ Mounted: large_apartment_0_002
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_003.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_003
+✅ Mounted: large_apartment_0_003
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_004.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_004
+✅ Mounted: large_apartment_0_004
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_005.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_005
+✅ Mounted: large_apartment_0_005
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_006.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_006
+✅ Mounted: large_apartment_0_006
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_0_007.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_0_007
+✅ Mounted: large_apartment_0_007
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_1_000.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_1_000
+✅ Mounted: large_apartment_1_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_1_001.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_1_001
+✅ Mounted: large_apartment_1_001
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_2_000.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_2_000
+✅ Mounted: large_apartment_2_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_2_001.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_2_001
+✅ Mounted: large_apartment_2_001
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_2_002.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_2_002
+✅ Mounted: large_apartment_2_002
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/large_apartment_2_003.zip
+Mount point: /tmp/datasets/replica_pano/large_apartment_2_003
+✅ Mounted: large_apartment_2_003
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/office_0_000.zip
+Mount point: /tmp/datasets/replica_pano/office_0_000
+✅ Mounted: office_0_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/office_2_000.zip
+Mount point: /tmp/datasets/replica_pano/office_2_000
+✅ Mounted: office_2_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/office_3_000.zip
+Mount point: /tmp/datasets/replica_pano/office_3_000
+✅ Mounted: office_3_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/office_4_000.zip
+Mount point: /tmp/datasets/replica_pano/office_4_000
+✅ Mounted: office_4_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/room_0_000.zip
+Mount point: /tmp/datasets/replica_pano/room_0_000
+✅ Mounted: room_0_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/room_1_000.zip
+Mount point: /tmp/datasets/replica_pano/room_1_000
+✅ Mounted: room_1_000
+Mounting: /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/room_2_000.zip
+Mount point: /tmp/datasets/replica_pano/room_2_000
+✅ Mounted: room_2_000
+--------------------------
+All done! Mounts are available in /tmp/datasets/replica_pano
+Running training...
+Using bfloat16 Automatic Mixed Precision (AMP)
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+💡 Tip: For seamless cloud logging and experiment tracking, try installing [litlogger](https://pypi.org/project/litlogger/) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Experiments platform.
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/callbacks/model_checkpoint.py:881: Checkpoint directory /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/checkpoints exists and is not empty.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/utilities/model_summary/model_summary.py:242: Precision bf16-mixed is not supported by the model summary.  Estimated model size in MB will not be accurate. Using 32 bits instead.
+┏━━━┳━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃   ┃ Name  ┃ Type          ┃ Params ┃ Mode  ┃ FLOPs ┃
+┡━━━╇━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ 0 │ model │ Nova3rImgCond │  718 M │ train │     0 │
+└───┴───────┴───────────────┴────────┴───────┴───────┘
+Trainable params: 718 M                                                         
+Non-trainable params: 0                                                         
+Total params: 718 M                                                             
+Total estimated model params size (MB): 2.9 K                                   
+Modules in train mode: 1239                                                     
+Modules in eval mode: 0                                                         
+Total FLOPs: 0                                                                  
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/utilities/_pytree.py:21: `isinstance(treespec, LeafSpec)` is deprecated, use `isinstance(treespec, TreeSpec) and treespec.is_leaf()` instead.
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]/mnt/home/vyhong/projects/nova3r/nova3r/inference.py:425: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(enabled=True):
+100%|██████████| 1/1 [00:02<00:00,  2.17s/it]100%|██████████| 1/1 [00:02<00:00,  2.17s/it]
+Inference: 2.20s | Peak memory: 4863 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_0/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_0/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.88s/it]100%|██████████| 1/1 [00:01<00:00,  1.88s/it]
+Inference: 1.92s | Peak memory: 6569 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_0/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_0/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.87s/it]100%|██████████| 1/1 [00:01<00:00,  1.87s/it]
+Inference: 1.90s | Peak memory: 6569 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_1/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_1/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.82s/it]100%|██████████| 1/1 [00:01<00:00,  1.82s/it]
+Inference: 1.85s | Peak memory: 6569 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_2/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_2/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.86s/it]100%|██████████| 1/1 [00:01<00:00,  1.86s/it]
+Inference: 1.88s | Peak memory: 6569 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_3/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_3/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.88s/it]100%|██████████| 1/1 [00:01<00:00,  1.88s/it]
+Inference: 1.91s | Peak memory: 6569 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_4/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_4/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.75s/it]100%|██████████| 1/1 [00:01<00:00,  1.76s/it]
+Inference: 1.79s | Peak memory: 6569 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_5/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_5/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.89s/it]100%|██████████| 1/1 [00:01<00:00,  1.89s/it]
+Inference: 1.92s | Peak memory: 6569 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_6/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_6/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.94s/it]100%|██████████| 1/1 [00:01<00:00,  1.94s/it]
+Inference: 1.96s | Peak memory: 6569 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_7/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_7/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.87s/it]100%|██████████| 1/1 [00:01<00:00,  1.87s/it]
+Inference: 1.89s | Peak memory: 6569 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_8/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_8/pointcloud.mp4
+Done!
+>> Inference with model on 1 image pairs
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:01<00:00,  1.85s/it]100%|██████████| 1/1 [00:01<00:00,  1.85s/it]
+Inference: 1.88s | Peak memory: 6569 MB
+Saved point cloud: /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_9/pointcloud.ply
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/nova3r_img_cond_finetune_complete/nova3r_training/version_26/val_points/epoch_9/pointcloud.mp4
+Done!
+`Trainer.fit` stopped: `max_epochs=10` reached.
+Epoch 9/9  ━━━━━━━━━━━━━━━━━ 50/50 0:03:03 • 0:00:00 0.28it/s v_num: 26.000     
+                                                              train_loss_step:  
+                                                              1.517 val_loss:   
+                                                              1.773             
+                                                              train_loss_epoch: 
+                                                              1.472             
+Cleaning up...
+time="2026-05-11T16:02:28-04:00" level=warning msg="StopSignal SIGTERM failed to stop container nova3r-run in 10 seconds, resorting to SIGKILL"
+nova3r-run

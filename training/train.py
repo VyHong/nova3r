@@ -12,9 +12,8 @@ from demo_nova3r import load_model
 def parse_args():
     parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
     parser.add_argument("--ckpt", default="checkpoints/scene_n2/checkpoint-last.pth", help="Path to model checkpoint")
-    #parser.add_argument("--output_dir", default="demo/outputs/", help="Output directory (default: demo/outputs/)")
     parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
-    parser.add_argument("--aggregator_ckpt", default="./checkpoints/scene_n2/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
+    parser.add_argument("--aggregator_ckpt", default="./checkpoints/da3/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
     args = parser.parse_args()
 
     return args
@@ -31,7 +30,8 @@ def load_data_config(ckpt_path):
 
 def main():
     # Set up data
-    torch.cuda.memory._record_memory_history()
+    #torch.cuda.memory._record_memory_history()
+    torch.set_float32_matmul_precision('medium')
     args = parse_args()
 
     model, cfg = load_model(args.ckpt, args.device, aggregator_ckpt=args.aggregator_ckpt)
@@ -52,7 +52,8 @@ def main():
         dirpath=os.path.join(cfg.output_dir, "checkpoints"),
         filename="{epoch:02d}-{val_loss:.2f}",
         save_top_k=1,
-        monitor="val_loss",
+        save_last=True,
+        monitor="train_loss_epoch",
         mode="min",
     )
     lr_monitor = LearningRateMonitor(logging_interval="step")
@@ -65,31 +66,9 @@ def main():
         logger=logger,
         callbacks=[checkpoint_callback, lr_monitor],
         precision=cfg.amp_dtype,
-        log_every_n_steps=10,
+        log_every_n_steps=1,
     )
 
-    # # --- THE ULTIMATE SMOKE TEST ---
-    # print("1. Initializing Model & Data...")
-    # device = torch.device("cuda")
-    # module.to(device)
-
-    # print("2. Testing DataLoader Initialization...")
-    # datamodule.setup()
-    # train_loader = datamodule.train_dataloader() # or your datamodule.train_dataloader()
-    # iterator = iter(train_loader)
-
-    # print("3. Attempting to fetch ONE batch...")
-    # # This is where 90% of "100% CPU" hangs happen
-    # batch = next(iterator) 
-    # print("Batch fetched successfully!")
-
-    # print("4. Attempting ONE forward pass...")
-    # # This is the other 10%
-    # with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
-    #     module.train()
-    #     output = module.training_step(batch, 0)
-    #     print("Forward pass successful!")
-    # # -------------------------------
     trainer.fit(module, datamodule=datamodule)
 
 

@@ -123,10 +123,10 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
         new_ckpt = dict(ckpt)
         if self.cfg.aggregator.name == "DepthAnything3Net":
             state_dict = load_file(kw.get("aggregator_ckpt", ""))
-            self.aggregator.load_state_dict(state_dict, strict=False)
+            self.da3_aggregator.load_state_dict(state_dict, strict=False)
 
         # manually set
-        return super().load_state_dict(new_ckpt, kw.get("strict", True))
+        return super().load_state_dict(new_ckpt, strict=False)
 
     def _encode_scene(self, img_tokens, input_pts3d):
         """Encode input images through VGGT backbone to get visual tokens."""
@@ -188,11 +188,12 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
     def forward_da3(
         self,
         images: torch.Tensor,
+        ref_view_strategy: str = "first",
     ):
         if len(images.shape) == 4:
             images = images.unsqueeze(0)
 
-        aggregated_tokens_list, aggregated_tokens_3d_list, patch_start_idx, patch_tokens = self.da3_aggregator(images)
+        aggregated_tokens_list, aggregated_tokens_3d_list, patch_start_idx, patch_tokens = self.da3_aggregator(images, ref_view_strategy=ref_view_strategy)
 
         pts3d = None
         pts3d_conf = None
@@ -201,8 +202,9 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
 
     def _encode(self, images, test=False, **kwargs):
         """Project visual tokens to 3D token space with optional learned token initialization."""
+
         if self.cfg.aggregator.name == "DepthAnything3Net":
-            aggregated_tokens_list, pts3d, pts3d_conf = self.forward_da3(images)
+            aggregated_tokens_list, pts3d, pts3d_conf = self.forward_da3(images,ref_view_strategy="first")
         elif self.cfg.aggregator.name == "AggregatorPts3D":
             aggregated_tokens_list, pts3d, pts3d_conf = self.forward_vggt(images)
 

@@ -9,18 +9,16 @@ import cv2
 import numpy as np
 import pickle
 from pathlib import Path
-from pprint import pprint
 import open3d as o3d
+import torch
 from torchvision import transforms
 # This prints every directory Python is currently searching
 from training.data.dataset_utils import read_image_cv2
 from training.data.datasets.replica_utils.igibson_utils import ReplicaPanoScene
 from training.data.base_dataset import BaseDataset
 import cv2
-import gc
-import psutil
 import os
-
+from trimesh.proximity import signed_distance
 class ReplicaPanoDataset(BaseDataset):
     """
     ReplicaPano Dataset implementation for loading 360-degree panoramic scenes.
@@ -142,7 +140,6 @@ class ReplicaPanoDataset(BaseDataset):
             Returns:
                 dict: A batch of data including images, depths, and other metadata.
             """
-                
             if seq_name is None:
                 seq_name = self.sequence_list[seq_index]
             if subseq_ids is None:
@@ -174,7 +171,12 @@ class ReplicaPanoDataset(BaseDataset):
                 replica_scene = ReplicaPanoScene.from_pickle(anno['pkl_path'])
 
                 scene_pcd = o3d.io.read_point_cloud(anno['world_points_path'])
-                scene_pcd_np = np.asarray(scene_pcd.points).copy()
+                # layout_polygon = replica_scene.save_layout_mesh(to_world_space=True)
+                # example_points = self.crop_3d_volume_with_padding(np.asarray(scene_pcd.points), layout_polygon)
+                # self.save_debug_points(example_points, output_dir="debug_points", filename=f"{seq_name}_{id}_cropped_pc.ply")
+
+                with open(anno['camera_data'], 'r') as f:
+                    camera_data = json.load(f)
 
                 for i, subseq_id in enumerate(subseq_ids):
                     filepath = anno['subsequence_images'][subseq_id]
@@ -186,8 +188,6 @@ class ReplicaPanoDataset(BaseDataset):
                     image = self.img_norm(image)
                     original_size = np.array(image.shape[1:])
 
-                    with open(anno['camera_data'], 'r') as f:
-                        camera_data = json.load(f)
 
                     subseq_intrinsics = np.array(camera_data[f"{subseq_id:04d}"]['intrinsics'])
                     subseq_w2c = np.array(camera_data[f"{subseq_id:04d}"]['extrinsics'])
@@ -199,20 +199,17 @@ class ReplicaPanoDataset(BaseDataset):
                     ])
 
                     scene_w2c = replica_scene.transform_3d.camera['world2cam3d']
-                    #scene_w2c = np.eye(4)  # Placeholder for actual world-to-camera transformation
                     colmap_scene_w2c = T_to_colmap @ scene_w2c @ T_to_colmap.T
 
                     image_extrinsics = subseq_w2c @ colmap_scene_w2c
 
                     if i == 0:
 
-                        colmap_points = self.transform_points_pre(scene_pcd_np, T_to_colmap)
-                        #colmap_points = np.zeros((10000, 3), dtype=np.float16)  # Placeholder for actual point cloud data
-                        cam_points = self.transform_points_pre(colmap_points, image_extrinsics)
+                        colmap_points = scene_pcd.transform(T_to_colmap)
+                        cam_points =  colmap_points.transform(image_extrinsics)
 
-                        world_points = np.asarray(colmap_points)
-                        #world_points  = colmap_points
-                        cam_points = np.asarray(cam_points)
+                        world_points = np.asarray(colmap_points.points)
+                        cam_points = np.asarray(cam_points.points)
                         point_masks = np.ones(len(world_points), dtype=bool)
 
                         #self.save_debug_points(world_points, output_dir="debug_points", filename=f"{seq_name}_{id}_world_points.ply")
@@ -225,9 +222,6 @@ class ReplicaPanoDataset(BaseDataset):
 
 
             set_name = "replica_pano"
-            #del scene_pcd
-            #del replica_scene
-            gc.collect()
             batch = {
                 "seq_name": set_name + "_" + seq_name,
                 "id": id,
@@ -242,8 +236,6 @@ class ReplicaPanoDataset(BaseDataset):
                 "original_sizes": original_sizes,
             }
 
-            process = psutil.Process(os.getpid())
-            print(f"OS-reported RAM (RSS): {process.memory_info().rss / 1024 / 1024:.2f} MB")
             return batch
 
     def __getitem__(self, index):
@@ -278,7 +270,10 @@ class ReplicaPanoDataset(BaseDataset):
         import numpy as np
         
         os.makedirs(output_dir, exist_ok=True)
-        pts_np = points.cpu().numpy() if hasattr(points, 'cpu') else np.asarray(points)
+        if not isinstance(points,np.ndarray):
+            pts_np = np.asarray(points.points)
+        else:
+            pts_np = points
         pts_np = pts_np.reshape(-1, 3)
         
         ply_path = os.path.join(output_dir, filename)
@@ -290,6 +285,19 @@ class ReplicaPanoDataset(BaseDataset):
                 f.write(f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")
         
         print(f"Saved {ply_path}")
+
+    def crop_3d_volume_with_padding(self,point_cloud, mesh, padding=0.1):
+        """
+        Crops a 3D point cloud to keep points inside a 3D mesh, plus a padding buffer outside.
+        """
+        distances = signed_distance(mesh, point_cloud)
+        
+        # 3. Keep points that are inside (> 0) OR within the padding distance outside (>= -padding)
+        # Example: If padding is 2.0, we keep anything >= -2.0
+        mask = distances >= -padding
+        
+        return point_cloud[mask]
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test ReplicaPanoDataset")

@@ -293,27 +293,27 @@ class Nova3rPtsCond(nn.Module, PyTorchModelHubMixin):
 
         num_views = torch.ones(B, device=images.device) * S
 
-        with torch.cuda.amp.autocast(enabled=False):
-            tokens = tokens.float()
+        # with torch.cuda.amp.autocast(enabled=False):
+        #     tokens = tokens.float()
 
-            if self.pts3d_head is not None:
-                aggregated_tokens_3d_list = [tokens]
+        if self.pts3d_head is not None:
+            aggregated_tokens_3d_list = [tokens]
 
-                pts3d_xyz = self.pts3d_head(
-                    aggregated_tokens_3d_list,
-                    mask=token_mask,
-                    query_points=query_points,
-                    timestep=timestep,
-                    num_views=num_views,
-                )
+            pts3d_xyz = self.pts3d_head(
+                aggregated_tokens_3d_list,
+                mask=token_mask,
+                query_points=query_points,
+                timestep=timestep,
+                num_views=num_views,
+            )
 
-                predictions["pts3d_xyz"] = pts3d_xyz
-                predictions["pts3d_xyz_rel"] = pts3d_xyz
-                predictions["pts3d_rgb"] = pts3d_xyz
-                predictions["pts3d_conf"] = torch.ones_like(pts3d_xyz[..., [0]])
-                predictions["center_xyz"] = pts3d_xyz
-                predictions["query_points"] = query_points
-                predictions["timestep"] = timestep
+            predictions["pts3d_xyz"] = pts3d_xyz
+            predictions["pts3d_xyz_rel"] = pts3d_xyz
+            predictions["pts3d_rgb"] = pts3d_xyz
+            predictions["pts3d_conf"] = torch.ones_like(pts3d_xyz[..., [0]])
+            predictions["center_xyz"] = pts3d_xyz
+            predictions["query_points"] = query_points
+            predictions["timestep"] = timestep
 
         predictions["images"] = images
         predictions["S"] = S

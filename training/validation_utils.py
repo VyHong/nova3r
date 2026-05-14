@@ -64,6 +64,4 @@ def generate_example(cfg,model,images,num_queries,log_dir,device,current_epoch):
     ply_path = save_pointcloud(pts3d, scene_dir)
     render_360_video(ply_path, scene_dir)
 
-    # if len(args.images) == 2:
-
     print("Done!")

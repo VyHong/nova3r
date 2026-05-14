@@ -443,6 +443,7 @@ class AggregatorPts3D(nn.Module):
                 The list of outputs from the attention blocks,
                 and the patch_start_idx indicating where patch tokens begin.
         """
+
         B, S, C_in, H, W = images.shape
 
         if C_in != 3:
@@ -453,6 +454,7 @@ class AggregatorPts3D(nn.Module):
 
         # Reshape to [B*S, C, H, W] for patch embedding
         images = images.view(B * S, C_in, H, W)
+
         patch_tokens = self.patch_embed(images)
 
         if isinstance(patch_tokens, dict):

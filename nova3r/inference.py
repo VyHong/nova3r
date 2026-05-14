@@ -21,7 +21,7 @@ from nova3r.flow_matching.solver import ODESolver
 from nova3r.models.model_wrapper import BatchModelWrapper
 from nova3r.utils.sampling import sampling_train_gen_target
 from einops import rearrange
-
+import numpy as np
 path = AffineProbPath(scheduler=CosineScheduler())
 
 amp_dtype_mapping = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32, "tf32": torch.float32}
@@ -379,6 +379,7 @@ def loss_of_one_batch_demo(
 
     images = torch.stack(img_src_list, dim=1)
     images = images[:, :n_views, ...]  # Use only n_views
+    #images = torch.zeros_like(images) # Replace with black images
 
     def process_point(args, images, pts3d_src, token_mask, num_queries, device, model_wrapper=None, method="euler"):
         step_size = args.fm_step_size
@@ -396,6 +397,10 @@ def loss_of_one_batch_demo(
 
         model.eval()
         x_init = torch.rand((B, point_size, 3), dtype=torch.float32, device=device) * 2 - 1
+
+        #x_init = np.load("fixed_noise_16k.npy")
+        #x_init = torch.from_numpy(x_init).to(device)
+
         solver = ODESolver(velocity_model=wrapped_vf)
 
         if hasattr(model, "module"):

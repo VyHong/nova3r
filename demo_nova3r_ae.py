@@ -55,12 +55,18 @@ def run_inference(model, cfg, pts_np, device, num_queries=50000):
     B = 1
 
     pts = torch.from_numpy(pts_np).unsqueeze(0).to(device)  # (1, N, 3)
+    pts = pts.to(dtype=torch.float16)  
     valid = torch.ones(B, pts.shape[1], dtype=torch.bool, device=device)
 
     norm_mode = cfg.model.params.cfg.pts3d_head.params.get('norm_mode', 'none')
     pts, _ = normalize_input(pts, valid, pts, valid, mode=norm_mode)
 
-    encoder_data = model._encode(pointmaps=pts, test=True)
+    amp_dtype_key = cfg.get("amp_dtype", "bf16")
+    amp_dtype = amp_dtype_mapping.get(amp_dtype_key, torch.float32)
+    use_amp = (device != "cpu")
+
+    with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
+        encoder_data = model._encode(pointmaps=pts, test=True)
 
     # Dummy images tensor (AE doesn't use images but _decode expects the shape)
     images = torch.zeros(B, 1, 3, 1, 1, device=device)
@@ -74,12 +80,10 @@ def run_inference(model, cfg, pts_np, device, num_queries=50000):
     method = cfg.get("fm_sampling", "euler")
     num_steps = int(1 // step_size)
 
-    amp_dtype_key = cfg.get("amp_dtype", "bf16")
-    amp_dtype = amp_dtype_mapping.get(amp_dtype_key, torch.float32)
+
 
     T = torch.linspace(0, 1, num_steps).to(device)
 
-    use_amp = (device != "cpu")
     with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
         sol = solver.sample(
             time_grid=T,
@@ -123,7 +127,7 @@ def main():
     start_time = time.time()
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
-
+    model.eval()
     with torch.no_grad():
         pts3d = run_inference(model, cfg, pts_np, args.device, num_queries=args.num_queries)
 
