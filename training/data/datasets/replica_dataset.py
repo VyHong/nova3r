@@ -7,18 +7,15 @@ import os
 import argparse
 import cv2
 import numpy as np
-import pickle
 from pathlib import Path
 import open3d as o3d
-import torch
 from torchvision import transforms
-# This prints every directory Python is currently searching
 from training.data.dataset_utils import read_image_cv2
 from training.data.datasets.replica_utils.igibson_utils import ReplicaPanoScene
 from training.data.base_dataset import BaseDataset
 import cv2
 import os
-from trimesh.proximity import signed_distance
+
 class ReplicaPanoDataset(BaseDataset):
     """
     ReplicaPano Dataset implementation for loading 360-degree panoramic scenes.
@@ -49,25 +46,29 @@ class ReplicaPanoDataset(BaseDataset):
         self.data_root = Path(data_root)
         self.split = split
 
-        with open(scenes_list_path, 'r') as f:
-            self.scenes_list = json.load(f)
-
+        
         self.sequence_list = []
-        for scene in self.scenes_list:
-            self.sequence_list.append(f"{scene.split(' ')[0]}")
+        if scenes_list_path is None:
+            self._load_scenes_list()
+            self.scenes_list = [f"{scene} {i:05}" for i in range(100) for scene in self.sequence_list]  
+        else:
+            with open(scenes_list_path, 'r') as f:
+                self.scenes_list = json.load(f)
+            for scene in self.scenes_list:
+                self.sequence_list.append(f"{scene.split(' ')[0]}")
 
         self.data_store = {}
         self._load_metadata()
 
         self.img_norm = transforms.Compose(
-            [
+            [   
                 transforms.ToTensor(),
             ]
         )
 
 
     def __len__(self):
-        return len(self.sequence_list)
+        return len(self.scenes_list)
 
         
     def _load_scenes_list(self):
@@ -169,11 +170,9 @@ class ReplicaPanoDataset(BaseDataset):
             for anno in annos:
                 
                 replica_scene = ReplicaPanoScene.from_pickle(anno['pkl_path'])
-
                 scene_pcd = o3d.io.read_point_cloud(anno['world_points_path'])
-                # layout_polygon = replica_scene.save_layout_mesh(to_world_space=True)
-                # example_points = self.crop_3d_volume_with_padding(np.asarray(scene_pcd.points), layout_polygon)
-                # self.save_debug_points(example_points, output_dir="debug_points", filename=f"{seq_name}_{id}_cropped_pc.ply")
+                if seq_name.startswith("large_apartment"):
+                    pass
 
                 with open(anno['camera_data'], 'r') as f:
                     camera_data = json.load(f)
@@ -211,7 +210,6 @@ class ReplicaPanoDataset(BaseDataset):
                         world_points = np.asarray(colmap_points.points)
                         cam_points = np.asarray(cam_points.points)
                         point_masks = np.ones(len(world_points), dtype=bool)
-
                         #self.save_debug_points(world_points, output_dir="debug_points", filename=f"{seq_name}_{id}_world_points.ply")
                         #self.save_debug_points(cam_points, output_dir="debug_points", filename=f"{seq_name}_{id}_cam_points.ply")
 
@@ -219,7 +217,6 @@ class ReplicaPanoDataset(BaseDataset):
                     original_sizes.append(original_size)
                     extrinsics.append(image_extrinsics)
                     intrinsics.append(subseq_intrinsics)
-
 
             set_name = "replica_pano"
             batch = {
@@ -286,18 +283,6 @@ class ReplicaPanoDataset(BaseDataset):
         
         print(f"Saved {ply_path}")
 
-    def crop_3d_volume_with_padding(self,point_cloud, mesh, padding=0.1):
-        """
-        Crops a 3D point cloud to keep points inside a 3D mesh, plus a padding buffer outside.
-        """
-        distances = signed_distance(mesh, point_cloud)
-        
-        # 3. Keep points that are inside (> 0) OR within the padding distance outside (>= -padding)
-        # Example: If padding is 2.0, we keep anything >= -2.0
-        mask = distances >= -padding
-        
-        return point_cloud[mask]
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test ReplicaPanoDataset")
@@ -323,13 +308,16 @@ if __name__ == "__main__":
         common_conf=common_conf,
         data_root=args.data_root,
         split=args.split,
-        scenes_list_path="/workspaces/projects/nova3r/data/replica_pano/train_list.json"
+        #scenes_list_path="/workspaces/projects/nova3r/data/replica_pano/train_list.json"
     )
 
     print(f"Dataset length: {len(dataset)}")
-
-    # Test data retrieval
-    batch = dataset[0]
-    print(f"Batch keys: {batch.keys()}")
-    print(f"Batch seq_name: {batch['seq_name']}")
-    print(f"Batch frame_num: {batch['frame_num']}")
+    
+    for scene in dataset:
+        print(f"Scene: {scene['seq_name']}, ID: {scene['id']}, Frame Num: {scene['frame_num']}")
+        print(f"Image shapes: {[img.shape for img in scene['images']]}")
+        print(f"Extrinsics shapes: {[ext.shape for ext in scene['extrinsics']]}")
+        print(f"Intrinsics shapes: {[int.shape for int in scene['intrinsics']]}")
+        print(f"Cam points shape: {scene['cam_points'].shape}")
+        print(f"World points shape: {scene['world_points'].shape}")
+        print(f"Point masks shape: {scene['point_masks'].shape}")

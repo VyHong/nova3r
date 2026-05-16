@@ -398,9 +398,6 @@ def loss_of_one_batch_demo(
         model.eval()
         x_init = torch.rand((B, point_size, 3), dtype=torch.float32, device=device) * 2 - 1
 
-        #x_init = np.load("fixed_noise_16k.npy")
-        #x_init = torch.from_numpy(x_init).to(device)
-
         solver = ODESolver(velocity_model=wrapped_vf)
 
         if hasattr(model, "module"):

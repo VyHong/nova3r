@@ -132,12 +132,13 @@ def detectron_gt_sample(data, idx=None):
     return record
 
 def pickle_path(path):
-    if not os.path.splitext(path)[1]:
-        camera_folder = path
-        pickle_file = os.path.join(path, 'data.pkl')
-    elif path.suffix == '.pkl':
-        camera_folder = os.path.dirname(path)
-        pickle_file = path
+    path_str = str(path)
+    if not os.path.splitext(path_str)[1]:
+        camera_folder = path_str
+        pickle_file = os.path.join(path_str, 'data.pkl')
+    elif path_str.endswith('.pkl'):
+        camera_folder = os.path.dirname(path_str)
+        pickle_file = path_str
     else:
         raise Exception('Input path can be either folder or pkl file')
     os.makedirs(camera_folder, exist_ok=True)

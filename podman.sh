@@ -35,12 +35,19 @@ podman run -v /mnt:/mnt:rw \
     -v /usr/bin/start-ssh-server:/usr/bin/start-ssh-server:ro \
     -v /etc/ssh/node_rsa_key:/etc/ssh/node_rsa_key \
     -v ~/.ssh/authorized_keys:/root/.ssh/authorized_keys \
-    -w /mnt/home/${USER} \
+    -w /mnt/home/${USER}/projects/nova3r \
+    --cap-add=SYS_ADMIN \
+    --cap-add=SYS_PTRACE \
+    --cap-add=IPC_LOCK \
+    --cap-add=DAC_READ_SEARCH \
+    --cap-drop=MKNOD \
+    --security-opt=apparmor:unconfined \
+    --security-opt=seccomp=unconfined \
     --device=nvidia.com/gpu=all \
     --network=host -e USER=root --replace \
     -e PORT=$(python -c "import random; print(random.randint(20000,30000))") \
     --name=nova3r \
-    --shm-size=16gb \
+    --shm-size=32gb \
     -e CUDA_VISIBLE_DEVICES=0 \
     --device=/dev/fuse \
     -d \
@@ -56,7 +63,7 @@ alias RUN='podman exec nova3r'
 RUN nvidia-smi
 RUN python3 -c 'import torch; print(f"Num GPUs: {torch.cuda.device_count()}")'
 
-sleep 1h
+sleep infinity
 
 # Commit changes to image
 # podman commit example example

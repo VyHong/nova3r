@@ -152,9 +152,6 @@ class MultiLoss (nn.Module):
 
         return loss, details
 
-
-
-
 class Pts3D_Regr3D_CD_V4(Criterion, MultiLoss):
     """Chamfer Distance loss for 3D point cloud evaluation. Computes bidirectional Chamfer Distance and F-Score between predicted and ground truth point clouds."""
 
@@ -172,7 +169,6 @@ class Pts3D_Regr3D_CD_V4(Criterion, MultiLoss):
         gt_valid = pred_dict['target_valid']
 
         pr_pts = pred_dict['pts3d_xyz']
-
 
         B = pr_pts.shape[0]
         loss_forward_list = []
@@ -210,3 +206,24 @@ class Pts3D_Regr3D_CD_V4(Criterion, MultiLoss):
                     self_name + '_cd': float(loss_cd.mean())}
 
         return Sum((loss_acc, None), (loss_com, None), (loss_cd, None)), (details | {})
+
+class FMVelocity(Criterion, MultiLoss):
+    """F-Score for 3D point cloud evaluation. Computes F-Score between predicted and ground truth point clouds based on a specified distance threshold."""
+
+    def __init__(self, criterion, norm_mode='avg_dis'):
+        super().__init__(criterion)
+
+    def compute_loss(self, gt_list, pred_dict, **kw):
+
+        gt_velocity = gt_list['velocity_trg']
+        valid_trg = gt_list.get('valid_trg', None)
+        pred_velocity = pred_dict['velocity_pred']
+
+        gt_velocity_valid = gt_velocity[valid_trg.bool()] if valid_trg is not None else gt_velocity
+        pred_velocity_valid = pred_velocity[valid_trg.bool()] if valid_trg is not None else pred_velocity
+        
+        loss = self.criterion(pred_velocity_valid, gt_velocity_valid)
+
+        details = {type(self.criterion).__name__: float(loss)}
+
+        return loss, details

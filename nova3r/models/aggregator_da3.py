@@ -11,407 +11,435 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""
+Depth Anything 3 API module.
+
+This module provides the main API for Depth Anything 3, including model loading,
+inference, and export capabilities. It supports both single and nested model architectures.
+"""
 
 from __future__ import annotations
 
+import time
+from typing import Optional, Sequence
+import numpy as np
 import torch
 import torch.nn as nn
-from addict import Dict
-from omegaconf import DictConfig, OmegaConf
+from huggingface_hub import PyTorchModelHubMixin
+from PIL import Image
 
-from depth_anything_3.model.utils.attention import Mlp
-from depth_anything_3.cfg import create_object
-from depth_anything_3.model.utils.transform import pose_encoding_to_extri_intri
-from depth_anything_3.utils.alignment import (
-    apply_metric_scaling,
-    compute_alignment_mask,
-    compute_sky_mask,
-    least_squares_scale_scalar,
-    sample_tensor_for_quantile,
-    set_sky_regions_to_max_depth,
-)
-from depth_anything_3.utils.geometry import affine_inverse, as_homogeneous, map_pdf_to_opacity
-from depth_anything_3.utils.ray_utils import get_extrinsic_from_camray
+from depth_anything_3.cfg import create_object, load_config
+from depth_anything_3.specs import Prediction
+# from depth_anything_3.utils.export import export
+from depth_anything_3.utils.geometry import affine_inverse
+from depth_anything_3.utils.io.input_processor import InputProcessor
+from depth_anything_3.utils.io.output_processor import OutputProcessor
+from depth_anything_3.utils.logger import logger
+from depth_anything_3.utils.pose_align import align_poses_umeyama
+
+from depth_anything_3.da3 import DepthAnything3Net
+torch.backends.cudnn.benchmark = False
+from torchvision import transforms
+# logger.info("CUDNN Benchmark Disabled")
+
+SAFETENSORS_NAME = "model.safetensors"
+CONFIG_NAME = "config.json"
 
 
-def _wrap_cfg(cfg_obj):
-    return OmegaConf.create(cfg_obj)
-
-
-class DepthAnything3Net(nn.Module):
+class DepthAnything3(nn.Module, PyTorchModelHubMixin):
     """
-    Depth Anything 3 network for depth estimation and camera pose estimation.
+    Depth Anything 3 main API class.
 
-    This network consists of:
-    - Backbone: DinoV2 feature extractor
-    - Head: DPT or DualDPT for depth prediction
-    - Optional camera decoders for pose estimation
-    - Optional GSDPT for 3DGS prediction
+    This class provides a high-level interface for depth estimation using Depth Anything 3.
+    It supports both single and nested model architectures with metric scaling capabilities.
 
-    Args:
-        preset: Configuration preset containing network dimensions and settings
+    Features:
+    - Hugging Face Hub integration via PyTorchModelHubMixin
+    - Support for multiple model presets (vitb, vitg, nested variants)
+    - Automatic mixed precision inference
+    - Export capabilities for various formats (GLB, PLY, NPZ, etc.)
+    - Camera pose estimation and metric depth scaling
 
-    Returns:
-        Dictionary containing:
-        - depth: Predicted depth map (B, H, W)
-        - depth_conf: Depth confidence map (B, H, W)
-        - extrinsics: Camera extrinsics (B, N, 4, 4)
-        - intrinsics: Camera intrinsics (B, N, 3, 3)
-        - gaussians: 3D Gaussian Splats (world space), type: model.gs_adapter.Gaussians
-        - aux: Auxiliary features for specified layers
+    Usage:
+        # Load from Hugging Face Hub
+        model = DepthAnything3.from_pretrained("huggingface/model-name")
+
+        # Or create with specific preset
+        model = DepthAnything3(preset="vitg")
+
+        # Run inference
+        prediction = model.inference(images, export_dir="output", export_format="glb")
     """
 
-    # Patch size for feature extraction
-    PATCH_SIZE = 14
+    _commit_hash: str | None = None  # Set by mixin when loading from Hub
 
-    def __init__(self, net, head, cam_dec=None, cam_enc=None, gs_head=None, gs_adapter=None, token_3d=None, **kwargs):
+    def __init__(self, cfg ,**kwargs):
         """
-        Initialize DepthAnything3Net with given yaml-initialized configuration.
+        Initialize DepthAnything3 with specified preset.
+
+        Args:
+        model_name: The name of the model preset to use.
+                    Examples: 'da3-giant', 'da3-large', 'da3metric-large', 'da3nested-giant-large'.
+        **kwargs: Additional keyword arguments (currently unused).
         """
         super().__init__()
-        self.backbone = net if isinstance(net, nn.Module) else create_object(_wrap_cfg(net))
-        self.head = head if isinstance(head, nn.Module) else create_object(_wrap_cfg(head))
+        self.cfg = cfg
 
-        self.cam_dec, self.cam_enc = None, None
-        if cam_dec is not None:
-            self.cam_dec = cam_dec if isinstance(cam_dec, nn.Module) else create_object(_wrap_cfg(cam_dec))
-            self.cam_enc = cam_enc if isinstance(cam_enc, nn.Module) else create_object(_wrap_cfg(cam_enc))
+        # Build the underlying network
+        self.model = DepthAnything3Net(**self.cfg.aggregator)
 
-        self.gs_adapter, self.gs_head = None, None
-        if gs_head is not None and gs_adapter is not None:
-            self.gs_adapter = gs_adapter if isinstance(gs_adapter, nn.Module) else create_object(_wrap_cfg(gs_adapter))
-            gs_out_dim = self.gs_adapter.d_in + 1
-            if isinstance(gs_head, nn.Module):
-                assert gs_head.out_dim == gs_out_dim, f"gs_head.out_dim should be {gs_out_dim}, got {gs_head.out_dim}"
-                self.gs_head = gs_head
-            else:
-                assert gs_head["output_dim"] == gs_out_dim, f"gs_head output_dim should set to {gs_out_dim}, got {gs_head['output_dim']}"
-                self.gs_head = create_object(_wrap_cfg(gs_head))
+        # Initialize processors
+        self.input_processor = InputProcessor()
+        self.output_processor = OutputProcessor()
+
+        # Device management (set by user)
+        self.device = None
 
     def forward(
         self,
-        x: torch.Tensor,
+        image: torch.Tensor,
         extrinsics: torch.Tensor | None = None,
         intrinsics: torch.Tensor | None = None,
         export_feat_layers: list[int] | None = [],
         infer_gs: bool = False,
         use_ray_pose: bool = False,
         ref_view_strategy: str = "saddle_balanced",
-    ) -> Dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor]:
         """
-        Forward pass through the network.
+        Forward pass through the model.
 
         Args:
-            x: Input images (B, N, 3, H, W)
-            extrinsics: Camera extrinsics (B, N, 4, 4)
-            intrinsics: Camera intrinsics (B, N, 3, 3)
-            feat_layers: List of layer indices to extract features from
-            infer_gs: Enable Gaussian Splatting branch
-            use_ray_pose: Use ray-based pose estimation
-            ref_view_strategy: Strategy for selecting reference view
+            image: Input batch with shape ``(B, N, 3, H, W)`` on the model device.
+            extrinsics: Optional camera extrinsics with shape ``(B, N, 4, 4)``.
+            intrinsics: Optional camera intrinsics with shape ``(B, N, 3, 3)``.
+            export_feat_layers: Layer indices to return intermediate features for.
+            infer_gs: Enable Gaussian Splatting branch.
+            use_ray_pose: Use ray-based pose estimation instead of camera decoder.
+            ref_view_strategy: Strategy for selecting reference view from multiple views.
 
         Returns:
-            Dictionary containing predictions and auxiliary features
+            Dictionary containing model predictions
         """
-        # Extract features using backbone
-        if extrinsics is not None:
-            with torch.autocast(device_type=x.device.type, enabled=False):
-                cam_token = self.cam_enc(extrinsics, intrinsics, x.shape[-2:])
-        else:
-            cam_token = None
-
-        feats, output_3d_list, aux_feats = self.backbone(x, cam_token=cam_token, export_feat_layers=export_feat_layers, ref_view_strategy=ref_view_strategy)
-
-        return feats, output_3d_list, aux_feats, []
-        # feats = [[item for item in feat] for feat in feats]
-        H, W = x.shape[-2], x.shape[-1]
-
-        # Process features through depth head
-        with torch.autocast(device_type=x.device.type, enabled=False):
-            output = self._process_depth_head(feats, H, W)
-            if use_ray_pose:
-                output = self._process_ray_pose_estimation(output, H, W)
-            else:
-                output = self._process_camera_estimation(feats, H, W, output)
-            if infer_gs:
-                output = self._process_gs_head(feats, H, W, output, x, extrinsics, intrinsics)
-
-        output = self._process_mono_sky_estimation(output)
-
-        # Extract auxiliary features if requested
-        output.aux = self._extract_auxiliary_features(aux_feats, export_feat_layers, H, W)
-
-        return output
-
-    def _process_mono_sky_estimation(self, output: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Process mono sky estimation."""
-        if "sky" not in output:
-            return output
-        non_sky_mask = compute_sky_mask(output.sky, threshold=0.3)
-        if non_sky_mask.sum() <= 10:
-            return output
-        if (~non_sky_mask).sum() <= 10:
-            return output
-
-        non_sky_depth = output.depth[non_sky_mask]
-        if non_sky_depth.numel() > 100000:
-            idx = torch.randint(0, non_sky_depth.numel(), (100000,), device=non_sky_depth.device)
-            sampled_depth = non_sky_depth[idx]
-        else:
-            sampled_depth = non_sky_depth
-        non_sky_max = torch.quantile(sampled_depth, 0.99)
-
-        # Set sky regions to maximum depth and high confidence
-        output.depth, _ = set_sky_regions_to_max_depth(output.depth, None, non_sky_mask, max_depth=non_sky_max)
-        return output
-
-    def _process_ray_pose_estimation(self, output: Dict[str, torch.Tensor], height: int, width: int) -> Dict[str, torch.Tensor]:
-        """Process ray pose estimation if ray pose decoder is available."""
-        if "ray" in output and "ray_conf" in output:
-            pred_extrinsic, pred_focal_lengths, pred_principal_points = get_extrinsic_from_camray(
-                output.ray,
-                output.ray_conf,
-                output.ray.shape[-3],
-                output.ray.shape[-2],
+        # Determine optimal autocast dtype
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        image = normalize(image)
+        autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        with torch.autocast(device_type=image.device.type, dtype=autocast_dtype):
+            return self.model(
+                image, extrinsics, intrinsics, export_feat_layers, infer_gs, use_ray_pose, ref_view_strategy
             )
-            pred_extrinsic = affine_inverse(pred_extrinsic)  # w2c -> c2w
-            pred_extrinsic = pred_extrinsic[:, :, :3, :]
-            pred_intrinsic = torch.eye(3, 3)[None, None].repeat(pred_extrinsic.shape[0], pred_extrinsic.shape[1], 1, 1).clone().to(pred_extrinsic.device)
-            pred_intrinsic[:, :, 0, 0] = pred_focal_lengths[:, :, 0] / 2 * width
-            pred_intrinsic[:, :, 1, 1] = pred_focal_lengths[:, :, 1] / 2 * height
-            pred_intrinsic[:, :, 0, 2] = pred_principal_points[:, :, 0] * width * 0.5
-            pred_intrinsic[:, :, 1, 2] = pred_principal_points[:, :, 1] * height * 0.5
-            del output.ray
-            del output.ray_conf
-            output.extrinsics = pred_extrinsic
-            output.intrinsics = pred_intrinsic
-        return output
 
-    def _process_depth_head(self, feats: list[torch.Tensor], H: int, W: int) -> Dict[str, torch.Tensor]:
-        """Process features through the depth prediction head."""
-        return self.head(feats, H, W, patch_start_idx=0)
-
-    def _process_camera_estimation(self, feats: list[torch.Tensor], H: int, W: int, output: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Process camera pose estimation if camera decoder is available."""
-        if self.cam_dec is not None:
-            pose_enc = self.cam_dec(feats[-1][1])
-            # Remove ray information as it's not needed for pose estimation
-            if "ray" in output:
-                del output.ray
-            if "ray_conf" in output:
-                del output.ray_conf
-
-            # Convert pose encoding to extrinsics and intrinsics
-            c2w, ixt = pose_encoding_to_extri_intri(pose_enc, (H, W))
-            output.extrinsics = affine_inverse(c2w)
-            output.intrinsics = ixt
-
-        return output
-
-    def _process_gs_head(
+    def inference(
         self,
-        feats: list[torch.Tensor],
-        H: int,
-        W: int,
-        output: Dict[str, torch.Tensor],
-        in_images: torch.Tensor,
-        extrinsics: torch.Tensor | None = None,
-        intrinsics: torch.Tensor | None = None,
-    ) -> Dict[str, torch.Tensor]:
-        """Process 3DGS parameters estimation if 3DGS head is available."""
-        if self.gs_head is None or self.gs_adapter is None:
-            return output
-        assert output.get("depth", None) is not None, "must provide MV depth for the GS head."
-
-        # The depth is defined in the DA3 model's camera space,
-        # so even with provided GT camera poses,
-        # we instead use the predicted camera poses for better alignment.
-        ctx_extr = output.get("extrinsics", None)
-        ctx_intr = output.get("intrinsics", None)
-        assert ctx_extr is not None and ctx_intr is not None, "must process camera info first if GT is not available"
-
-        gt_extr = extrinsics
-        # homo the extr if needed
-        ctx_extr = as_homogeneous(ctx_extr)
-        if gt_extr is not None:
-            gt_extr = as_homogeneous(gt_extr)
-
-        # forward through the gs_dpt head to get 'camera space' parameters
-        gs_outs = self.gs_head(
-            feats=feats,
-            H=H,
-            W=W,
-            patch_start_idx=0,
-            images=in_images,
-        )
-        raw_gaussians = gs_outs.raw_gs
-        densities = gs_outs.raw_gs_conf
-
-        # convert to 'world space' 3DGS parameters; ready to export and render
-        # gt_extr could be None, and will be used to align the pose scale if available
-        gs_world = self.gs_adapter(
-            extrinsics=ctx_extr,
-            intrinsics=ctx_intr,
-            depths=output.depth,
-            opacities=map_pdf_to_opacity(densities),
-            raw_gaussians=raw_gaussians,
-            image_shape=(H, W),
-            gt_extrinsics=gt_extr,
-        )
-        output.gaussians = gs_world
-
-        return output
-
-    def _extract_auxiliary_features(self, feats: list[torch.Tensor], feat_layers: list[int], H: int, W: int) -> Dict[str, torch.Tensor]:
-        """Extract auxiliary features from specified layers."""
-        aux_features = Dict()
-        assert len(feats) == len(feat_layers)
-        for feat, feat_layer in zip(feats, feat_layers):
-            # Reshape features to spatial dimensions
-            feat_reshaped = feat.reshape(
-                [
-                    feat.shape[0],
-                    feat.shape[1],
-                    H // self.PATCH_SIZE,
-                    W // self.PATCH_SIZE,
-                    feat.shape[-1],
-                ]
-            )
-            aux_features[f"feat_layer_{feat_layer}"] = feat_reshaped
-
-        return aux_features
-
-
-class NestedDepthAnything3Net(nn.Module):
-    """
-    Nested Depth Anything 3 network with metric scaling capabilities.
-
-    This network combines two DepthAnything3Net branches:
-    - Main branch: Standard depth estimation
-    - Metric branch: Metric depth estimation for scaling alignment
-
-    The network performs depth alignment using least squares scaling
-    and handles sky region masking for improved depth estimation.
-
-    Args:
-        preset: Configuration for the main depth estimation branch
-        second_preset: Configuration for the metric depth branch
-    """
-
-    def __init__(self, anyview: DictConfig, metric: DictConfig):
-        """
-        Initialize NestedDepthAnything3Net with two branches.
-
-        Args:
-            preset: Configuration for main depth estimation branch
-            second_preset: Configuration for metric depth branch
-        """
-        super().__init__()
-        self.da3 = create_object(anyview)
-        self.da3_metric = create_object(metric)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        extrinsics: torch.Tensor | None = None,
-        intrinsics: torch.Tensor | None = None,
-        export_feat_layers: list[int] | None = [],
+        image: list[np.ndarray | Image.Image | str],
+        extrinsics: np.ndarray | None = None,
+        intrinsics: np.ndarray | None = None,
+        align_to_input_ext_scale: bool = True,
         infer_gs: bool = False,
         use_ray_pose: bool = False,
         ref_view_strategy: str = "saddle_balanced",
-    ) -> Dict[str, torch.Tensor]:
+        render_exts: np.ndarray | None = None,
+        render_ixts: np.ndarray | None = None,
+        render_hw: tuple[int, int] | None = None,
+        process_res: int = 504,
+        process_res_method: str = "upper_bound_resize",
+        export_dir: str | None = None,
+        export_format: str = "mini_npz",
+        export_feat_layers: Sequence[int] | None = None,
+        # GLB export parameters
+        conf_thresh_percentile: float = 40.0,
+        num_max_points: int = 1_000_000,
+        show_cameras: bool = True,
+        # Feat_vis export parameters
+        feat_vis_fps: int = 15,
+        # Other export parameters, e.g., gs_ply, gs_video
+        export_kwargs: Optional[dict] = {},
+    ) -> Prediction:
         """
-        Forward pass through both branches with metric scaling alignment.
+        Run inference on input images.
 
         Args:
-            x: Input images (B, N, 3, H, W)
-            extrinsics: Camera extrinsics (B, N, 4, 4) - unused
-            intrinsics: Camera intrinsics (B, N, 3, 3) - unused
-            feat_layers: List of layer indices to extract features from
-            infer_gs: Enable Gaussian Splatting branch
-            use_ray_pose: Use ray-based pose estimation
-            ref_view_strategy: Strategy for selecting reference view
+            image: List of input images (numpy arrays, PIL Images, or file paths)
+            extrinsics: Camera extrinsics (N, 4, 4)
+            intrinsics: Camera intrinsics (N, 3, 3)
+            align_to_input_ext_scale: whether to align the input pose scale to the prediction
+            infer_gs: Enable the 3D Gaussian branch (needed for `gs_ply`/`gs_video` exports)
+            use_ray_pose: Use ray-based pose estimation instead of camera decoder (default: False)
+            ref_view_strategy: Strategy for selecting reference view from multiple views.
+                Options: "first", "middle", "saddle_balanced", "saddle_sim_range".
+                Default: "saddle_balanced". For single view input (S ≤ 2), no reordering is performed.
+            render_exts: Optional render extrinsics for Gaussian video export
+            render_ixts: Optional render intrinsics for Gaussian video export
+            render_hw: Optional render resolution for Gaussian video export
+            process_res: Processing resolution
+            process_res_method: Resize method for processing
+            export_dir: Directory to export results
+            export_format: Export format (mini_npz, npz, glb, ply, gs, gs_video)
+            export_feat_layers: Layer indices to export intermediate features from
+            conf_thresh_percentile: [GLB] Lower percentile for adaptive confidence threshold (default: 40.0) # noqa: E501
+            num_max_points: [GLB] Maximum number of points in the point cloud (default: 1,000,000)
+            show_cameras: [GLB] Show camera wireframes in the exported scene (default: True)
+            feat_vis_fps: [FEAT_VIS] Frame rate for output video (default: 15)
+            export_kwargs: additional arguments to export functions.
 
         Returns:
-            Dictionary containing aligned depth predictions and camera parameters
+            Prediction object containing depth maps and camera parameters
         """
-        # Get predictions from both branches
-        output = self.da3(
-            x,
-            extrinsics,
-            intrinsics,
-            export_feat_layers=export_feat_layers,
-            infer_gs=infer_gs,
-            use_ray_pose=use_ray_pose,
-            ref_view_strategy=ref_view_strategy,
+        if "gs" in export_format:
+            assert infer_gs, "must set `infer_gs=True` to perform gs-related export."
+
+        if "colmap" in export_format:
+            assert isinstance(image[0], str), "`image` must be image paths for COLMAP export."
+
+        # Preprocess images
+        imgs_cpu, extrinsics, intrinsics = self._preprocess_inputs(
+            image, extrinsics, intrinsics, process_res, process_res_method
         )
-        metric_output = self.da3_metric(x)
 
-        # Apply metric scaling and alignment
-        output = self._apply_metric_scaling(output, metric_output)
-        output = self._apply_depth_alignment(output, metric_output)
-        output = self._handle_sky_regions(output, metric_output)
+        # Prepare tensors for model
+        imgs, ex_t, in_t = self._prepare_model_inputs(imgs_cpu, extrinsics, intrinsics)
 
-        return output
+        # Normalize extrinsics
+        ex_t_norm = self._normalize_extrinsics(ex_t.clone() if ex_t is not None else None)
 
-    def _apply_metric_scaling(self, output: Dict[str, torch.Tensor], metric_output: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Apply metric scaling to the metric depth output."""
-        # Scale metric depth based on camera intrinsics
-        metric_output.depth = apply_metric_scaling(
-            metric_output.depth,
-            output.intrinsics,
+        # Run model forward pass
+        export_feat_layers = list(export_feat_layers) if export_feat_layers is not None else []
+
+        raw_output = self._run_model_forward(
+            imgs, ex_t_norm, in_t, export_feat_layers, infer_gs, use_ray_pose, ref_view_strategy
         )
-        return output
 
-    def _apply_depth_alignment(self, output: Dict[str, torch.Tensor], metric_output: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Apply depth alignment using least squares scaling."""
-        # Compute non-sky mask
-        non_sky_mask = compute_sky_mask(metric_output.sky, threshold=0.3)
+        # Convert raw output to prediction
+        prediction = self._convert_to_prediction(raw_output)
 
-        # Ensure we have enough non-sky pixels
-        assert non_sky_mask.sum() > 10, "Insufficient non-sky pixels for alignment"
+        # Align prediction to extrinsincs
+        prediction = self._align_to_input_extrinsics_intrinsics(
+            extrinsics, intrinsics, prediction, align_to_input_ext_scale
+        )
 
-        # Sample depth confidence for quantile computation
-        depth_conf_ns = output.depth_conf[non_sky_mask]
-        depth_conf_sampled = sample_tensor_for_quantile(depth_conf_ns, max_samples=100000)
-        median_conf = torch.quantile(depth_conf_sampled, 0.5)
+        # Add processed images for visualization
+        prediction = self._add_processed_images(prediction, imgs_cpu)
 
-        # Compute alignment mask
-        align_mask = compute_alignment_mask(output.depth_conf, non_sky_mask, output.depth, metric_output.depth, median_conf)
+        # Export if requested
+        if export_dir is not None:
 
-        # Compute scale factor using least squares
-        valid_depth = output.depth[align_mask]
-        valid_metric_depth = metric_output.depth[align_mask]
-        scale_factor = least_squares_scale_scalar(valid_metric_depth, valid_depth)
+            if "gs" in export_format:
+                if infer_gs and "gs_video" not in export_format:
+                    export_format = f"{export_format}-gs_video"
+                if "gs_video" in export_format:
+                    if "gs_video" not in export_kwargs:
+                        export_kwargs["gs_video"] = {}
+                    export_kwargs["gs_video"].update(
+                        {
+                            "extrinsics": render_exts,
+                            "intrinsics": render_ixts,
+                            "out_image_hw": render_hw,
+                        }
+                    )
+            # Add GLB export parameters
+            if "glb" in export_format:
+                if "glb" not in export_kwargs:
+                    export_kwargs["glb"] = {}
+                export_kwargs["glb"].update(
+                    {
+                        "conf_thresh_percentile": conf_thresh_percentile,
+                        "num_max_points": num_max_points,
+                        "show_cameras": show_cameras,
+                    }
+                )
+            # Add Feat_vis export parameters
+            if "feat_vis" in export_format:
+                if "feat_vis" not in export_kwargs:
+                    export_kwargs["feat_vis"] = {}
+                export_kwargs["feat_vis"].update(
+                    {
+                        "fps": feat_vis_fps,
+                    }
+                )
+            # Add COLMAP export parameters
+            if "colmap" in export_format:
+                if "colmap" not in export_kwargs:
+                    export_kwargs["colmap"] = {}
+                export_kwargs["colmap"].update(
+                    {
+                        "image_paths": image,
+                        "conf_thresh_percentile": conf_thresh_percentile,
+                        "process_res_method": process_res_method,
+                    }
+                )
+            self._export_results(prediction, export_format, export_dir, **export_kwargs)
 
-        # Apply scaling to depth and extrinsics
-        output.depth *= scale_factor
-        output.extrinsics[:, :, :3, 3] *= scale_factor
-        output.is_metric = 1
-        output.scale_factor = scale_factor.item()
+        return prediction
 
-        return output
-
-    def _handle_sky_regions(
+    def _preprocess_inputs(
         self,
-        output: Dict[str, torch.Tensor],
-        metric_output: Dict[str, torch.Tensor],
-        sky_depth_def: float = 200.0,
-    ) -> Dict[str, torch.Tensor]:
-        """Handle sky regions by setting them to maximum depth."""
-        non_sky_mask = compute_sky_mask(metric_output.sky, threshold=0.3)
+        image: list[np.ndarray | Image.Image | str],
+        extrinsics: np.ndarray | None = None,
+        intrinsics: np.ndarray | None = None,
+        process_res: int = 504,
+        process_res_method: str = "upper_bound_resize",
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """Preprocess input images using input processor."""
+        start_time = time.time()
+        imgs_cpu, extrinsics, intrinsics = self.input_processor(
+            image,
+            extrinsics.copy() if extrinsics is not None else None,
+            intrinsics.copy() if intrinsics is not None else None,
+            process_res,
+            process_res_method,
+        )
+        end_time = time.time()
+        logger.info(
+            "Processed Images Done taking",
+            end_time - start_time,
+            "seconds. Shape: ",
+            imgs_cpu.shape,
+        )
+        return imgs_cpu, extrinsics, intrinsics
 
-        # Compute maximum depth for non-sky regions
-        # Use sampling to safely compute quantile on large tensors
-        non_sky_depth = output.depth[non_sky_mask]
-        if non_sky_depth.numel() > 100000:
-            idx = torch.randint(0, non_sky_depth.numel(), (100000,), device=non_sky_depth.device)
-            sampled_depth = non_sky_depth[idx]
+    def _prepare_model_inputs(
+        self,
+        imgs_cpu: torch.Tensor,
+        extrinsics: torch.Tensor | None,
+        intrinsics: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """Prepare tensors for model input."""
+        device = self._get_model_device()
+
+        # Move images to model device
+        imgs = imgs_cpu.to(device, non_blocking=True)[None].float()
+
+        # Convert camera parameters to tensors
+        ex_t = (
+            extrinsics.to(device, non_blocking=True)[None].float()
+            if extrinsics is not None
+            else None
+        )
+        in_t = (
+            intrinsics.to(device, non_blocking=True)[None].float()
+            if intrinsics is not None
+            else None
+        )
+
+        return imgs, ex_t, in_t
+
+    def _normalize_extrinsics(self, ex_t: torch.Tensor | None) -> torch.Tensor | None:
+        """Normalize extrinsics"""
+        if ex_t is None:
+            return None
+        transform = affine_inverse(ex_t[:, :1])
+        ex_t_norm = ex_t @ transform
+        c2ws = affine_inverse(ex_t_norm)
+        translations = c2ws[..., :3, 3]
+        dists = translations.norm(dim=-1)
+        median_dist = torch.median(dists)
+        median_dist = torch.clamp(median_dist, min=1e-1)
+        ex_t_norm[..., :3, 3] = ex_t_norm[..., :3, 3] / median_dist
+        return ex_t_norm
+
+    def _align_to_input_extrinsics_intrinsics(
+        self,
+        extrinsics: torch.Tensor | None,
+        intrinsics: torch.Tensor | None,
+        prediction: Prediction,
+        align_to_input_ext_scale: bool = True,
+        ransac_view_thresh: int = 10,
+    ) -> Prediction:
+        """Align depth map to input extrinsics"""
+        if extrinsics is None:
+            return prediction
+        prediction.intrinsics = intrinsics.numpy()
+        _, _, scale, aligned_extrinsics = align_poses_umeyama(
+            prediction.extrinsics,
+            extrinsics.numpy(),
+            ransac=len(extrinsics) >= ransac_view_thresh,
+            return_aligned=True,
+            random_state=42,
+        )
+        if align_to_input_ext_scale:
+            prediction.extrinsics = extrinsics[..., :3, :].numpy()
+            prediction.depth /= scale
         else:
-            sampled_depth = non_sky_depth
-        non_sky_max = min(torch.quantile(sampled_depth, 0.99), sky_depth_def)
+            prediction.extrinsics = aligned_extrinsics
+        return prediction
 
-        # Set sky regions to maximum depth and high confidence
-        output.depth, output.depth_conf = set_sky_regions_to_max_depth(output.depth, output.depth_conf, non_sky_mask, max_depth=non_sky_max)
-
+    def _run_model_forward(
+        self,
+        imgs: torch.Tensor,
+        ex_t: torch.Tensor | None,
+        in_t: torch.Tensor | None,
+        export_feat_layers: Sequence[int] | None = None,
+        infer_gs: bool = False,
+        use_ray_pose: bool = False,
+        ref_view_strategy: str = "saddle_balanced",
+    ) -> dict[str, torch.Tensor]:
+        """Run model forward pass."""
+        device = imgs.device
+        need_sync = device.type == "cuda"
+        if need_sync:
+            torch.cuda.synchronize(device)
+        start_time = time.time()
+        feat_layers = list(export_feat_layers) if export_feat_layers is not None else None
+        output = self.forward(imgs, ex_t, in_t, feat_layers, infer_gs, use_ray_pose, ref_view_strategy)
+        if need_sync:
+            torch.cuda.synchronize(device)
+        end_time = time.time()
+        logger.info(f"Model Forward Pass Done. Time: {end_time - start_time} seconds")
         return output
+
+    def _convert_to_prediction(self, raw_output: dict[str, torch.Tensor]) -> Prediction:
+        """Convert raw model output to Prediction object."""
+        start_time = time.time()
+        output = self.output_processor(raw_output)
+        end_time = time.time()
+        logger.info(f"Conversion to Prediction Done. Time: {end_time - start_time} seconds")
+        return output
+
+    def _add_processed_images(self, prediction: Prediction, imgs_cpu: torch.Tensor) -> Prediction:
+        """Add processed images to prediction for visualization."""
+        # Convert from (N, 3, H, W) to (N, H, W, 3) and denormalize
+        processed_imgs = imgs_cpu.permute(0, 2, 3, 1).cpu().numpy()  # (N, H, W, 3)
+
+        # Denormalize from ImageNet normalization
+        mean = np.array([0.485, 0.456, 0.406])
+        std = np.array([0.229, 0.224, 0.225])
+        processed_imgs = processed_imgs * std + mean
+        processed_imgs = np.clip(processed_imgs, 0, 1)
+        processed_imgs = (processed_imgs * 255).astype(np.uint8)
+
+        prediction.processed_images = processed_imgs
+        return prediction
+
+    def _export_results(
+        self, prediction: Prediction, export_format: str, export_dir: str, **kwargs
+    ) -> None:
+        """Export results to specified format and directory."""
+        start_time = time.time()
+        # export(prediction, export_format, export_dir, **kwargs)
+        end_time = time.time()
+        logger.info(f"Export Results Done. Time: {end_time - start_time} seconds")
+
+    def _get_model_device(self) -> torch.device:
+        """
+        Get the device where the model is located.
+
+        Returns:
+            Device where the model parameters are located
+
+        Raises:
+            ValueError: If no tensors are found in the model
+        """
+        if self.device is not None:
+            return self.device
+
+        # Find device from parameters
+        for param in self.parameters():
+            self.device = param.device
+            return param.device
+
+        # Find device from buffers
+        for buffer in self.buffers():
+            self.device = buffer.device
+            return buffer.device
+
+        raise ValueError("No tensor found in model")

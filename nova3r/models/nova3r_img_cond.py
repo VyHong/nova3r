@@ -16,9 +16,8 @@ from torch_cluster import fps
 
 from einops import rearrange
 
-from nova3r.models.aggregator_da3 import DepthAnything3Net
 from safetensors.torch import load_file
-
+from nova3r.models.aggregator_da3 import DepthAnything3
 
 class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
     """Image-conditioned flow matching model for amodal 3D reconstruction.
@@ -45,7 +44,7 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
         self.cfg_drop_prob = classifier_free_guidance_drop_pro
 
         if self.cfg.aggregator.name == "DepthAnything3Net":
-            self.da3_aggregator = DepthAnything3Net(**self.cfg.aggregator)
+            self.da3_aggregator = DepthAnything3(cfg=self.cfg)
         elif self.cfg.aggregator.name == "AggregatorPts3D":
             self.vggt_aggregator = AggregatorPts3D(**self.cfg.aggregator.params)
 
@@ -118,15 +117,30 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
 
         return sampled_points
 
+        
+    def prepare_nova_checkpoint(self,nova3r_checkpoint):
+        for key in list(nova3r_checkpoint.keys()):
+            if key.startswith("vggt_aggregator"):
+                nova3r_checkpoint.pop(key)
+            if key.startswith("img_token_proj"):
+                nova3r_checkpoint.pop(key)
+
+        return nova3r_checkpoint
+
     def load_state_dict(self, ckpt, **kw):
         # duplicate all weights for the pts3d_blocks if not present
         new_ckpt = dict(ckpt)
         if self.cfg.aggregator.name == "DepthAnything3Net":
-            state_dict = load_file(kw.get("aggregator_ckpt", ""))
-            self.da3_aggregator.load_state_dict(state_dict, strict=False)
+            state_dict = load_file(kw.get("aggregator_ckpt"))
+            missing_keys, unexpected_keys = self.da3_aggregator.load_state_dict(state_dict, strict=False)
+            print(f"Loaded DepthAnything3Net aggregator weights with {len(missing_keys)} missing keys")
+            print(f"{"-"*100}")
+            print(f"Unexpected keys: {len(unexpected_keys)}")
+            new_ckpt =self.prepare_nova_checkpoint(new_ckpt)
 
-        # manually set
-        return super().load_state_dict(new_ckpt, strict=False)
+        missing_keys, unexpected_keys = super().load_state_dict(new_ckpt, strict=False)
+        print(f"Loaded Nova3RImgCond weights with {len(missing_keys)} missing keys and {len(unexpected_keys)} unexpected keys.")
+        
 
     def _encode_scene(self, img_tokens, input_pts3d):
         """Encode input images through VGGT backbone to get visual tokens."""

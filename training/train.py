@@ -13,7 +13,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
     parser.add_argument("--ckpt", default="checkpoints/scene_n2/checkpoint-last.pth", help="Path to model checkpoint")
     parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
-    parser.add_argument("--aggregator_ckpt", default="./checkpoints/da3/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
+    parser.add_argument("--aggregator_ckpt", default="./checkpoints/da3_giant/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
     args = parser.parse_args()
 
     return args
@@ -29,22 +29,18 @@ def load_data_config(ckpt_path):
 
 
 def main():
-    # Set up data
     #torch.cuda.memory._record_memory_history()
     torch.set_float32_matmul_precision('medium')
     args = parse_args()
 
     model, cfg = load_model(args.ckpt, args.device, aggregator_ckpt=args.aggregator_ckpt)
-
     data_cfg = load_data_config(args.ckpt)
 
     datamodule = Nova3RDataModule(
        data_cfg,
     )
-
     module = Nova3RLightningModule(cfg, model)
 
-    # Set up logger & callbacks
     os.makedirs(cfg.output_dir, exist_ok=True)
     logger = TensorBoardLogger(save_dir=cfg.output_dir, name="nova3r_training")
 
@@ -58,7 +54,6 @@ def main():
     )
     lr_monitor = LearningRateMonitor(logging_interval="step")
 
-    # Initialize trainer
     trainer = pl.Trainer(
         max_epochs=cfg.epochs,
         accelerator=args.device,
@@ -67,6 +62,7 @@ def main():
         callbacks=[checkpoint_callback, lr_monitor],
         precision=cfg.amp_dtype,
         log_every_n_steps=1,
+        #num_sanity_val_steps=0,
     )
 
     trainer.fit(module, datamodule=datamodule)

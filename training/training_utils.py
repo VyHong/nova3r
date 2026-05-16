@@ -6,6 +6,9 @@ import tqdm
 import torch
 import torch.nn.functional as F
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 from dust3r.utils.device import to_cpu, collate_with_cat
 from dust3r.utils.misc import invalid_to_zeros
 from dust3r.utils.geometry import geotrf, inv
@@ -17,8 +20,6 @@ from nova3r.utils.sampling import sampling_train_gen_target
 from einops import rearrange
 
 path = AffineProbPath(scheduler=CosineScheduler())
-
-amp_dtype_mapping = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32, "tf32": torch.float32}
 
 def save_points_ply(points, filename):
     pts = points.reshape(-1, 3).detach().cpu().numpy()
@@ -36,6 +37,65 @@ def save_batch_images(images, filename):
         save_image(v_images, filename, normalize=True)
     except Exception as e:
         print("Could not save images:", e)
+
+def visualize_dx_t_v_pred_distribution(dx_t, v_pred, t,save_path=None, bins=100, density=True, show=False):
+    """Visualize the value distribution for the first batch element of dx_t and v_pred.
+
+    Parameters
+    ----------
+    dx_t : torch.Tensor
+        Flow target tensor with shape [B, N, 3] or compatible.
+    v_pred : torch.Tensor
+        Predicted flow tensor with shape [B, N, 3] or compatible.
+    save_path : str or None
+        If provided, save the figure to this path.
+    bins : int
+        Histogram bin count.
+    density : bool
+        Plot normalized histograms when True.
+    show : bool
+        If True, display the figure. Defaults to False so plots are not opened automatically.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The created matplotlib figure.
+    """
+    dx_t_first = dx_t[0].detach().float().flatten().cpu().numpy()
+    v_pred_first = v_pred[0].detach().float().flatten().cpu().numpy()
+    t_first = t[0].detach().float().cpu().numpy()
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.hist(dx_t_first, bins=bins, density=density, alpha=0.55, label="dx_t")
+    ax.hist(v_pred_first, bins=bins, density=density, alpha=0.55, label="v_pred")
+    ax.set_title(f"Value distribution for first batch element at time {t_first:.2f}")
+    ax.set_xlabel("Value")
+    ax.set_ylabel("Density" if density else "Count")
+    ax.legend()
+    ax.grid(True, alpha=0.2)
+    fig.tight_layout()
+
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+
+    if not show:
+        plt.close(fig)
+
+    return fig
+
+def replace_with_sphere(B,point_num, device, radius=1.0):
+    import math
+    B_trg, N_trg, C_trg = B,point_num, 3
+    g = torch.Generator(device=device)
+    g.manual_seed(42)
+    phi = torch.acos(1 - 2 * torch.rand(1, N_trg, generator=g, device=device))
+    theta = 2 * math.pi * torch.rand(1, N_trg, generator=g, device=device)
+    dummy_x = torch.sin(phi) * torch.cos(theta)
+    dummy_y = torch.sin(phi) * torch.sin(theta)
+    dummy_z = torch.cos(phi)
+    simple_shape = torch.stack([dummy_x, dummy_y, dummy_z], dim=-1) # [1, N, 3]
+    pts3d_trg_norm = simple_shape.expand(B_trg, N_trg, C_trg).contiguous()
+    return pts3d_trg_norm
+
 
 def get_all_pts3d(gt_list, mode=None, down_resolution=112):
     """Extract and optionally downsample/FPS-sample ground truth 3D points from a batch."""
@@ -120,47 +180,7 @@ def get_all_pts3d(gt_list, mode=None, down_resolution=112):
 
 def get_complete_pts3d(gt_list, valid_front=False):
     """Get complete (amodal) 3D point clouds from all views, transformed to camera 1 coordinates."""
-
     return gt_list["cam_points"], gt_list["point_masks"]
-
-    pts_xyz = [gt["pts3d_complete"] for gt in gt_list]
-    in_camera1 = inv(gt_list[0]["camera_pose"])
-    pts_xyz = [geotrf(in_camera1, pts) for pts in pts_xyz]  # B, N, 3
-    gt_pts = torch.stack(pts_xyz, dim=1)  # B, S, N, 3
-
-    valid_num_list = [gt["pts3d_complete_valid_num"] for gt in gt_list]  # B, S
-    valid = torch.zeros_like(gt_pts[..., 0]).bool()  # B, S, N
-    for i in range(len(gt_list)):
-        for j in range(valid_num_list[i].shape[0]):
-            valid[j, i, : valid_num_list[i][j]] = True
-
-    gt_pts = rearrange(gt_pts, "b s n c -> b (s n) c")  # B, S*N, 3
-    valid = rearrange(valid, "b s n -> b (s n)")  # B, S*N
-
-    if valid_front:
-        reordered_pts = []
-        reordered_valid = []
-        valid_counts = []
-
-        for b in range(gt_pts.shape[0]):
-            valid_mask = valid[b]
-            valid_indices = torch.where(valid_mask)[0]
-            invalid_indices = torch.where(~valid_mask)[0]
-
-            reorder_indices = torch.cat([valid_indices, invalid_indices])
-
-            reordered_pts.append(gt_pts[b][reorder_indices])
-            reordered_valid.append(valid[b][reorder_indices])
-            valid_counts.append(len(valid_indices))
-
-        gt_pts = torch.stack(reordered_pts, dim=0)
-        valid = torch.stack(reordered_valid, dim=0)
-        valid_counts = torch.tensor(valid_counts, device=gt_pts.device)
-
-        return gt_pts, valid, valid_counts
-    else:
-        return gt_pts, valid
-
 
 def normalize_input(pts3d_src, valid_src, pts3d_trg, valid_trg, mode="none"):
     """Normalize the input points"""
@@ -242,26 +262,16 @@ def normalize_input(pts3d_src, valid_src, pts3d_trg, valid_trg, mode="none"):
 
 def _predict_vector_field(model, images, query_points, timestep, token_mask, pointmaps, cfg_scale=1.0):
     """Predict velocity field v_theta(x_t, t | cond) in a single forward pass."""
-    if hasattr(model, "module"):
-        encoder_data = model.module._encode(images=images, pointmaps=pointmaps, test=False, cfg_scale=cfg_scale)
-        out = model.module._decode(
-            tokens=encoder_data["tokens"],
-            images=images,
-            token_mask=token_mask,
-            query_points=query_points,
-            timestep=timestep,
-        )
-    else:
-        encoder_data = model._encode(images=images, pointmaps=pointmaps, test=False, cfg_scale=cfg_scale)
-        out = model._decode(
-            tokens=encoder_data["tokens"],
-            images=images,
-            token_mask=token_mask,
-            query_points=query_points,
-            timestep=timestep,
-        )
-    return out["pts3d_xyz"]
 
+    encoder_data = model._encode(images=images, pointmaps=pointmaps, test=False, cfg_scale=cfg_scale)
+    out = model._decode(
+        tokens=encoder_data["tokens"],
+        images=images,
+        token_mask=token_mask,
+        query_points=query_points,
+        timestep=timestep,
+    )
+    return out["pts3d_xyz"]
 
 def loss_of_one_batch_train(
     args,
@@ -273,12 +283,10 @@ def loss_of_one_batch_train(
     **kwargs,
 ):
     """Compute predictions and training loss for one batch."""
-    ignore_keys = set(["dataset", "label", "instance", "idx", "true_shape", "rng", "view_label"])
-
 
     images = torch.stack(batch["images"], dim=1)
-    # debug
     #images = torch.zeros_like(images) # Replace with black images
+
     token_mask = None
 
     if "query_source" in args.model.params.cfg.pts3d_head.params:
@@ -306,23 +314,10 @@ def loss_of_one_batch_train(
     pts3d_src_norm, pts3d_trg_norm = normalize_input(pts3d_src, valid_src, pts3d_trg, valid_trg, mode=norm_mode)
     pts3d_trg_norm = pts3d_trg_norm.to(dtype=torch.float32)  
 
-    # Replace target with a simple deterministic unit sphere for overfitting
-    # import math
-    # B_trg, N_trg, C_trg = pts3d_trg_norm.shape
-    # g = torch.Generator(device=pts3d_trg_norm.device)
-    # g.manual_seed(42)
-    # phi = torch.acos(1 - 2 * torch.rand(1, N_trg, generator=g, device=pts3d_trg_norm.device))
-    # theta = 2 * math.pi * torch.rand(1, N_trg, generator=g, device=pts3d_trg_norm.device)
-    # dummy_x = torch.sin(phi) * torch.cos(theta)
-    # dummy_y = torch.sin(phi) * torch.sin(theta)
-    # dummy_z = torch.cos(phi)
-    # simple_shape = torch.stack([dummy_x, dummy_y, dummy_z], dim=-1) # [1, N, 3]
-    # pts3d_trg_norm = simple_shape.expand(B_trg, N_trg, C_trg).contiguous()
-
-    #save_points_ply(pts3d_trg_norm[0], f"debug_points/debug_shape.ply")    
-    #save_batch_images(images, f"debug_points/{batch['seq_name'][0]}_images.png")
-
     B = images.shape[0]
+    # save_points_ply(pts3d_trg_norm[0], f"debug_points/debug_shape.ply")    
+    # save_batch_images(images, f"debug_points/{batch['seq_name'][0]}_images.png")
+
     # Use uniform noise [-1, 1]^3 to match inference.py prior instead of Gaussian
     x_0 = torch.rand_like(pts3d_trg_norm, device=device) * 2 - 1
     t = torch.rand(B, device=device)
@@ -334,7 +329,7 @@ def loss_of_one_batch_train(
 
     t_query = t[:, None].expand(B, x_t.shape[1])
     cfg_scale = args.cfg_scale if "cfg_scale" in args else 1.0
-
+    
     v_pred = _predict_vector_field(
         model=model,
         images=images,
@@ -344,55 +339,15 @@ def loss_of_one_batch_train(
         pointmaps=pts3d_src_norm,
         cfg_scale=cfg_scale,
     )
+    #visualize_dx_t_v_pred_distribution(dx_t, v_pred, t, save_path=f"debug_points/value_distribution.png")
 
-    point_loss = F.mse_loss(v_pred, dx_t, reduction="none").mean(dim=-1)  # B, N
-    #point_loss = F.l1_loss(v_pred, dx_t, reduction="none").mean(dim=-1)  # B, N
-    if valid_trg is not None:
-        valid_mask = valid_trg.bool()
-        denom = torch.clamp(valid_mask.sum(), min=1)
-        fm_loss = point_loss[valid_mask].sum() / denom
-    else:
-        fm_loss = point_loss.mean()
-
+    gt_list = {
+        "velocity_trg": dx_t,
+        "valid_trg": valid_trg,
+    }
     pred_dict = {
-        "pts3d_xyz": v_pred,
-        "images": images,
-        "input_pts3d": pts3d_src,
-        "input_valid": valid_src,
-        "target_pts3d": pts3d_trg,
-        "target_valid": valid_trg,
-        "flow_x_t": x_t,
-        "flow_t": t,
-        "flow_dx_t": dx_t,
-        "flow_v_pred": v_pred,
+        "velocity_pred": v_pred,
     }
+    loss, details = criterion( gt_list =   gt_list,pred_dict= pred_dict)
 
-    # Standard flow-matching objective: direct velocity regression.
-    loss_dict = {
-        "loss": fm_loss,
-        "fm_loss": fm_loss,
-    }
-
-    if criterion is not None and getattr(args, "add_aux_criterion", False):
-        pts3d_data, aux_loss = criterion(batch, pred_dict)
-        if isinstance(aux_loss, dict) and "loss" in aux_loss:
-            total_aux = aux_loss["loss"]
-        elif torch.is_tensor(aux_loss):
-            total_aux = aux_loss
-        else:
-            total_aux = None
-
-        if total_aux is not None:
-            aux_weight = float(getattr(args, "aux_criterion_weight", 1.0))
-            loss_dict["aux_loss"] = total_aux
-            loss_dict["loss"] = fm_loss + aux_weight * total_aux
-    else:
-        pts3d_data = {
-            "x_t": x_t,
-            "dx_t": dx_t,
-            "v_pred": v_pred,
-        }
-
-    loss = loss_dict
-
-    return loss
+    return loss, details
