@@ -1,8 +1,8 @@
 #!/bin/sh
  
-#SBATCH --job-name=train_nova3r
-#SBATCH --output=train.out
-#SBATCH --error=train.err
+#SBATCH --job-name=test_nova3r
+#SBATCH --output=test.out
+#SBATCH --error=test.err
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 
@@ -55,8 +55,8 @@ RUN bash -c "
   export PYTHONUNBUFFERED=1
   export PYTHONPATH=\${PYTHONPATH}:/mnt/home/vyhong/projects/nova3r
   
-  echo 'Running training...'
-  python -u training/train.py 
+  echo 'Running testing...'
+  python -u training/test.py --ckpt checkpoints/first_train/last.ckpt
 "
 
 # Stop and remove the container

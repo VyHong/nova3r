@@ -1,6 +1,6 @@
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
-from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 import argparse
 import os
 from omegaconf import OmegaConf
@@ -11,9 +11,11 @@ from demo_nova3r import load_model
 
 def parse_args():
     parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
-    parser.add_argument("--ckpt", default="checkpoints/scene_n2/checkpoint-last.pth", help="Path to model checkpoint")
+    parser.add_argument("--ckpt", default="checkpoints/da3/checkpoint-last.pth", help="Path to model checkpoint")
     parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
-    parser.add_argument("--aggregator_ckpt", default="./checkpoints/da3_giant/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
+    parser.add_argument("--aggregator_ckpt", default="./checkpoints/da3/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
+    parser.add_argument("--wandb", default=False,action="store_true", help="Use Weights and Biases logger")
+    parser.add_argument("--wandb_project", default="nova3r", help="WandB project name")
     args = parser.parse_args()
 
     return args
@@ -42,16 +44,25 @@ def main():
     module = Nova3RLightningModule(cfg, model)
 
     os.makedirs(cfg.output_dir, exist_ok=True)
-    logger = TensorBoardLogger(save_dir=cfg.output_dir, name="nova3r_training")
+    if args.wandb:
+        logger = WandbLogger(project=args.wandb_project, name="nova3r_training", save_dir=cfg.output_dir)
+    else:
+        logger = TensorBoardLogger(save_dir=cfg.output_dir, name="nova3r_training")
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=os.path.join(cfg.output_dir, "checkpoints"),
         filename="{epoch:02d}-{val_loss:.2f}",
         save_top_k=1,
-        save_last=True,
-        monitor="train_loss_epoch",
+        monitor="val_loss_epoch",
         mode="min",
     )
+    last_checkpoint = ModelCheckpoint(
+        dirpath=os.path.join(cfg.output_dir, "checkpoints"),
+        monitor="epoch",
+        mode="max",
+        save_top_k=1,
+        filename="last",
+        )
     lr_monitor = LearningRateMonitor(logging_interval="step")
 
     trainer = pl.Trainer(
@@ -59,7 +70,7 @@ def main():
         accelerator=args.device,
         devices=cfg.gpus,
         logger=logger,
-        callbacks=[checkpoint_callback, lr_monitor],
+        callbacks=[checkpoint_callback, last_checkpoint, lr_monitor],
         precision=cfg.amp_dtype,
         log_every_n_steps=1,
         #num_sanity_val_steps=0,

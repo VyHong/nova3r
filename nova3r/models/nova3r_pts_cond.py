@@ -184,7 +184,8 @@ class Nova3rPtsCond(nn.Module, PyTorchModelHubMixin):
                     new_ckpt[
                         key.replace("aggregator.frame_blocks", "aggregator.pts3d_blocks")
                     ] = value
-
+                    
+        kw.pop("aggregator_ckpt", None)  # Remove aggregator_ckpt from kwargs to avoid issues with super().load_state_dict
         return super().load_state_dict(new_ckpt, **kw)
 
     def _encode(self, pointmaps, cfg_scale=1.0, test=False, **kwargs):

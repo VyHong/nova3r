@@ -15,6 +15,8 @@ from training.data.datasets.replica_utils.igibson_utils import ReplicaPanoScene
 from training.data.base_dataset import BaseDataset
 import cv2
 import os
+import torch
+from torch.utils.data._utils.collate import default_collate
 
 class ReplicaPanoDataset(BaseDataset):
     """
@@ -51,6 +53,10 @@ class ReplicaPanoDataset(BaseDataset):
         if scenes_list_path is None:
             self._load_scenes_list()
             self.scenes_list = [f"{scene} {i:05}" for i in range(100) for scene in self.sequence_list]  
+            # save scenes_list to a json file for future use
+            with open(f"{split}_list.json", 'w') as f:
+                json.dump(self.scenes_list, f,indent=4) 
+
         else:
             with open(scenes_list_path, 'r') as f:
                 self.scenes_list = json.load(f)
@@ -97,7 +103,16 @@ class ReplicaPanoDataset(BaseDataset):
             sequence_metadata = {}
             for seq_entry_folder in Path(self.data_root / f"{scene}/{scene}/Scene_Info").iterdir():
                 seq_entry_metadata = {}
-                seq_entry_metadata['world_points_path'] = f"{self.data_root}/{scene}/{scene}/{scene[:-3]}aligned.ply" 
+
+                if scene.startswith("large_apartment"):
+                    seq_entry_metadata['world_points_path'] = f"{self.data_root}/{scene}/{scene}/{scene[:-3]}cropped.ply" 
+                elif scene.startswith("hotel"):
+                    if  int(seq_entry_folder.name) <18:
+                        seq_entry_metadata['world_points_path'] = f"{self.data_root}/{scene}/{scene}/{scene[:-3]}0_cropped.ply"
+                    else:
+                        seq_entry_metadata['world_points_path'] = f"{self.data_root}/{scene}/{scene}/{scene[:-3]}1_cropped.ply"
+                else:
+                    seq_entry_metadata['world_points_path'] = f"{self.data_root}/{scene}/{scene}/{scene[:-3]}aligned.ply" 
                 seq_entry_metadata['seq_entry_folder'] = f"{seq_entry_folder}"
                 pkl_file =  seq_entry_folder / "data.pkl"
                 seq_entry_metadata['pkl_path'] = pkl_file
@@ -171,8 +186,6 @@ class ReplicaPanoDataset(BaseDataset):
                 
                 replica_scene = ReplicaPanoScene.from_pickle(anno['pkl_path'])
                 scene_pcd = o3d.io.read_point_cloud(anno['world_points_path'])
-                if seq_name.startswith("large_apartment"):
-                    pass
 
                 with open(anno['camera_data'], 'r') as f:
                     camera_data = json.load(f)
@@ -209,7 +222,7 @@ class ReplicaPanoDataset(BaseDataset):
 
                         world_points = np.asarray(colmap_points.points)
                         cam_points = np.asarray(cam_points.points)
-                        point_masks = np.ones(len(world_points), dtype=bool)
+                        point_masks = np.ones(len(cam_points), dtype=bool)
                         #self.save_debug_points(world_points, output_dir="debug_points", filename=f"{seq_name}_{id}_world_points.ply")
                         #self.save_debug_points(cam_points, output_dir="debug_points", filename=f"{seq_name}_{id}_cam_points.ply")
 
@@ -283,6 +296,53 @@ class ReplicaPanoDataset(BaseDataset):
         
         print(f"Saved {ply_path}")
 
+    def dynamic_pad_collate_fn(self,batch):
+        """
+        Collates variable-sized point clouds by dynamically finding the max 
+        point count within this specific batch, padding them to the front, 
+        and packaging the rest of the metadata.
+        """
+        # 1. Find the maximum number of points present ONLY in this batch
+        max_pts_in_batch = max([item['world_points'].shape[0] for item in batch])
+        batch_size = len(batch)
+        
+        # 2. Allocate uniform tensors for the point data
+        padded_world_pts = torch.zeros((batch_size, max_pts_in_batch, 3), dtype=torch.float32)
+        padded_cam_pts = torch.zeros((batch_size, max_pts_in_batch, 3), dtype=torch.float32)
+        point_masks = torch.zeros((batch_size, max_pts_in_batch), dtype=torch.bool)
+        valid_counts = torch.zeros(batch_size, dtype=torch.long)
+        
+        # 3. Populate tensors (this naturally places valid data at the front)
+        for idx, item in enumerate(batch):
+            w_pts = torch.as_tensor(item['world_points'], dtype=torch.float32)
+            c_pts = torch.as_tensor(item['cam_points'], dtype=torch.float32)
+            num_pts = w_pts.shape[0]
+            
+            padded_world_pts[idx, :num_pts, :] = w_pts
+            padded_cam_pts[idx, :num_pts, :] = c_pts
+            point_masks[idx, :num_pts] = True
+            valid_counts[idx] = num_pts
+
+        # 4. Handle all other keys (images, matrices, names) smoothly
+        collated_batch = {}
+        for key in batch[0].keys():
+            if key in ['world_points', 'cam_points', 'point_masks']:
+                continue # We already handled these manually above
+                
+            if key in ['seq_name', 'id']:
+                # Keep strings/IDs as simple lists
+                collated_batch[key] = [item[key] for item in batch]
+            else:
+                # Let PyTorch handle uniform items like images, extrinsics, and intrinsics
+                collated_batch[key] = default_collate([item[key] for item in batch])
+                
+        # Add our freshly padded point tensors back into the final dictionary
+        collated_batch['world_points'] = padded_world_pts
+        collated_batch['cam_points'] = padded_cam_pts
+        collated_batch['point_masks'] = point_masks
+        collated_batch['valid_counts'] = valid_counts # Crucial for your GPU FPS kernel!
+        
+        return collated_batch
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test ReplicaPanoDataset")

@@ -540,72 +540,73 @@ def scale_shift_alignment_chamfer(
         final_scale: [B] final scale values
         final_shift: [B, 3] final shift values
     """
-    B, N_pred, C = pred_xyz.shape
-    B, N_gt, C = gt_xyz.shape
-    device = pred_xyz.device
-
-    # Initialize parameters to optimize
-    scale = torch.ones(B, 1, 1, device=device, requires_grad=True)
-    shift = torch.zeros(B, 1, 3, device=device, requires_grad=True)
-
-    # Setup optimizer
-    optimizer = torch.optim.Adam([scale, shift], lr=lr)
-
-    best_loss = float("inf")
-    best_scale = scale.clone()
-    best_shift = shift.clone()
-
-    target_xyz = gt_xyz.clone().detach()
-    target_xyz.requires_grad = True
-    source_xyz = pred_xyz.clone().detach()
-    source_xyz.requires_grad = True
-    if num_sample is None:
-        num_sample = max(N_pred, N_gt) // 4
-
-    for i in range(max_iterations):
-        optimizer.zero_grad()
-
-        # Apply transformation: aligned = scale * pred + shift
-        aligned_pred = scale * source_xyz + shift
-
-        # Compute chamfer distance
-        # randomly down sample
-        idx_pred = torch.randint(0, N_pred, (B, min(N_pred, num_sample)), device=device)
-        idx_gt = torch.randint(0, N_gt, (B, min(N_gt, num_sample)), device=device)
-
-        if num_sample < N_pred:
-            aligned_pred_sampled = aligned_pred[:, idx_pred[0], :]
-        else:
-            aligned_pred_sampled = aligned_pred
-        if num_sample < N_gt:
-            target_xyz_sampled = target_xyz[:, idx_gt[0], :]
-        else:
-            target_xyz_sampled = target_xyz
-
-        cd_loss, _ = chamfer_distance(aligned_pred_sampled, target_xyz_sampled, batch_reduction="mean")
-
-        # Backpropagation
-        cd_loss.backward()
-        optimizer.step()
-
-        # Clamp scale to reasonable bounds
+    with torch.inference_mode(False), torch.enable_grad():
+        B, N_pred, C = pred_xyz.shape
+        B, N_gt, C = gt_xyz.shape
+        device = pred_xyz.device
+    
+        # Initialize parameters to optimize
+        scale = torch.ones(B, 1, 1, device=device, requires_grad=True)
+        shift = torch.zeros(B, 1, 3, device=device, requires_grad=True)
+    
+        # Setup optimizer
+        optimizer = torch.optim.Adam([scale, shift], lr=lr)
+    
+        best_loss = float("inf")
+        best_scale = scale.clone()
+        best_shift = shift.clone()
+    
+        target_xyz = gt_xyz.clone().detach()
+        target_xyz.requires_grad = True
+        source_xyz = pred_xyz.clone().detach()
+        source_xyz.requires_grad = True
+        if num_sample is None:
+            num_sample = max(N_pred, N_gt) // 4
+    
+        for i in range(max_iterations):
+            optimizer.zero_grad()
+    
+            # Apply transformation: aligned = scale * pred + shift
+            aligned_pred = scale * source_xyz + shift
+    
+            # Compute chamfer distance
+            # randomly down sample
+            idx_pred = torch.randint(0, N_pred, (B, min(N_pred, num_sample)), device=device)
+            idx_gt = torch.randint(0, N_gt, (B, min(N_gt, num_sample)), device=device)
+    
+            if num_sample < N_pred:
+                aligned_pred_sampled = aligned_pred[:, idx_pred[0], :]
+            else:
+                aligned_pred_sampled = aligned_pred
+            if num_sample < N_gt:
+                target_xyz_sampled = target_xyz[:, idx_gt[0], :]
+            else:
+                target_xyz_sampled = target_xyz
+    
+            cd_loss, _ = chamfer_distance(aligned_pred_sampled, target_xyz_sampled, batch_reduction="mean")
+    
+            # Backpropagation
+            cd_loss.backward()
+            optimizer.step()
+    
+            # Clamp scale to reasonable bounds
+            with torch.no_grad():
+                scale.clamp_(0.01, 100.0)
+    
+            # Track best solution
+            if cd_loss.item() < best_loss:
+                best_loss = cd_loss.item()
+                best_scale = scale.clone()
+                best_shift = shift.clone()
+    
+        # Apply best transformation
         with torch.no_grad():
-            scale.clamp_(0.01, 100.0)
-
-        # Track best solution
-        if cd_loss.item() < best_loss:
-            best_loss = cd_loss.item()
-            best_scale = scale.clone()
-            best_shift = shift.clone()
-
-    # Apply best transformation
-    with torch.no_grad():
-        aligned_pred_xyz = best_scale * pred_xyz + best_shift
-
-    if return_transform:
-        return aligned_pred_xyz, best_shift.detach(), best_scale.detach()
-    else:
-        return aligned_pred_xyz
+            aligned_pred_xyz = best_scale * pred_xyz + best_shift
+    
+        if return_transform:
+            return aligned_pred_xyz, best_shift.detach(), best_scale.detach()
+        else:
+            return aligned_pred_xyz
 
 
 class SSI3DScore_Scene(SSI3DScore):
@@ -767,7 +768,7 @@ class SSI3DScore_Scene_Multi(SSI3DScore):
         align_shift = None
         align_scale = None
 
-        for eval_layers in [None, "visible"]:
+        for eval_layers in [None]:
             # select GT
             if not eval_layers:
                 pts3d_gt_list = [x["pcd_eval"].clone() for x in data]

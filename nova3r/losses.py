@@ -165,10 +165,11 @@ class Pts3D_Regr3D_CD_V4(Criterion, MultiLoss):
 
     def compute_loss(self, gt_list, pred_dict, **kw):
 
-        gt_pts = pred_dict['target_pts3d']
-        gt_valid = pred_dict['target_valid']
+        gt_pts = gt_list['target_pts3d']
+        gt_valid = gt_list['target_valid']
 
         pr_pts = pred_dict['pts3d_xyz']
+        pr_pts = pr_pts.to(device=gt_pts.device)
 
         B = pr_pts.shape[0]
         loss_forward_list = []
@@ -224,6 +225,6 @@ class FMVelocity(Criterion, MultiLoss):
         
         loss = self.criterion(pred_velocity_valid, gt_velocity_valid)
 
-        details = {type(self.criterion).__name__: float(loss)}
+        details = {type(self.criterion).__name__: float(loss.detach().cpu().item())}
 
         return loss, details

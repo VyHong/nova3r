@@ -1,8 +1,10 @@
 import pytorch_lightning as pl
 import torch
-from training.training_utils import loss_of_one_batch_train
-from training.validation_utils import generate_example
+from training.training_utils import get_all_pts3d, loss_of_one_batch_train, normalize_input, save_points_ply
+from training.validation_utils import generate_example, generate_pointcloud, run_test_score, run_validation_loss, save_test_scores_to_csv, normalize_pointclouds
 from nova3r.losses import L21, FMVelocity, Pts3D_Regr3D_CD_V4
+from eval.mv_recon.metric import SSI3DScore_Scene_Multi
+
 class Nova3RLightningModule(pl.LightningModule):
     def __init__(self, cfg, model):
         super().__init__()
@@ -20,24 +22,19 @@ class Nova3RLightningModule(pl.LightningModule):
                 param.requires_grad = False
                 print(f"Froze: {name}")
             else:
-                print(f"Kept active: {name}")
+                #print(f"Kept active: {name}")
+                pass
 
         self.train_criterion = FMVelocity(L21)
-        self.test_criterion = None  # Criterion is integrated into the model's forward pass
+        self.val_criterion =  Pts3D_Regr3D_CD_V4(L21)
+        self.test_criterion = SSI3DScore_Scene_Multi(
+                                num_eval_pts=16384,
+                                fs_thres=[0.1, 0.05, 0.02],
+                                pts_sampling_mode="uniform",
+                                alignment="none",
+                                use_cd_align=True,
+                            ).to(self.device)
 
-    def move_batch_to_device(self, batch, device):
-        """Move all tensors in the batch to the specified device."""
-        keys = ["images", "extrinsics", "intrinsics"]  # , "cam_points", "world_points", "point_masks"]
-        for key, value in batch.items():
-            if key not in keys:
-                continue
-            if isinstance(value, torch.Tensor):
-                batch[key] = value.to(device)
-            elif isinstance(value, dict):
-                batch[key] = self.move_batch_to_device(value, device)
-            elif isinstance(value, list):
-                batch[key] = [self.move_batch_to_device(item, device) if isinstance(item, dict) else item.to(device) for item in value]
-        return batch
 
     def forward(self, batch,criterion):
         loss, details = loss_of_one_batch_train(
@@ -58,30 +55,127 @@ class Nova3RLightningModule(pl.LightningModule):
         if not hasattr(self, "val_batch_to_log") or self.val_batch_to_log is None:
             self.val_batch_to_log = batch  # Store the first batch for logging at epoch end
 
-        loss, details = self.forward(batch, self.train_criterion)
-        self.log("val_loss", loss, on_epoch=True, prog_bar=True)
+
+        pts3d_src_norm, valid_src, pts3d_trg_norm, valid_trg = normalize_pointclouds(self.cfg, batch)
+        pts3d_trg_norm = pts3d_trg_norm.to(dtype=torch.float32)  
+
+        gt_pts3d = pts3d_trg_norm
+        gt_valid = valid_trg
+        batch["pts3d_src_norm"] = pts3d_src_norm
+        batch["valid_src"] = valid_src
+        batch["pts3d_trg_norm"] = pts3d_trg_norm
+        batch["valid_trg"] = valid_trg
+        pts3d = generate_pointcloud(
+            cfg=self.cfg,
+            model=self.model,
+            batch=batch,
+            num_queries=gt_pts3d.shape[1],
+            device=self.device,
+        )
+
+        loss, details = run_validation_loss(gt_pts3d=gt_pts3d, gt_valid=gt_valid, pts3d=pts3d, criterion=self.val_criterion, device=self.device)
+
+        self.log("val_loss", details["Pts3D_Regr3D_CD_V4_completeness"],on_step=True, on_epoch=True, prog_bar=True)
         return loss
+
+    @property
+    def current_log_dir(self):
+        if not self.logger:
+            return "logs"
+        if isinstance(self.logger, pl.loggers.WandbLogger):
+            # For WandB, the actual run directory is available via experiment.dir
+            return self.logger.experiment.dir if hasattr(self.logger.experiment, "dir") else self.logger.save_dir
+        # For TensorBoard, log_dir gives the specific version_X folder
+        return getattr(self.logger, "log_dir", self.logger.save_dir)
 
     def on_validation_epoch_end(self):
         if hasattr(self, "val_batch_to_log") and self.val_batch_to_log is not None:
-            generate_example(
+            max_elements = 4
+            for k, v in self.val_batch_to_log.items():
+                if isinstance(v, torch.Tensor) or isinstance(v, list):
+                    self.val_batch_to_log[k] = v[:max_elements]
+
+            pts3d_src_norm, valid_src, pts3d_trg_norm, valid_trg = normalize_pointclouds(self.cfg, self.val_batch_to_log)
+            pts3d_trg_norm = pts3d_trg_norm.to(dtype=torch.float32)  
+
+            gt_pts3d = pts3d_trg_norm
+            gt_valid = valid_trg
+            self.val_batch_to_log["pts3d_src_norm"] = pts3d_src_norm
+            self.val_batch_to_log["valid_src"] = valid_src
+            self.val_batch_to_log["pts3d_trg_norm"] = pts3d_trg_norm
+            self.val_batch_to_log["valid_trg"] = valid_trg
+            pts3d = generate_pointcloud(
                 cfg=self.cfg,
                 model=self.model,
-                images=[t[0:1, ...] for t in self.val_batch_to_log["images"]],
-                num_queries=200000,
-                log_dir=self.logger.log_dir if self.logger else "logs",
+                batch=self.val_batch_to_log,
+                num_queries=self.cfg.decoder_sample_size,
                 device=self.device,
+            )
+            
+            generate_example(
+                batch=self.val_batch_to_log,
+                pts3d=pts3d,
+                log_dir=self.current_log_dir,
                 current_epoch=self.current_epoch,
             )
             self.val_batch_to_log = None
+    
+    def test_step(self, batch, batch_idx):
+            pts3d_src_norm, valid_src, pts3d_trg_norm, valid_trg = normalize_pointclouds(self.cfg, batch)
+            pts3d_trg_norm = pts3d_trg_norm.to(dtype=torch.float32)  
+
+            gt_pts3d = pts3d_trg_norm
+            gt_valid = valid_trg
+            batch["pts3d_src_norm"] = pts3d_src_norm
+            batch["valid_src"] = valid_src
+            batch["pts3d_trg_norm"] = pts3d_trg_norm
+            batch["valid_trg"] = valid_trg
+            pts3d = generate_pointcloud(
+                cfg=self.cfg,
+                model=self.model,
+                batch=batch,
+                num_queries=self.cfg.decoder_sample_size,
+                device=self.device,
+            )
+            # save_points_ply(batch["cam_points"],"./debug_points/gt.ply")
+            # save_points_ply(pts3d,"./debug_points/pred.ply")
+            
+            B = pts3d_trg_norm.shape[0]
+            log_dir = self.logger.log_dir if self.logger else None
+            
+            if not hasattr(self, "test_results"):
+                self.test_results = []
+                
+            for i in range(B):
+                single_batch = {}
+                for k, v in batch.items():
+                    if isinstance(v, torch.Tensor):
+                        single_batch[k] = v[i:i+1]
+                    elif isinstance(v, list):
+                        single_batch[k] = [v[i]]
+                    else:
+                        single_batch[k] = v
+                        
+                single_pts3d = pts3d[i:i+1]
+                data, details = run_test_score(single_batch, single_pts3d, self.test_criterion, self.device)
+                res = save_test_scores_to_csv(single_batch, details, log_dir)
+                self.test_results.append(res)
+
+            if self.cfg.save_test_examples:
+                generate_example(
+                    batch=batch,
+                    pts3d=pts3d,
+                    log_dir=self.current_log_dir,
+                    current_epoch=self.current_epoch,
+                )
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, self.parameters()), lr=self.learning_rate,weight_decay=self.cfg.weight_decay)
 
         warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=self.cfg.warmup_epochs)
-        # cosine = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.trainer.max_epochs)
-        main_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=1)
-        scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[self.cfg.warmup_epochs])
+        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.trainer.max_epochs)
+        exponential = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=1)
+        scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, exponential], milestones=[self.cfg.warmup_epochs])
         
         plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=100)
 
@@ -90,6 +184,5 @@ class Nova3RLightningModule(pl.LightningModule):
                 "scheduler": scheduler,
                 "interval": "epoch",
             },
-            # {"scheduler": cosine, "interval": "epoch"},
             {"scheduler": plateau, "monitor": "train_loss_epoch", "interval": "epoch"},
         ]
