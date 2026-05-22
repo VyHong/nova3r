@@ -1,3 +1,5 @@
+from training.training_utils import visualize_extrinsics
+
 # Copyright (c) 2026 Weirong Chen
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -18,6 +20,7 @@ from einops import rearrange
 
 from safetensors.torch import load_file
 from nova3r.models.aggregator_da3 import DepthAnything3
+
 
 class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
     """Image-conditioned flow matching model for amodal 3D reconstruction.
@@ -117,8 +120,7 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
 
         return sampled_points
 
-        
-    def prepare_nova_checkpoint(self,nova3r_checkpoint):
+    def prepare_nova_checkpoint(self, nova3r_checkpoint):
         for key in list(nova3r_checkpoint.keys()):
             if key.startswith("vggt_aggregator"):
                 nova3r_checkpoint.pop(key)
@@ -136,11 +138,10 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
             print(f"Loaded DepthAnything3Net aggregator weights with {len(missing_keys)} missing keys")
             print(f"{"-"*100}")
             print(f"Unexpected keys: {len(unexpected_keys)}")
-            new_ckpt =self.prepare_nova_checkpoint(new_ckpt)
+            new_ckpt = self.prepare_nova_checkpoint(new_ckpt)
 
         missing_keys, unexpected_keys = super().load_state_dict(new_ckpt, strict=False)
         print(f"Loaded Nova3RImgCond weights with {len(missing_keys)} missing keys and {len(unexpected_keys)} unexpected keys.")
-        
 
     def _encode_scene(self, img_tokens, input_pts3d):
         """Encode input images through VGGT backbone to get visual tokens."""
@@ -174,7 +175,8 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
             x_q_point = self._embed_3d(sample_x)
             x_q_learn = self.tokens.unsqueeze(0).expand(B, -1, -1)  # [B, num_tokens, d_point]
 
-            x_q = torch.cat([x_q_point, x_q_learn], dim=-1)  # [B, num_tokens, d_point * 2]
+            # [B, num_tokens, d_point * 2]
+            x_q = torch.cat([x_q_point, x_q_learn], dim=-1)
             x_q = self.token_merge(x_q)  # [B, num_tokens, d_point]
 
             x = self.aggregator(x_q, x_kv)
@@ -192,7 +194,9 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
 
         # aggregated_tokens_list, patch_start_idx = self.vggt_aggregator(images, detach_vit_token=self.detach_vit_token)
 
-        aggregated_tokens_list, aggregated_tokens_3d_list, patch_start_idx, patch_tokens = self.vggt_aggregator(images, detach_vit_token=self.detach_vit_token)
+        aggregated_tokens_list, aggregated_tokens_3d_list, patch_start_idx, patch_tokens = self.vggt_aggregator(
+            images, detach_vit_token=self.detach_vit_token
+        )
 
         pts3d = None
         pts3d_conf = None
@@ -202,12 +206,15 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
     def forward_da3(
         self,
         images: torch.Tensor,
+        batch: dict,
         ref_view_strategy: str = "first",
     ):
         if len(images.shape) == 4:
             images = images.unsqueeze(0)
 
-        aggregated_tokens_list, aggregated_tokens_3d_list, patch_start_idx, patch_tokens = self.da3_aggregator(images, ref_view_strategy=ref_view_strategy)
+        aggregated_tokens_list, aggregated_tokens_3d_list, patch_start_idx, patch_tokens = self.da3_aggregator(
+            images, intrinsics=batch.get("intrinsics"), extrinsics=batch.get("extrinsics"), ref_view_strategy=ref_view_strategy
+        )
 
         pts3d = None
         pts3d_conf = None
@@ -218,7 +225,7 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
         """Project visual tokens to 3D token space with optional learned token initialization."""
 
         if self.cfg.aggregator.name == "DepthAnything3Net":
-            aggregated_tokens_list, pts3d, pts3d_conf = self.forward_da3(images,ref_view_strategy="first")
+            aggregated_tokens_list, pts3d, pts3d_conf = self.forward_da3(images, batch=kwargs.get("batch"), ref_view_strategy="first")
         elif self.cfg.aggregator.name == "AggregatorPts3D":
             aggregated_tokens_list, pts3d, pts3d_conf = self.forward_vggt(images)
 
@@ -313,7 +320,8 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
 
         predictions = {}
 
-        num_views = torch.ones(B, device=images.device) * S  # [B], assuming each image in the sequence is a different view
+        # [B], assuming each image in the sequence is a different view
+        num_views = torch.ones(B, device=images.device) * S
         # with torch.cuda.amp.autocast(enabled=False):
         # tokens = tokens.float()
 

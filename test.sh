@@ -56,7 +56,7 @@ RUN bash -c "
   export PYTHONPATH=\${PYTHONPATH}:/mnt/home/vyhong/projects/nova3r
   
   echo 'Running testing...'
-  python -u training/test.py --ckpt checkpoints/first_train/last.ckpt
+  python -u training/test.py --ckpt checkpoints/scene_n2/checkpoint-last.pth
 "
 
 # Stop and remove the container

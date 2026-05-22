@@ -22,6 +22,7 @@ from nova3r.models.model_wrapper import BatchModelWrapper
 from nova3r.utils.sampling import sampling_train_gen_target
 from einops import rearrange
 import numpy as np
+
 path = AffineProbPath(scheduler=CosineScheduler())
 
 amp_dtype_mapping = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32, "tf32": torch.float32}
@@ -43,17 +44,13 @@ def get_all_pts3d(gt_list, mode=None, down_resolution=112):
         batch_size = int(mode.split("_")[-1])
         gt_pts, valid = get_complete_pts3d(gt_list)
         # run fps_fast
-        gt_pts, valid = sampling_train_gen_target(
-            gt_pts, valid, None, target_sampling="fps_fast", batch_size=batch_size
-        )
+        gt_pts, valid = sampling_train_gen_target(gt_pts, valid, None, target_sampling="fps_fast", batch_size=batch_size)
 
     elif "src_complete_fps_edge" in mode:
         batch_size = int(mode.split("_")[-1])
         gt_pts, valid = get_complete_pts3d(gt_list)
         # run fps_fast
-        gt_pts, valid = sampling_train_gen_target(
-            gt_pts, valid, None, target_sampling="fps_edge_fast", batch_size=batch_size
-        )
+        gt_pts, valid = sampling_train_gen_target(gt_pts, valid, None, target_sampling="fps_edge_fast", batch_size=batch_size)
 
     elif mode == "cube_global":
         pts_xyz = gt_list[0]["global_center_xyz"]
@@ -99,9 +96,7 @@ def get_all_pts3d(gt_list, mode=None, down_resolution=112):
         valid = F.interpolate(valid, size=down_resolution, mode="nearest")
         valid = rearrange(valid, "(b s) 1 h w -> b (s h w)", b=B).bool()
 
-        gt_pts, valid = sampling_train_gen_target(
-            gt_pts, valid, None, target_sampling="fps_fast", batch_size=batch_size
-        )
+        gt_pts, valid = sampling_train_gen_target(gt_pts, valid, None, target_sampling="fps_fast", batch_size=batch_size)
 
     else:
         raise NotImplementedError
@@ -228,9 +223,7 @@ def normalize_input(pts3d_src, valid_src, pts3d_trg, valid_trg, mode="none"):
         return pts3d_src, pts3d_trg
 
 
-def loss_of_one_batch_lari(
-    args, batch, model, criterion, device, use_amp=False, ret=None, num_queries=20000, model_wrapper=None, **kwargs
-):
+def loss_of_one_batch_lari(args, batch, model, criterion, device, use_amp=False, ret=None, num_queries=20000, model_wrapper=None, **kwargs):
     """Compute evaluation metrics (Chamfer Distance, F-Score) for trained models."""
     ignore_keys = set(["dataset", "label", "instance", "idx", "true_shape", "rng", "view_label"])
 
@@ -344,10 +337,11 @@ def loss_of_one_batch_lari(
 
 def loss_of_one_batch_demo(
     args,
-    batch,
+    image_batch,
     model,
     criterion,
     device,
+    batch=None,
     use_amp=False,
     ret=None,
     num_queries=20000,
@@ -360,18 +354,17 @@ def loss_of_one_batch_demo(
     ignore_keys = set(["dataset", "label", "instance", "idx", "true_shape", "rng", "view_label"])
 
     token_mask = None
-    if isinstance(batch[0], torch.Tensor):
-        img_src_list = batch
+    if isinstance(image_batch[0], torch.Tensor):
+        img_src_list = image_batch
     else:
-        for view in batch:
+        for view in image_batch:
             for name in view.keys():  # pseudo_focal
                 if name in ignore_keys:
                     continue
                 view[name] = view[name].to(device, non_blocking=True)
 
-
         img_src_list = []
-        for view in batch:
+        for view in image_batch:
             if "input" in view["view_label"][0]:
                 view["img"] = view["img"] * 0.5 + 0.5
                 img = view["img"]
@@ -379,9 +372,9 @@ def loss_of_one_batch_demo(
 
     images = torch.stack(img_src_list, dim=1)
     images = images[:, :n_views, ...]  # Use only n_views
-    #images = torch.zeros_like(images) # Replace with black images
+    # images = torch.zeros_like(images) # Replace with black images
 
-    def process_point(args, images, pts3d_src, token_mask, num_queries, device, model_wrapper=None, method="euler"):
+    def process_point(args, images, pts3d_src, token_mask, num_queries, device, batch=None, model_wrapper=None, method="euler"):
         step_size = args.fm_step_size
         num_steps = int(1 // args.fm_step_size)
         point_size = num_queries
@@ -400,10 +393,7 @@ def loss_of_one_batch_demo(
 
         solver = ODESolver(velocity_model=wrapped_vf)
 
-        if hasattr(model, "module"):
-            encoder_data = model.module._encode(images=images, pointmaps=pts3d_src)
-        else:
-            encoder_data = model._encode(images=images, pointmaps=pts3d_src)
+        encoder_data = model._encode(images=images, batch=batch, pointmaps=pts3d_src)
 
         sol = solver.sample(
             time_grid=T,
@@ -426,20 +416,20 @@ def loss_of_one_batch_demo(
     with torch.no_grad():
         with torch.cuda.amp.autocast(enabled=True):
             pts3d_xyz = process_point(
-                args, images, pointmaps, token_mask, num_queries, device, model_wrapper=model_wrapper, method=method
+                args, images, pointmaps, token_mask, num_queries, device, batch=batch, model_wrapper=model_wrapper, method=method
             )
 
     pred_dict = {}
     pred_dict["pts3d_xyz"] = pts3d_xyz
     pred_dict["images"] = images
 
-    result = dict(view=batch, pred=pred_dict)
+    result = dict(view=image_batch, pred=pred_dict)
     return result[ret] if ret else result
 
 
 @torch.no_grad()
 def inference_nova3r(
-    args, pairs, model, device, batch_size=8, verbose=True, num_queries=20000, n_views=2, method="euler", pointmaps=None
+    args, pairs, model, device, batch=None, batch_size=8, verbose=True, num_queries=20000, n_views=2, method="euler", pointmaps=None
 ):
     """Run batched Nova3r inference on image pairs, returning predicted 3D point clouds."""
     if verbose:
@@ -458,6 +448,7 @@ def inference_nova3r(
             model,
             None,
             device,
+            batch=batch,
             num_queries=num_queries,
             n_views=n_views,
             method=method,

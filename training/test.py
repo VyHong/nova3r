@@ -11,7 +11,7 @@ from demo_nova3r import load_model
 
 def parse_args():
     parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
-    parser.add_argument("--ckpt", default="checkpoints/first_train/last.ckpt", help="Path to model checkpoint")
+    parser.add_argument("--ckpt", default="checkpoints/scene_n2/checkpoint-last.pth", help="Path to model checkpoint")
     parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
     parser.add_argument("--aggregator_ckpt", default="./checkpoints/da3_giant/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
     args = parser.parse_args()

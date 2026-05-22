@@ -246,7 +246,7 @@ def main():
     parser.add_argument("--depth_out", type=str, required=False, help="Folder to save the output depth maps")
     parser.add_argument("--shape", type=str, default="cube", help="Polyhedron shape")
     parser.add_argument("--fov", type=float, default=95.0, help="FOV in degrees")
-    parser.add_argument("--res", type=int, default=512, help="Output resolution")
+    parser.add_argument("--res", type=int, default=518, help="Output resolution")
     args = parser.parse_args()
 
     # Setup output folder structure

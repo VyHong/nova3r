@@ -7,7 +7,8 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from dust3r.utils.device import to_cpu, collate_with_cat
 from dust3r.utils.misc import invalid_to_zeros
@@ -21,24 +22,28 @@ from einops import rearrange
 
 path = AffineProbPath(scheduler=CosineScheduler())
 
+
 def save_points_ply(points, filename):
     pts = points.reshape(-1, 3).detach().cpu().numpy()
     header = f"ply\nformat ascii 1.0\nelement vertex {len(pts)}\nproperty float x\nproperty float y\nproperty float z\nend_header\n"
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write(header)
         for p in pts:
             f.write(f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")
 
+
 def save_batch_images(images, filename):
     try:
         from torchvision.utils import save_image
+
         # images is expected to be [B, V, C, H, W], we take the first batch item
-        v_images = images[0] # [V, C, H, W]
+        v_images = images[0]  # [V, C, H, W]
         save_image(v_images, filename, normalize=True)
     except Exception as e:
         print("Could not save images:", e)
 
-def visualize_dx_t_v_pred_distribution(dx_t, v_pred, t,save_path=None, bins=100, density=True, show=False):
+
+def visualize_dx_t_v_pred_distribution(dx_t, v_pred, t, save_path=None, bins=100, density=True, show=False):
     """Visualize the value distribution for the first batch element of dx_t and v_pred.
 
     Parameters
@@ -82,9 +87,11 @@ def visualize_dx_t_v_pred_distribution(dx_t, v_pred, t,save_path=None, bins=100,
 
     return fig
 
-def replace_with_sphere(B,point_num, device, radius=1.0):
+
+def replace_with_sphere(B, point_num, device, radius=1.0):
     import math
-    B_trg, N_trg, C_trg = B,point_num, 3
+
+    B_trg, N_trg, C_trg = B, point_num, 3
     g = torch.Generator(device=device)
     g.manual_seed(42)
     phi = torch.acos(1 - 2 * torch.rand(1, N_trg, generator=g, device=device))
@@ -92,7 +99,7 @@ def replace_with_sphere(B,point_num, device, radius=1.0):
     dummy_x = torch.sin(phi) * torch.cos(theta)
     dummy_y = torch.sin(phi) * torch.sin(theta)
     dummy_z = torch.cos(phi)
-    simple_shape = torch.stack([dummy_x, dummy_y, dummy_z], dim=-1) # [1, N, 3]
+    simple_shape = torch.stack([dummy_x, dummy_y, dummy_z], dim=-1)  # [1, N, 3]
     pts3d_trg_norm = simple_shape.expand(B_trg, N_trg, C_trg).contiguous()
     return pts3d_trg_norm
 
@@ -113,17 +120,13 @@ def get_all_pts3d(gt_list, mode=None, down_resolution=112):
         batch_size = int(mode.split("_")[-1])
         gt_pts, valid = get_complete_pts3d(gt_list)
         # run fps_fast
-        gt_pts, valid = sampling_train_gen_target(
-            gt_pts, valid, None, target_sampling="fps_fast", batch_size=batch_size
-        )
+        gt_pts, valid = sampling_train_gen_target(gt_pts, valid, None, target_sampling="fps_fast", batch_size=batch_size)
 
     elif "src_complete_fps_edge" in mode:
         batch_size = int(mode.split("_")[-1])
         gt_pts, valid = get_complete_pts3d(gt_list)
         # run fps_fast
-        gt_pts, valid = sampling_train_gen_target(
-            gt_pts, valid, None, target_sampling="fps_edge_fast", batch_size=batch_size
-        )
+        gt_pts, valid = sampling_train_gen_target(gt_pts, valid, None, target_sampling="fps_edge_fast", batch_size=batch_size)
 
     elif mode == "cube_global":
         pts_xyz = gt_list[0]["global_center_xyz"]
@@ -169,9 +172,7 @@ def get_all_pts3d(gt_list, mode=None, down_resolution=112):
         valid = F.interpolate(valid, size=down_resolution, mode="nearest")
         valid = rearrange(valid, "(b s) 1 h w -> b (s h w)", b=B).bool()
 
-        gt_pts, valid = sampling_train_gen_target(
-            gt_pts, valid, None, target_sampling="fps_fast", batch_size=batch_size
-        )
+        gt_pts, valid = sampling_train_gen_target(gt_pts, valid, None, target_sampling="fps_fast", batch_size=batch_size)
 
     else:
         raise NotImplementedError
@@ -181,6 +182,7 @@ def get_all_pts3d(gt_list, mode=None, down_resolution=112):
 def get_complete_pts3d(gt_list, valid_front=False):
     """Get complete (amodal) 3D point clouds from all views, transformed to camera 1 coordinates."""
     return gt_list["cam_points"], gt_list["point_masks"]
+
 
 def normalize_input(pts3d_src, valid_src, pts3d_trg, valid_trg, mode="none"):
     """Normalize the input points"""
@@ -260,10 +262,11 @@ def normalize_input(pts3d_src, valid_src, pts3d_trg, valid_trg, mode="none"):
 
         return pts3d_src, pts3d_trg
 
-def _predict_vector_field(model, images, query_points, timestep, token_mask, pointmaps, cfg_scale=1.0):
+
+def _predict_vector_field(model, batch, images, query_points, timestep, token_mask, pointmaps, cfg_scale=1.0):
     """Predict velocity field v_theta(x_t, t | cond) in a single forward pass."""
 
-    encoder_data = model._encode(images=images, pointmaps=pointmaps, test=False, cfg_scale=cfg_scale)
+    encoder_data = model._encode(images=images, batch=batch, pointmaps=pointmaps, test=False, cfg_scale=cfg_scale)
     out = model._decode(
         tokens=encoder_data["tokens"],
         images=images,
@@ -272,6 +275,7 @@ def _predict_vector_field(model, images, query_points, timestep, token_mask, poi
         timestep=timestep,
     )
     return out["pts3d_xyz"]
+
 
 def loss_of_one_batch_train(
     args,
@@ -285,7 +289,7 @@ def loss_of_one_batch_train(
     """Compute predictions and training loss for one batch."""
 
     images = torch.stack(batch["images"], dim=1)
-    #images = torch.zeros_like(images) # Replace with black images
+    # images = torch.zeros_like(images) # Replace with black images
 
     token_mask = None
 
@@ -312,10 +316,10 @@ def loss_of_one_batch_train(
     pts3d_src, valid_src = get_all_pts3d(batch, mode=query_src, down_resolution=down_resolution)
     pts3d_trg, valid_trg = get_all_pts3d(batch, mode=target_src, down_resolution=down_resolution)
     pts3d_src_norm, pts3d_trg_norm = normalize_input(pts3d_src, valid_src, pts3d_trg, valid_trg, mode=norm_mode)
-    pts3d_trg_norm = pts3d_trg_norm.to(dtype=torch.float32)  
 
     B = images.shape[0]
-    # save_points_ply(pts3d_trg_norm[0], f"debug_points/debug_shape.ply")    
+    # save_points_ply(pts3d_trg_norm[0], f"debug_points/points_trg.ply")
+    # save_points_ply(pts3d_src_norm[0], f"debug_points/points_src.ply")
     # save_batch_images(images, f"debug_points/{batch['seq_name'][0]}_images.png")
 
     # Use uniform noise [-1, 1]^3 to match inference.py prior instead of Gaussian
@@ -329,9 +333,10 @@ def loss_of_one_batch_train(
 
     t_query = t[:, None].expand(B, x_t.shape[1])
     cfg_scale = args.cfg_scale if "cfg_scale" in args else 1.0
-    
+
     v_pred = _predict_vector_field(
         model=model,
+        batch=batch,
         images=images,
         query_points=x_t,
         timestep=t_query,
@@ -339,7 +344,7 @@ def loss_of_one_batch_train(
         pointmaps=pts3d_src_norm,
         cfg_scale=cfg_scale,
     )
-    #visualize_dx_t_v_pred_distribution(dx_t, v_pred, t, save_path=f"debug_points/value_distribution.png")
+    # visualize_dx_t_v_pred_distribution(dx_t, v_pred, t, save_path=f"debug_points/value_distribution.png")
 
     gt_list = {
         "velocity_trg": dx_t,
@@ -348,6 +353,117 @@ def loss_of_one_batch_train(
     pred_dict = {
         "velocity_pred": v_pred,
     }
-    loss, details = criterion( gt_list =   gt_list,pred_dict= pred_dict)
+    loss, details = criterion(gt_list=gt_list, pred_dict=pred_dict)
 
     return loss, details
+
+
+def visualize_extrinsics(
+    exts,
+    save_path="extrinsics_vis.png",
+    array_path="extrinsics_sample.npy",
+    visualize_world_translation=True,
+):
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        fig = plt.figure(figsize=(10, 10))
+        ax = fig.add_subplot(111, projection="3d")
+        colors = plt.cm.jet(np.linspace(0, 1, len(exts)))
+
+        if visualize_world_translation:
+            # Plot the world origin so the camera translations are easy to read in world space.
+            ax.scatter(0.0, 0.0, 0.0, color="black", s=80, marker="x", label="World origin", depthshade=False)
+
+        for i, ext in enumerate(exts):
+            R = ext[:3, :3]
+            t = ext[:3, 3]
+            cam_center = -R.T @ t
+
+            # For W2C extrinsics, cam_center is the camera translation expressed in world coordinates.
+            world_translation = cam_center
+
+            # Make the camera centers larger and add black edges to improve visibility
+            ax.scatter(
+                world_translation[0],
+                world_translation[1],
+                world_translation[2],
+                color=colors[i],
+                s=150,
+                edgecolors="black",
+                label=f"Cam {i}",
+                depthshade=False,
+            )
+
+            if visualize_world_translation:
+                # Show the translation from the world origin to the camera center.
+                ax.plot(
+                    [0.0, world_translation[0]],
+                    [0.0, world_translation[1]],
+                    [0.0, world_translation[2]],
+                    color=colors[i],
+                    alpha=0.35,
+                    linewidth=1.5,
+                    linestyle="--",
+                )
+
+            # Add text labeling the camera number next to the point
+            ax.text(world_translation[0], world_translation[1], world_translation[2], f"{i}", size=10, zorder=1, color="k")
+
+            # Make the coordinate axes lines slightly transparent and thinner so they don't hide the points
+            z_dir = R @ np.array([0, 0, 1])
+            ax.quiver(
+                world_translation[0],
+                world_translation[1],
+                world_translation[2],
+                z_dir[0],
+                z_dir[1],
+                z_dir[2],
+                length=0.2,
+                color="b",
+                alpha=0.5,
+                linewidth=1.5,
+            )
+            x_dir = R @ np.array([1, 0, 0])
+            ax.quiver(
+                world_translation[0],
+                world_translation[1],
+                world_translation[2],
+                x_dir[0],
+                x_dir[1],
+                x_dir[2],
+                length=0.2,
+                color="r",
+                alpha=0.5,
+                linewidth=1.5,
+            )
+            y_dir = R @ np.array([0, 1, 0])
+            ax.quiver(
+                world_translation[0],
+                world_translation[1],
+                world_translation[2],
+                y_dir[0],
+                y_dir[1],
+                y_dir[2],
+                length=0.2,
+                color="g",
+                alpha=0.5,
+                linewidth=1.5,
+            )
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+        plt.legend()
+        plt.savefig(save_path)
+        plt.close()
+        np.save(array_path, exts)
+        print(f"Saved extrinsics visualization to {save_path} and array to {array_path}")
+    except Exception as e:
+        import numpy as np
+
+        np.save(array_path, exts)
+        print(f"Saved {array_path}, but failed to visualize extrinsics (possibly no matplotlib): {e}")

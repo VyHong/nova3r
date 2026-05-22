@@ -115,12 +115,14 @@ class DepthAnything3Net(nn.Module):
         """
         # Extract features using backbone
         if extrinsics is not None:
-            with torch.autocast(device_type=x.device.type, enabled=False):
+            with torch.autocast(device_type=x.device.type, enabled=True):
                 cam_token = self.cam_enc(extrinsics, intrinsics, x.shape[-2:])
         else:
             cam_token = None
 
-        feats, output_3d_list, aux_feats = self.backbone(x, cam_token=cam_token, export_feat_layers=export_feat_layers, ref_view_strategy=ref_view_strategy)
+        feats, output_3d_list, aux_feats = self.backbone(
+            x, cam_token=cam_token, export_feat_layers=export_feat_layers, ref_view_strategy=ref_view_strategy
+        )
 
         return feats, output_3d_list, aux_feats, []
         # feats = [[item for item in feat] for feat in feats]
@@ -176,7 +178,9 @@ class DepthAnything3Net(nn.Module):
             )
             pred_extrinsic = affine_inverse(pred_extrinsic)  # w2c -> c2w
             pred_extrinsic = pred_extrinsic[:, :, :3, :]
-            pred_intrinsic = torch.eye(3, 3)[None, None].repeat(pred_extrinsic.shape[0], pred_extrinsic.shape[1], 1, 1).clone().to(pred_extrinsic.device)
+            pred_intrinsic = (
+                torch.eye(3, 3)[None, None].repeat(pred_extrinsic.shape[0], pred_extrinsic.shape[1], 1, 1).clone().to(pred_extrinsic.device)
+            )
             pred_intrinsic[:, :, 0, 0] = pred_focal_lengths[:, :, 0] / 2 * width
             pred_intrinsic[:, :, 1, 1] = pred_focal_lengths[:, :, 1] / 2 * height
             pred_intrinsic[:, :, 0, 2] = pred_principal_points[:, :, 0] * width * 0.5

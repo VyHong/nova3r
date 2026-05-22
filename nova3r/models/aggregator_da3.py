@@ -30,6 +30,7 @@ from PIL import Image
 
 from depth_anything_3.cfg import create_object, load_config
 from depth_anything_3.specs import Prediction
+
 # from depth_anything_3.utils.export import export
 from depth_anything_3.utils.geometry import affine_inverse
 from depth_anything_3.utils.io.input_processor import InputProcessor
@@ -38,8 +39,10 @@ from depth_anything_3.utils.logger import logger
 from depth_anything_3.utils.pose_align import align_poses_umeyama
 
 from depth_anything_3.da3 import DepthAnything3Net
+
 torch.backends.cudnn.benchmark = False
 from torchvision import transforms
+
 # logger.info("CUDNN Benchmark Disabled")
 
 SAFETENSORS_NAME = "model.safetensors"
@@ -73,7 +76,7 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
 
     _commit_hash: str | None = None  # Set by mixin when loading from Hub
 
-    def __init__(self, cfg ,**kwargs):
+    def __init__(self, cfg, **kwargs):
         """
         Initialize DepthAnything3 with specified preset.
 
@@ -125,9 +128,7 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
         image = normalize(image)
         autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         with torch.autocast(device_type=image.device.type, dtype=autocast_dtype):
-            return self.model(
-                image, extrinsics, intrinsics, export_feat_layers, infer_gs, use_ray_pose, ref_view_strategy
-            )
+            return self.model(image, extrinsics, intrinsics, export_feat_layers, infer_gs, use_ray_pose, ref_view_strategy)
 
     def inference(
         self,
@@ -192,9 +193,7 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
             assert isinstance(image[0], str), "`image` must be image paths for COLMAP export."
 
         # Preprocess images
-        imgs_cpu, extrinsics, intrinsics = self._preprocess_inputs(
-            image, extrinsics, intrinsics, process_res, process_res_method
-        )
+        imgs_cpu, extrinsics, intrinsics = self._preprocess_inputs(image, extrinsics, intrinsics, process_res, process_res_method)
 
         # Prepare tensors for model
         imgs, ex_t, in_t = self._prepare_model_inputs(imgs_cpu, extrinsics, intrinsics)
@@ -205,17 +204,13 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
         # Run model forward pass
         export_feat_layers = list(export_feat_layers) if export_feat_layers is not None else []
 
-        raw_output = self._run_model_forward(
-            imgs, ex_t_norm, in_t, export_feat_layers, infer_gs, use_ray_pose, ref_view_strategy
-        )
+        raw_output = self._run_model_forward(imgs, ex_t_norm, in_t, export_feat_layers, infer_gs, use_ray_pose, ref_view_strategy)
 
         # Convert raw output to prediction
         prediction = self._convert_to_prediction(raw_output)
 
         # Align prediction to extrinsincs
-        prediction = self._align_to_input_extrinsics_intrinsics(
-            extrinsics, intrinsics, prediction, align_to_input_ext_scale
-        )
+        prediction = self._align_to_input_extrinsics_intrinsics(extrinsics, intrinsics, prediction, align_to_input_ext_scale)
 
         # Add processed images for visualization
         prediction = self._add_processed_images(prediction, imgs_cpu)
@@ -310,16 +305,8 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
         imgs = imgs_cpu.to(device, non_blocking=True)[None].float()
 
         # Convert camera parameters to tensors
-        ex_t = (
-            extrinsics.to(device, non_blocking=True)[None].float()
-            if extrinsics is not None
-            else None
-        )
-        in_t = (
-            intrinsics.to(device, non_blocking=True)[None].float()
-            if intrinsics is not None
-            else None
-        )
+        ex_t = extrinsics.to(device, non_blocking=True)[None].float() if extrinsics is not None else None
+        in_t = intrinsics.to(device, non_blocking=True)[None].float() if intrinsics is not None else None
 
         return imgs, ex_t, in_t
 
@@ -410,9 +397,7 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
         prediction.processed_images = processed_imgs
         return prediction
 
-    def _export_results(
-        self, prediction: Prediction, export_format: str, export_dir: str, **kwargs
-    ) -> None:
+    def _export_results(self, prediction: Prediction, export_format: str, export_dir: str, **kwargs) -> None:
         """Export results to specified format and directory."""
         start_time = time.time()
         # export(prediction, export_format, export_dir, **kwargs)

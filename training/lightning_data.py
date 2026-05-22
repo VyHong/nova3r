@@ -19,6 +19,7 @@ class Nova3RDataModule(pl.LightningDataModule):
         self.val_list = data_cfg.val_list_path
         self.test_list = data_cfg.test_list_path
         self.batch_size = data_cfg.batch_size
+        self.test_batch_size = data_cfg.test_batch_size
         self.num_workers = data_cfg.num_workers
 
     def setup(self, stage=None):
@@ -34,7 +35,7 @@ class Nova3RDataModule(pl.LightningDataModule):
         return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, pin_memory=True,collate_fn=self.train_dataset.dynamic_pad_collate_fn)
 
     def val_dataloader(self):
-        return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True, collate_fn=self.val_dataset.dynamic_pad_collate_fn)
+        return DataLoader(self.val_dataset, batch_size=self.test_batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True, collate_fn=self.val_dataset.dynamic_pad_collate_fn)
     
     def test_dataloader(self):
-        return DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True, collate_fn=self.test_dataset.dynamic_pad_collate_fn)
+        return DataLoader(self.test_dataset, batch_size=self.test_batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True, collate_fn=self.test_dataset.dynamic_pad_collate_fn)

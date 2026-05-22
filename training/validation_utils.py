@@ -61,6 +61,7 @@ def generate_pointcloud(cfg,model,batch,num_queries,device):
         pairs,
         model,
         device,
+        batch = batch,
         batch_size=batch_size,
         num_queries=num_queries,
         n_views=len(images),

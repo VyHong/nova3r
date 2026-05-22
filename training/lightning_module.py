@@ -52,10 +52,6 @@ class Nova3RLightningModule(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        if not hasattr(self, "val_batch_to_log") or self.val_batch_to_log is None:
-            self.val_batch_to_log = batch  # Store the first batch for logging at epoch end
-
-
         pts3d_src_norm, valid_src, pts3d_trg_norm, valid_trg = normalize_pointclouds(self.cfg, batch)
         pts3d_trg_norm = pts3d_trg_norm.to(dtype=torch.float32)  
 
@@ -65,6 +61,9 @@ class Nova3RLightningModule(pl.LightningModule):
         batch["valid_src"] = valid_src
         batch["pts3d_trg_norm"] = pts3d_trg_norm
         batch["valid_trg"] = valid_trg
+        if not hasattr(self, "val_batch_to_log") or self.val_batch_to_log is None:
+            self.val_batch_to_log = batch  # Store the first batch for logging at epoch end
+
         pts3d = generate_pointcloud(
             cfg=self.cfg,
             model=self.model,
@@ -92,18 +91,19 @@ class Nova3RLightningModule(pl.LightningModule):
         if hasattr(self, "val_batch_to_log") and self.val_batch_to_log is not None:
             max_elements = 4
             for k, v in self.val_batch_to_log.items():
-                if isinstance(v, torch.Tensor) or isinstance(v, list):
+                if k in ["images", "intrinsics", "extrinsics"] and isinstance(v, list):
+                    new_v = []
+                    for item in v:
+                        if isinstance(item, torch.Tensor):
+                            new_v.append(item[:max_elements])
+                        elif isinstance(item, list):
+                            new_v.append([t[:max_elements] if isinstance(t, torch.Tensor) else t for t in item])
+                        else:
+                            new_v.append(item)
+                    self.val_batch_to_log[k] = new_v
+                elif isinstance(v, torch.Tensor) or isinstance(v, list):
                     self.val_batch_to_log[k] = v[:max_elements]
 
-            pts3d_src_norm, valid_src, pts3d_trg_norm, valid_trg = normalize_pointclouds(self.cfg, self.val_batch_to_log)
-            pts3d_trg_norm = pts3d_trg_norm.to(dtype=torch.float32)  
-
-            gt_pts3d = pts3d_trg_norm
-            gt_valid = valid_trg
-            self.val_batch_to_log["pts3d_src_norm"] = pts3d_src_norm
-            self.val_batch_to_log["valid_src"] = valid_src
-            self.val_batch_to_log["pts3d_trg_norm"] = pts3d_trg_norm
-            self.val_batch_to_log["valid_trg"] = valid_trg
             pts3d = generate_pointcloud(
                 cfg=self.cfg,
                 model=self.model,
@@ -122,10 +122,7 @@ class Nova3RLightningModule(pl.LightningModule):
     
     def test_step(self, batch, batch_idx):
             pts3d_src_norm, valid_src, pts3d_trg_norm, valid_trg = normalize_pointclouds(self.cfg, batch)
-            pts3d_trg_norm = pts3d_trg_norm.to(dtype=torch.float32)  
 
-            gt_pts3d = pts3d_trg_norm
-            gt_valid = valid_trg
             batch["pts3d_src_norm"] = pts3d_src_norm
             batch["valid_src"] = valid_src
             batch["pts3d_trg_norm"] = pts3d_trg_norm
@@ -140,26 +137,14 @@ class Nova3RLightningModule(pl.LightningModule):
             # save_points_ply(batch["cam_points"],"./debug_points/gt.ply")
             # save_points_ply(pts3d,"./debug_points/pred.ply")
             
-            B = pts3d_trg_norm.shape[0]
             log_dir = self.logger.log_dir if self.logger else None
             
             if not hasattr(self, "test_results"):
                 self.test_results = []
                 
-            for i in range(B):
-                single_batch = {}
-                for k, v in batch.items():
-                    if isinstance(v, torch.Tensor):
-                        single_batch[k] = v[i:i+1]
-                    elif isinstance(v, list):
-                        single_batch[k] = [v[i]]
-                    else:
-                        single_batch[k] = v
-                        
-                single_pts3d = pts3d[i:i+1]
-                data, details = run_test_score(single_batch, single_pts3d, self.test_criterion, self.device)
-                res = save_test_scores_to_csv(single_batch, details, log_dir)
-                self.test_results.append(res)
+            data, details = run_test_score(batch, pts3d, self.test_criterion, self.device)
+            res = save_test_scores_to_csv(batch, details, log_dir)
+            self.test_results.append(res)
 
             if self.cfg.save_test_examples:
                 generate_example(
