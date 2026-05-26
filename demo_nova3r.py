@@ -53,10 +53,10 @@ def load_model(ckpt_path, device, **kw):
 
     model_config = cfg.model
     model = eval(model_config["name"])(**model_config["params"])
-    model.to(device,dtype= torch.bfloat16)
+    model.to(device, dtype=torch.bfloat16)
 
     if "model" in ckpt:
-        model.load_state_dict(ckpt["model"], strict=True, **kw)
+        model.load_state_dict(ckpt["model"], **kw)
     elif "state_dict" in ckpt:
         state_dict = {}
         for k, v in ckpt["state_dict"].items():
@@ -64,9 +64,9 @@ def load_model(ckpt_path, device, **kw):
                 state_dict[k[6:]] = v
             else:
                 state_dict[k] = v
-        model.load_state_dict(state_dict, strict=True, **kw)
+        model.load_state_dict(state_dict, **kw)
     else:
-        model.load_state_dict(ckpt, strict=True)
+        model.load_state_dict(ckpt)
 
     del ckpt
     return model, cfg

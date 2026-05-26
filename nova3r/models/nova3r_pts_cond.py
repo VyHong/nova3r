@@ -50,17 +50,11 @@ class Nova3rPtsCond(nn.Module, PyTorchModelHubMixin):
         )
 
         self.num_3d_tokens = num_3d_tokens
-        aggregator_type = (
-            self.cfg.aggregator.type
-            if "type" in self.cfg.aggregator
-            else "TripoSGEncoder"
-        )
+        aggregator_type = self.cfg.aggregator.type if "type" in self.cfg.aggregator else "TripoSGEncoder"
 
         self.use_token_ln = self.cfg.aggregator.params.get("use_token_ln", False)
         self.token_noise_prob = self.cfg.aggregator.params.get("token_noise_prob", 0.0)
-        self.token_noise_sigma = self.cfg.aggregator.params.get(
-            "token_noise_sigma", 0.0
-        )
+        self.token_noise_sigma = self.cfg.aggregator.params.get("token_noise_sigma", 0.0)
 
         if self.use_token_ln:
             self.token_norm = nn.LayerNorm(self.cfg.aggregator.params.token_dim)
@@ -101,18 +95,12 @@ class Nova3rPtsCond(nn.Module, PyTorchModelHubMixin):
                 self.embedder.out_dim,
             )
         else:
-            raise NotImplementedError(
-                f"Aggregator {self.cfg.aggregator.name} not implemented."
-            )
+            raise NotImplementedError(f"Aggregator {self.cfg.aggregator.name} not implemented.")
 
         self.use_kl = self.cfg.aggregator.params.get("use_kl", False)
         if self.use_kl:
-            self.mean_fc = nn.Linear(
-                self.cfg.aggregator.params.dim, self.cfg.aggregator.params.token_dim
-            )
-            self.logvar_fc = nn.Linear(
-                self.cfg.aggregator.params.dim, self.cfg.aggregator.params.token_dim
-            )
+            self.mean_fc = nn.Linear(self.cfg.aggregator.params.dim, self.cfg.aggregator.params.token_dim)
+            self.logvar_fc = nn.Linear(self.cfg.aggregator.params.dim, self.cfg.aggregator.params.token_dim)
 
         self.camera_head = None
         if "point_head" in cfg:
@@ -137,9 +125,7 @@ class Nova3rPtsCond(nn.Module, PyTorchModelHubMixin):
         if "pts3d_head" in cfg:
             self.pts3d_head = eval(cfg.pts3d_head.name)(**cfg.pts3d_head.params)
 
-    def _sample_features(
-        self, x: torch.Tensor, num_tokens: int = 2048, seed: Optional[int] = None
-    ):
+    def _sample_features(self, x: torch.Tensor, num_tokens: int = 2048, seed: Optional[int] = None):
         """Sample points from features of the input point cloud.
 
         Args:
@@ -151,16 +137,12 @@ class Nova3rPtsCond(nn.Module, PyTorchModelHubMixin):
             torch.Tensor: Sampled points with shape (B, num_tokens, C).
         """
         rng = np.random.default_rng(seed)
-        indices = rng.choice(
-            x.shape[1], num_tokens * 4, replace=num_tokens * 4 > x.shape[1]
-        )
+        indices = rng.choice(x.shape[1], num_tokens * 4, replace=num_tokens * 4 > x.shape[1])
         selected_points = x[:, indices]
 
         batch_size, num_points, num_channels = selected_points.shape
         flattened_points = selected_points.view(batch_size * num_points, num_channels)
-        batch_indices = (
-            torch.arange(batch_size).to(x.device).repeat_interleave(num_points)
-        )
+        batch_indices = torch.arange(batch_size).to(x.device).repeat_interleave(num_points)
 
         sampling_ratio = 1.0 / 4
         sampled_indices = fps(
@@ -169,11 +151,20 @@ class Nova3rPtsCond(nn.Module, PyTorchModelHubMixin):
             ratio=sampling_ratio,
             random_start=False,  # deterministic sampling
         )
-        sampled_points = flattened_points[sampled_indices].view(
-            batch_size, -1, num_channels
-        )
+        sampled_points = flattened_points[sampled_indices].view(batch_size, -1, num_channels)
 
         return sampled_points
+
+    def prep_ckpt_for_3d_token(self, ckpt):
+        if self.cfg.aggregator.params.token_dim != 128:
+
+            ckpt.pop("token_proj.weight")
+            ckpt.pop("token_proj.bias")
+            ckpt.pop("pts3d_head.mlp_token.weight")
+            ckpt.pop("pts3d_head.mlp_token.bias")
+        if self.cfg.pts3d_head.params.num_3d_tokens != 768:
+            ckpt.pop("tokens")
+        return ckpt
 
     def load_state_dict(self, ckpt, **kw):
         # Duplicate weights for pts3d_blocks from frame_blocks if not present
@@ -181,11 +172,11 @@ class Nova3rPtsCond(nn.Module, PyTorchModelHubMixin):
         if not any(k.startswith("aggregator.pts3d_blocks") for k in ckpt):
             for key, value in ckpt.items():
                 if key.startswith("aggregator.frame_blocks"):
-                    new_ckpt[
-                        key.replace("aggregator.frame_blocks", "aggregator.pts3d_blocks")
-                    ] = value
-                    
+                    new_ckpt[key.replace("aggregator.frame_blocks", "aggregator.pts3d_blocks")] = value
+
         kw.pop("aggregator_ckpt", None)  # Remove aggregator_ckpt from kwargs to avoid issues with super().load_state_dict
+        if kw.pop("stage", None) != "test":
+            new_ckpt = self.prep_ckpt_for_3d_token(new_ckpt)
         return super().load_state_dict(new_ckpt, **kw)
 
     def _encode(self, pointmaps, cfg_scale=1.0, test=False, **kwargs):
@@ -230,9 +221,7 @@ class Nova3rPtsCond(nn.Module, PyTorchModelHubMixin):
             tokens = self.token_proj(x)
 
         else:
-            raise NotImplementedError(
-                f"Aggregator {self.cfg.aggregator.name} not implemented for encoding."
-            )
+            raise NotImplementedError(f"Aggregator {self.cfg.aggregator.name} not implemented for encoding.")
 
         # Apply classifier-free guidance dropout or interpolation
         if test:

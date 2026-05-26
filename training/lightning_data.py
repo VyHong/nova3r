@@ -24,12 +24,12 @@ class Nova3RDataModule(pl.LightningDataModule):
 
     def setup(self, stage=None):
         if stage == "fit" or stage is None:
-            self.train_dataset = ReplicaPanoDataset(common_conf=self.data_cfg, scenes_list_path=self.train_list, data_root=self.root_dir)
-            self.val_dataset = ReplicaPanoDataset(common_conf=self.data_cfg, scenes_list_path=self.val_list, data_root=self.root_dir)
+            self.train_dataset = ReplicaPanoDataset(common_conf=self.data_cfg, scenes_list_path=self.train_list, data_root=self.root_dir,split="train")
+            self.val_dataset = ReplicaPanoDataset(common_conf=self.data_cfg, scenes_list_path=self.val_list, data_root=self.root_dir,split="val")
         if stage == "validate" or stage is None:
-            self.val_dataset = ReplicaPanoDataset(common_conf=self.data_cfg, scenes_list_path=self.val_list, data_root=self.root_dir)
+            self.val_dataset = ReplicaPanoDataset(common_conf=self.data_cfg, scenes_list_path=self.val_list, data_root=self.root_dir,split="val")
         if stage == "test" or stage is None:
-            self.test_dataset = ReplicaPanoDataset(common_conf=self.data_cfg, scenes_list_path=self.test_list, data_root=self.root_dir)
+            self.test_dataset = ReplicaPanoDataset(common_conf=self.data_cfg, scenes_list_path=self.test_list, data_root=self.root_dir,split="test")
 
     def train_dataloader(self):
         return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, pin_memory=True,collate_fn=self.train_dataset.dynamic_pad_collate_fn)

@@ -19,7 +19,6 @@ import cv2
 import os
 import torch
 from torch.utils.data._utils.collate import default_collate
-from training.training_utils import visualize_extrinsics
 
 
 class ReplicaPanoDataset(BaseDataset):
@@ -160,6 +159,8 @@ class ReplicaPanoDataset(BaseDataset):
             seq_name = self.sequence_list[seq_index]
         if subseq_ids is None:
             subseq_ids = np.arange(6)
+            if self.split == "train":
+                subseq_ids = np.random.choice(subseq_ids, len(subseq_ids), replace=self.allow_duplicate_img)
 
         metadata = self.data_store[seq_name]
 
@@ -218,22 +219,27 @@ class ReplicaPanoDataset(BaseDataset):
                     colmap_points = scene_pcd.transform(T_to_colmap)
                     cam_points = colmap_points.transform(image_extrinsics)
 
-                    world_points = np.asarray(colmap_points.points)
+                    # world_points = np.asarray(colmap_points.points)
                     cam_points = np.asarray(cam_points.points)
                     point_masks = np.ones(len(cam_points), dtype=bool)
                     # self.save_debug_points(world_points, output_dir="debug_points", filename=f"{seq_name}_{id}_world_points.ply")
-                    # self.save_debug_points(cam_points, output_dir="debug_points", filename=f"{seq_name}_{id}_cam_points.ply")
+                    # self.save_debug_points(cam_points, output_dir="debug_points", filename=f"{seq_name}_{id}_da3_cam_points.ply")
                 images.append(image)
                 original_sizes.append(original_size)
-                c2w_image_extrinsics = affine_inverse(torch.from_numpy(image_extrinsics).float())
-                extrinsics.append(c2w_image_extrinsics)
+                # extrinsics in w2c
+                extrinsics.append(torch.from_numpy(image_extrinsics).float())
                 intrinsics.append(subseq_intrinsics)
 
         # We add a dummy batch dimension because _normalize_extrinsics expects it like (B, N, 4, 4)
         ex_t_batched = torch.stack(extrinsics).unsqueeze(0)
         normalized_extrinsics = self._normalize_extrinsics(ex_t_batched).squeeze(0)
-        # visualize_extrinsics(ex_t_batched[0], save_path=f"debug_points/{seq_name}_{id}_acc_extrinsics.png")
-        # visualize_extrinsics(normalized_extrinsics, save_path=f"debug_points/{seq_name}_{id}_norm_extrinsics.png")
+
+        # Save normalized extrinsics as JSON for debugging / downstream use
+        # norm_ex_np = normalized_extrinsics.cpu().numpy().tolist()
+        # save_path = os.path.join("debug_points", f"{seq_name}_{str(id)}_normalized_extrinsics.json")
+        # with open(save_path, "w") as jf:
+        #     json.dump(norm_ex_np, jf, indent=4)
+
         intrinsics = torch.from_numpy(np.array(intrinsics))
         set_name = "replica_pano"
         batch = {
@@ -245,7 +251,7 @@ class ReplicaPanoDataset(BaseDataset):
             "extrinsics": normalized_extrinsics,
             "intrinsics": intrinsics,
             "cam_points": cam_points,
-            "world_points": world_points,
+            # "world_points": world_points,
             "point_masks": point_masks,
             "original_sizes": original_sizes,
         }
@@ -320,22 +326,22 @@ class ReplicaPanoDataset(BaseDataset):
         and packaging the rest of the metadata.
         """
         # 1. Find the maximum number of points present ONLY in this batch
-        max_pts_in_batch = max([item["world_points"].shape[0] for item in batch])
+        max_pts_in_batch = max([item["cam_points"].shape[0] for item in batch])
         batch_size = len(batch)
 
         # 2. Allocate uniform tensors for the point data
-        padded_world_pts = torch.zeros((batch_size, max_pts_in_batch, 3), dtype=torch.float32)
+        # padded_world_pts = torch.zeros((batch_size, max_pts_in_batch, 3), dtype=torch.float32)
         padded_cam_pts = torch.zeros((batch_size, max_pts_in_batch, 3), dtype=torch.float32)
         point_masks = torch.zeros((batch_size, max_pts_in_batch), dtype=torch.bool)
         valid_counts = torch.zeros(batch_size, dtype=torch.long)
 
         # 3. Populate tensors (this naturally places valid data at the front)
         for idx, item in enumerate(batch):
-            w_pts = torch.as_tensor(item["world_points"], dtype=torch.float32)
+            # w_pts = torch.as_tensor(item["world_points"], dtype=torch.float32)
             c_pts = torch.as_tensor(item["cam_points"], dtype=torch.float32)
-            num_pts = w_pts.shape[0]
+            num_pts = c_pts.shape[0]
 
-            padded_world_pts[idx, :num_pts, :] = w_pts
+            # padded_world_pts[idx, :num_pts, :] = w_pts
             padded_cam_pts[idx, :num_pts, :] = c_pts
             point_masks[idx, :num_pts] = True
             valid_counts[idx] = num_pts
@@ -343,7 +349,7 @@ class ReplicaPanoDataset(BaseDataset):
         # 4. Handle all other keys (images, matrices, names) smoothly
         collated_batch = {}
         for key in batch[0].keys():
-            if key in ["world_points", "cam_points", "point_masks"]:
+            if key in ["cam_points", "point_masks"]:  # "world_points"
                 continue  # We already handled these manually above
 
             if key in ["seq_name", "id"]:
@@ -354,7 +360,7 @@ class ReplicaPanoDataset(BaseDataset):
                 collated_batch[key] = default_collate([item[key] for item in batch])
 
         # Add our freshly padded point tensors back into the final dictionary
-        collated_batch["world_points"] = padded_world_pts
+        # collated_batch["world_points"] = padded_world_pts
         collated_batch["cam_points"] = padded_cam_pts
         collated_batch["point_masks"] = point_masks
         collated_batch["valid_counts"] = valid_counts  # Crucial for your GPU FPS kernel!

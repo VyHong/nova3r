@@ -35,6 +35,7 @@ podman run -v /mnt:/mnt:rw \
     -v /usr/bin/start-ssh-server:/usr/bin/start-ssh-server:ro \
     -v /etc/ssh/node_rsa_key:/etc/ssh/node_rsa_key \
     -v ~/.ssh/authorized_keys:/root/.ssh/authorized_keys \
+    -v /mnt/home/vyhong/.vscode-server-extensions:/root/.vscode-server/extensions \
     -w /mnt/home/${USER}/projects/nova3r \
     --cap-add=SYS_ADMIN \
     --cap-add=SYS_PTRACE \
@@ -47,7 +48,7 @@ podman run -v /mnt:/mnt:rw \
     --network=host -e USER=root --replace \
     -e PORT=$(python -c "import random; print(random.randint(20000,30000))") \
     --name=nova3r \
-    --shm-size=32gb \
+    --shm-size=64gb \
     -e CUDA_VISIBLE_DEVICES=0 \
     --device=/dev/fuse \
     -d \

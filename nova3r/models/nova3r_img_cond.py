@@ -1,5 +1,3 @@
-from training.training_utils import visualize_extrinsics
-
 # Copyright (c) 2026 Weirong Chen
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -132,7 +130,7 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
     def load_state_dict(self, ckpt, **kw):
         # duplicate all weights for the pts3d_blocks if not present
         new_ckpt = dict(ckpt)
-        if self.cfg.aggregator.name == "DepthAnything3Net":
+        if self.cfg.aggregator.name == "DepthAnything3Net" and kw.get("stage") != "test":
             state_dict = load_file(kw.get("aggregator_ckpt"))
             missing_keys, unexpected_keys = self.da3_aggregator.load_state_dict(state_dict, strict=False)
             print(f"Loaded DepthAnything3Net aggregator weights with {len(missing_keys)} missing keys")
