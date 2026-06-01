@@ -54,4 +54,4 @@ python eval/evaluate_pcd.py --gt_ply /tmp/datasets/replica_pano/office_0_000/off
 cp /tmp/datasets/replica_pano/large_apartment_0_001/large_apartment_0_001/large_apartment_0_cropped.ply ./debug_points
 
 # Point cloud autoencoding from a SCRREAM scene
-python demo_nova3r_ae.py   --input_ply  debug_points/hotel_0_0_small/hotel_0_cropped.ply --ckpt checkpoints/scene_ae/checkpoint-last.pth  --num_queries 50000
+python demo_nova3r_ae.py   --input_ply  nova3r/debug_points/room_2_aligned.ply --ckpt checkpoints/scene_ae/checkpoint-last.pth  --num_queries 50000

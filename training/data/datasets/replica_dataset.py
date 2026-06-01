@@ -34,7 +34,8 @@ class ReplicaPanoDataset(BaseDataset):
         common_conf,
         data_root,
         split="train",
-        scenes_list_path=None,
+        samples_list_path=None,
+        format="pointcloud",
     ):
         """
         Initialize the ReplicaPano dataset.
@@ -43,7 +44,7 @@ class ReplicaPanoDataset(BaseDataset):
             common_conf: Common configuration from BaseDataset
             data_root: Root directory containing pickle files or scene data
             split: Dataset split ('train', 'val', 'test'). Default: 'train'
-            scenes_list_path: Path to a file containing a list of specific scenes to load. If None, load all scenes.
+            sample_list_path: Path to a file containing a list of specific samples to load. If None, load all samples.
         """
         super().__init__(common_conf)
         self.allow_duplicate_img = common_conf.allow_duplicate_img
@@ -52,17 +53,17 @@ class ReplicaPanoDataset(BaseDataset):
         self.split = split
 
         self.sequence_list = []
-        if scenes_list_path is None:
-            self._load_scenes_list()
-            self.scenes_list = [f"{scene} {i:05}" for i in range(100) for scene in self.sequence_list]
-            # save scenes_list to a json file for future use
+        if samples_list_path is None:
+            self._load_sequence_list()
+            self.samples_list = [f"{scene} {i:05}" for i in range(100) for scene in self.sequence_list]
+            # save samples_list to a json file for future use
             with open(f"{split}_list.json", "w") as f:
-                json.dump(self.scenes_list, f, indent=4)
+                json.dump(self.samples_list, f, indent=4)
 
         else:
-            with open(scenes_list_path, "r") as f:
-                self.scenes_list = json.load(f)
-            for scene in self.scenes_list:
+            with open(samples_list_path, "r") as f:
+                self.samples_list = json.load(f)
+            for scene in self.samples_list:
                 self.sequence_list.append(f"{scene.split(' ')[0]}")
 
         self.data_store = {}
@@ -75,9 +76,9 @@ class ReplicaPanoDataset(BaseDataset):
         )
 
     def __len__(self):
-        return len(self.scenes_list)
+        return len(self.samples_list)
 
-    def _load_scenes_list(self):
+    def _load_sequence_list(self):
         """
         Load available scene pickle files from data_root.
 
@@ -159,7 +160,7 @@ class ReplicaPanoDataset(BaseDataset):
             seq_name = self.sequence_list[seq_index]
         if subseq_ids is None:
             subseq_ids = np.arange(6)
-            if self.split == "train":
+            if self.split == "trai":
                 subseq_ids = np.random.choice(subseq_ids, len(subseq_ids), replace=self.allow_duplicate_img)
 
         metadata = self.data_store[seq_name]
@@ -259,7 +260,7 @@ class ReplicaPanoDataset(BaseDataset):
         return batch
 
     def __getitem__(self, index):
-        seq_name, id = self.scenes_list[index].split(" ")
+        seq_name, id = self.samples_list[index].split(" ")
         return self.get_data(seq_name=seq_name, id=id)
 
     def _normalize_extrinsics(self, ex_t: torch.Tensor | None) -> torch.Tensor | None:

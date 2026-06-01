@@ -8,6 +8,8 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib
 
+from nova3r.heads.hunyuan_model.surface_loaders import SharpEdgeSurfaceLoader
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from dust3r.utils.device import to_cpu, collate_with_cat
@@ -21,6 +23,11 @@ from nova3r.utils.sampling import sampling_train_gen_target
 from einops import rearrange
 
 path = AffineProbPath(scheduler=CosineScheduler())
+
+hunyuan_loader = SharpEdgeSurfaceLoader(
+    num_sharp_points=5120,
+    num_uniform_points=5120,
+)
 
 
 def save_points_ply(points, filename):
@@ -127,6 +134,14 @@ def get_all_pts3d(gt_list, mode=None, down_resolution=112):
         gt_pts, valid = get_complete_pts3d(gt_list)
         # run fps_fast
         gt_pts, valid = sampling_train_gen_target(gt_pts, valid, None, target_sampling="fps_edge_fast", batch_size=batch_size)
+
+    elif "src_complete_hunyuan" in mode:
+        # batch_size = int(mode.split("_")[-1])
+        gt_pts, valid = get_complete_pts3d(gt_list)
+        surface_pts = hunyuan_loader(gt_pts).to(gt_pts.device)
+        valid = torch.ones(surface_pts.shape[0], dtype=torch.bool, device=surface_pts.device)
+
+        return surface_pts, valid
 
     elif mode == "cube_global":
         pts_xyz = gt_list[0]["global_center_xyz"]
@@ -315,7 +330,11 @@ def loss_of_one_batch_train(
 
     pts3d_src, valid_src = get_all_pts3d(batch, mode=query_src, down_resolution=down_resolution)
     pts3d_trg, valid_trg = get_all_pts3d(batch, mode=target_src, down_resolution=down_resolution)
-    pts3d_src_norm, pts3d_trg_norm = normalize_input(pts3d_src, valid_src, pts3d_trg, valid_trg, mode=norm_mode)
+    if "hunyuan" in query_src:
+        pts3d_src_norm, normals_src = pts3d_src[..., :3], pts3d_src[..., 3:]
+        pts3d_trg_norm, normals_trg = pts3d_trg[..., :3], pts3d_trg[..., 3:]
+    else:
+        pts3d_src_norm, pts3d_trg_norm = normalize_input(pts3d_src, valid_src, pts3d_trg, valid_trg, mode=norm_mode)
 
     B = images.shape[0]
     # save_points_ply(pts3d_trg_norm[0], f"debug_points/points_trg.ply")
@@ -334,6 +353,8 @@ def loss_of_one_batch_train(
     t_query = t[:, None].expand(B, x_t.shape[1])
     cfg_scale = args.cfg_scale if "cfg_scale" in args else 1.0
 
+    if "hunyuan" in query_src:
+        pts3d_src_norm = torch.cat([pts3d_src_norm, normals_src], dim=-1)
     v_pred = _predict_vector_field(
         model=model,
         batch=batch,
@@ -349,11 +370,13 @@ def loss_of_one_batch_train(
     gt_list = {
         "velocity_trg": dx_t,
         "valid_trg": valid_trg,
+        "pts3d_target": pts3d_trg_norm,
     }
     pred_dict = {
         "velocity_pred": v_pred,
+        "x_t": x_t,
+        "t": t,
     }
     loss, details = criterion(gt_list=gt_list, pred_dict=pred_dict)
 
     return loss, details
-

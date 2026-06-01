@@ -9,7 +9,7 @@ from training.validation_utils import (
     save_test_scores_to_csv,
     normalize_pointclouds,
 )
-from nova3r.losses import L21, FMVelocity, Pts3D_Regr3D_CD_V4
+from nova3r.losses import L21, FMVelocity, Pts3D_Regr3D_CD_V4, ReconstructionLoss
 from eval.mv_recon.metric import SSI3DScore_Scene_Multi
 
 
@@ -33,7 +33,7 @@ class Nova3RLightningModule(pl.LightningModule):
                 # print(f"Kept active: {name}")
                 pass
 
-        self.train_criterion = FMVelocity(L21)
+        self.train_criterion = FMVelocity(L21) + 0.1 * ReconstructionLoss(L21)
         self.val_criterion = Pts3D_Regr3D_CD_V4(L21)
         self.test_criterion = SSI3DScore_Scene_Multi(
             num_eval_pts=16384,
@@ -59,7 +59,7 @@ class Nova3RLightningModule(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        pts3d_src_norm, valid_src, pts3d_trg_norm, valid_trg = normalize_pointclouds(self.cfg, batch)
+        pts3d_src_norm, valid_src, pts3d_trg_norm, valid_trg, normals_src, normals_trg = normalize_pointclouds(self.cfg, batch)
         pts3d_trg_norm = pts3d_trg_norm.to(dtype=torch.float32)
 
         gt_pts3d = pts3d_trg_norm
@@ -68,6 +68,8 @@ class Nova3RLightningModule(pl.LightningModule):
         batch["valid_src"] = valid_src
         batch["pts3d_trg_norm"] = pts3d_trg_norm
         batch["valid_trg"] = valid_trg
+        batch["normals_src"] = normals_src
+        batch["normals_trg"] = normals_trg
         if not hasattr(self, "val_batch_to_log") or self.val_batch_to_log is None:
             self.val_batch_to_log = batch  # Store the first batch for logging at epoch end
 
@@ -117,6 +119,7 @@ class Nova3RLightningModule(pl.LightningModule):
                 batch=self.val_batch_to_log,
                 num_queries=self.cfg.decoder_sample_size,
                 device=self.device,
+                stage="test",
             )
 
             generate_example(
@@ -128,18 +131,16 @@ class Nova3RLightningModule(pl.LightningModule):
             self.val_batch_to_log = None
 
     def test_step(self, batch, batch_idx):
-        pts3d_src_norm, valid_src, pts3d_trg_norm, valid_trg = normalize_pointclouds(self.cfg, batch)
+        pts3d_src_norm, valid_src, pts3d_trg_norm, valid_trg, normals_src, normals_trg = normalize_pointclouds(self.cfg, batch)
 
         batch["pts3d_src_norm"] = pts3d_src_norm
         batch["valid_src"] = valid_src
         batch["pts3d_trg_norm"] = pts3d_trg_norm
         batch["valid_trg"] = valid_trg
+        batch["normals_src"] = normals_src
+        batch["normals_trg"] = normals_trg
         pts3d = generate_pointcloud(
-            cfg=self.cfg,
-            model=self.model,
-            batch=batch,
-            num_queries=self.cfg.decoder_sample_size,
-            device=self.device,
+            cfg=self.cfg, model=self.model, batch=batch, num_queries=self.cfg.decoder_sample_size, device=self.device, stage="test"
         )
         # save_points_ply(batch["cam_points"],"./debug_points/gt.ply")
         # save_points_ply(pts3d,"./debug_points/pred.ply")

@@ -4,42 +4,60 @@ import os
 from demo_nova3r import render_360_video, save_pointcloud
 from eval.mv_recon.metric import scale_shift_alignment_chamfer
 from nova3r.inference import get_all_pts3d, inference_nova3r
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 import torch
 import time
-
+import numpy as np
 from omegaconf import OmegaConf
 from training.training_utils import get_all_pts3d, normalize_input
+from training.training_utils import save_points_ply
+
 
 def normalize_pointclouds(cfg, batch):
-        if "query_source" in cfg.model.params.cfg.pts3d_head.params:
-            query_src = cfg.model.params.cfg.pts3d_head.params.query_source
-        else:
-            query_src = "src_complete"
+    if "query_source" in cfg.model.params.cfg.pts3d_head.params:
+        query_src = cfg.model.params.cfg.pts3d_head.params.query_source
+    else:
+        query_src = "src_complete"
 
-        if "target_source" in cfg.model.params.cfg.pts3d_head.params:
-            target_src = cfg.model.params.cfg.pts3d_head.params.target_source
-        else:
-            target_src = "src_complete"
+    if "target_source" in cfg.model.params.cfg.pts3d_head.params:
+        target_src = cfg.model.params.cfg.pts3d_head.params.target_source
+    else:
+        target_src = "src_complete"
 
-        if "down_resolution" in cfg.model.params.cfg.pts3d_head.params:
-            down_resolution =   cfg.model.params.cfg.pts3d_head.params.down_resolution
-        else:
-            down_resolution = 224
+    if "down_resolution" in cfg.model.params.cfg.pts3d_head.params:
+        down_resolution = cfg.model.params.cfg.pts3d_head.params.down_resolution
+    else:
+        down_resolution = 224
 
-        if "norm_mode" in cfg.model.params.cfg.pts3d_head.params:
-            norm_mode = cfg.model.params.cfg.pts3d_head.params.norm_mode
-        else:
-            norm_mode = "none"
+    if "norm_mode" in cfg.model.params.cfg.pts3d_head.params:
+        norm_mode = cfg.model.params.cfg.pts3d_head.params.norm_mode
+    else:
+        norm_mode = "none"
 
-        pts3d_src, valid_src = get_all_pts3d(batch, mode=query_src, down_resolution=down_resolution)
-        pts3d_trg, valid_trg = get_all_pts3d(batch, mode=target_src, down_resolution=down_resolution)
+    pts3d_src, valid_src = get_all_pts3d(batch, mode=query_src, down_resolution=down_resolution)
+    pts3d_trg, valid_trg = get_all_pts3d(batch, mode=target_src, down_resolution=down_resolution)
+
+    if "hunyuan" in query_src:
+        pts3d_src_norm, normals_src = pts3d_src[..., :3], pts3d_src[..., 3:]
+        pts3d_trg_norm, normals_trg = pts3d_trg[..., :3], pts3d_trg[..., 3:]
+    else:
         pts3d_src_norm, pts3d_trg_norm = normalize_input(pts3d_src, valid_src, pts3d_trg, valid_trg, mode=norm_mode)
 
-        return pts3d_src_norm, valid_src, pts3d_trg_norm, valid_trg
+    # save_points_ply(pts3d_trg_norm[0], f"debug_points/points_trg.ply")
 
-def generate_pointcloud(cfg,model,batch,num_queries,device): 
+    return (
+        pts3d_src_norm,
+        valid_src,
+        pts3d_trg_norm,
+        valid_trg,
+        normals_src if "hunyuan" in query_src else None,
+        normals_trg if "hunyuan" in target_src else None,
+    )
+
+
+def generate_pointcloud(cfg, model, batch, num_queries, device, stage="val"):
     # Set inference defaults if not in the saved config
     OmegaConf.set_struct(cfg, False)
     if "fm_step_size" not in cfg:
@@ -50,23 +68,34 @@ def generate_pointcloud(cfg,model,batch,num_queries,device):
 
     images = batch["images"]
     pairs = [tuple(images)]
-    batch_size =images[0].shape[0]
+    batch_size = images[0].shape[0]
 
     start_time = time.time()
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
+
+    if stage == "val":
+        pointmaps = batch["pts3d_src_norm"] if "pts3d_src_norm" in batch else None
+        if "normals_src" in batch:
+            pointmaps = torch.cat([pointmaps, batch["normals_src"]], dim=-1)
+
+    if stage == "test":
+        pointmaps = batch["cam_points"]
+        if len(pointmaps) > num_queries:
+            indices = np.random.choice(len(pointmaps), num_queries, replace=False)
+            pointmaps = pointmaps[indices]
 
     output = inference_nova3r(
         cfg,
         pairs,
         model,
         device,
-        batch = batch,
+        batch=batch,
         batch_size=batch_size,
         num_queries=num_queries,
         n_views=len(images),
         method=cfg.get("fm_sampling", "euler"),
-        pointmaps=batch["pts3d_src_norm"] if "pts3d_src_norm" in batch else None,
+        pointmaps=pointmaps,
     )
 
     elapsed = time.time() - start_time
@@ -78,7 +107,8 @@ def generate_pointcloud(cfg,model,batch,num_queries,device):
     pts3d = output["pred"]["pts3d_xyz"]
     return pts3d
 
-def generate_example(batch,pts3d,log_dir,current_epoch): 
+
+def generate_example(batch, pts3d, log_dir, current_epoch):
     batch_size = pts3d.shape[0]
     save_dir = os.path.join(log_dir, "val_points")
     os.makedirs(save_dir, exist_ok=True)
@@ -91,55 +121,55 @@ def generate_example(batch,pts3d,log_dir,current_epoch):
         render_360_video(ply_path, sample_dir)
     print("Done!")
 
-def run_validation_loss(gt_pts3d,gt_valid,pts3d,criterion,device):
+
+def run_validation_loss(gt_pts3d, gt_valid, pts3d, criterion, device):
 
     pts3d = pts3d.to(device=device)
-    pts3d_pred_eval, align_shift, align_scale = scale_shift_alignment_chamfer(
-        pts3d, gt_pts3d, max_iterations=200, lr=0.01, return_transform=True
-    )
+    pts3d_pred_eval, align_shift, align_scale = scale_shift_alignment_chamfer(pts3d, gt_pts3d, max_iterations=200, lr=0.01, return_transform=True)
 
-    gt_list  = {"target_pts3d": gt_pts3d,
-                "target_valid": gt_valid}
+    gt_list = {"target_pts3d": gt_pts3d, "target_valid": gt_valid}
     pred = {"pts3d_xyz": pts3d_pred_eval}
 
-    loss,details = criterion(gt_list, pred)
+    loss, details = criterion(gt_list, pred)
     return loss, details
 
-def run_test_score(batch,pts3d,criterion,device):
+
+def run_test_score(batch, pts3d, criterion, device):
 
     B = batch["cam_points"].shape[0]
-    gt_list  = [{"pcd_eval": batch["cam_points"],
-                "camera_pose": torch.eye(4, device=device).unsqueeze(0).expand(B, -1, -1)}]
-    
+    gt_list = [{"pcd_eval": batch["cam_points"], "camera_pose": torch.eye(4, device=device).unsqueeze(0).expand(B, -1, -1)}]
+
     pts3d = pts3d.to(device=device)
     pred = {"pts3d_xyz": pts3d}
 
     data, details = criterion(gt_list, pred)
     return data, details
 
+
 def save_test_scores_to_csv(batch, details, log_dir):
     import pandas as pd
     import os
     import torch
+
     res = {}
     for k, v in details.items():
         if isinstance(v, torch.Tensor):
             res[k] = v.item()
         else:
             res[k] = v
-    
-    if 'seq_name' in batch:
-        res['seq_name'] = batch['seq_name'][0]
-    if 'id' in batch:
-        res['id'] = str(batch['id'][0]) if isinstance(batch['id'][0], torch.Tensor) else batch['id'][0]
-        
+
+    if "seq_name" in batch:
+        res["seq_name"] = batch["seq_name"][0]
+    if "id" in batch:
+        res["id"] = str(batch["id"][0]) if isinstance(batch["id"][0], torch.Tensor) else batch["id"][0]
+
     save_path = f"{log_dir}/test_scores.csv" if log_dir else "test_scores.csv"
     os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
-    
+
     df = pd.DataFrame([res])
     if not os.path.exists(save_path):
         df.to_csv(save_path, index=False)
     else:
-        df.to_csv(save_path, mode='a', header=False, index=False)
-    
+        df.to_csv(save_path, mode="a", header=False, index=False)
+
     return res

@@ -20,6 +20,7 @@ from dust3r.utils.image import load_images
 from dust3r.image_pairs import make_pairs
 from nova3r.models.nova3r_img_cond import Nova3rImgCond
 from nova3r.models.nova3r_pts_cond import Nova3rPtsCond  # noqa: F401 — needed by load_model's eval()
+from nova3r.heads.hunyuan_model.autoencoders.model import ShapeVAE  # noqa: F401 — needed by load_model's eval()
 from nova3r.inference import inference_nova3r
 
 
@@ -66,7 +67,7 @@ def load_model(ckpt_path, device, **kw):
                 state_dict[k] = v
         model.load_state_dict(state_dict, **kw)
     else:
-        model.load_state_dict(ckpt)
+        model.load_state_dict(ckpt, **kw)
 
     del ckpt
     return model, cfg
