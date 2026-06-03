@@ -8,6 +8,7 @@ import os
 import argparse
 import cv2
 import numpy as np
+from collections import OrderedDict  # For LRU Cache implementation
 from pathlib import Path
 import open3d as o3d
 from torchvision import transforms
@@ -15,10 +16,16 @@ from depth_anything_3.utils.geometry import affine_inverse
 from training.data.dataset_utils import read_image_cv2
 from training.data.datasets.replica_utils.igibson_utils import ReplicaPanoScene
 from training.data.base_dataset import BaseDataset
-import cv2
-import os
 import torch
 from torch.utils.data._utils.collate import default_collate
+import trimesh
+
+from nova3r.heads.hunyuan_model.surface_loaders import SharpEdgeSurfaceLoader
+
+hunyuan_loader = SharpEdgeSurfaceLoader(
+    num_sharp_points=5120,
+    num_uniform_points=5120,
+)
 
 
 class ReplicaPanoDataset(BaseDataset):
@@ -36,6 +43,7 @@ class ReplicaPanoDataset(BaseDataset):
         split="train",
         samples_list_path=None,
         format="pointcloud",
+        use_lru_cache=False,
     ):
         """
         Initialize the ReplicaPano dataset.
@@ -45,12 +53,15 @@ class ReplicaPanoDataset(BaseDataset):
             data_root: Root directory containing pickle files or scene data
             split: Dataset split ('train', 'val', 'test'). Default: 'train'
             sample_list_path: Path to a file containing a list of specific samples to load. If None, load all samples.
+            use_lru_cache: If True, caches cam_points dynamically to avoid redundant computations.
         """
         super().__init__(common_conf)
         self.allow_duplicate_img = common_conf.allow_duplicate_img
 
         self.data_root = Path(data_root)
         self.split = split
+        self.format = format
+        self.use_lru_cache = use_lru_cache
 
         self.sequence_list = []
         if samples_list_path is None:
@@ -75,15 +86,17 @@ class ReplicaPanoDataset(BaseDataset):
             ]
         )
 
+        # Initialize a 10-item LRU cache for cam_points and point_masks
+        if self.use_lru_cache:
+            self.cache_capacity = 10
+            self.cam_points_cache = OrderedDict()
+
     def __len__(self):
         return len(self.samples_list)
 
     def _load_sequence_list(self):
         """
         Load available scene pickle files from data_root.
-
-        Args:
-            scenes_list: Optional list of specific scene names to load
         """
         if not self.data_root.exists():
             raise ValueError(f"Data root directory does not exist: {self.data_root}")
@@ -95,9 +108,6 @@ class ReplicaPanoDataset(BaseDataset):
     def _load_metadata(self):
         """
         Load available scene pickle files from data_root.
-
-        Args:
-            scenes_list: Optional list of specific scene names to load
         """
         for scene in self.sequence_list:
             sequence_metadata = {}
@@ -145,16 +155,6 @@ class ReplicaPanoDataset(BaseDataset):
     ) -> dict:
         """
         Retrieve data for a specific sequence.
-
-        Args:
-            seq_index (int): Index of the sequence to retrieve.
-            img_per_seq (int): Number of images per sequence.
-            seq_name (str): Name of the sequence.
-            id (int): Specific ID to retrieve.
-            aspect_ratio (float): Aspect ratio for image processing.
-
-        Returns:
-            dict: A batch of data including images, depths, and other metadata.
         """
         if seq_name is None:
             seq_name = self.sequence_list[seq_index]
@@ -181,10 +181,12 @@ class ReplicaPanoDataset(BaseDataset):
         extrinsics = []
         intrinsics = []
         original_sizes = []
-        for anno in annos:
 
+        cam_points = None
+        point_masks = None
+
+        for anno in annos:
             replica_scene = ReplicaPanoScene.from_pickle(anno["pkl_path"])
-            scene_pcd = o3d.io.read_point_cloud(anno["world_points_path"])
 
             with open(anno["camera_data"], "r") as f:
                 camera_data = json.load(f)
@@ -203,9 +205,8 @@ class ReplicaPanoDataset(BaseDataset):
 
                 subseq_intrinsics = np.array(camera_data[f"{subseq_id:04d}"]["intrinsics"], dtype=np.float32)
 
-                # Correctly set up the intrinsics to account for the resize operation
-                subseq_intrinsics[0, :] *= new_size_hw[1] / float(orig_size_hw[1])  # scale fx, cx
-                subseq_intrinsics[1, :] *= new_size_hw[0] / float(orig_size_hw[0])  # scale fy, cy
+                subseq_intrinsics[0, :] *= new_size_hw[1] / float(orig_size_hw[1])
+                subseq_intrinsics[1, :] *= new_size_hw[0] / float(orig_size_hw[0])
 
                 subseq_w2c = np.array(camera_data[f"{subseq_id:04d}"]["extrinsics"])
                 T_to_colmap = np.array([[1, 0, 0, 0], [0, 0, -1, 0], [0, 1, 0, 0], [0, 0, 0, 1]])
@@ -216,31 +217,44 @@ class ReplicaPanoDataset(BaseDataset):
                 image_extrinsics = subseq_w2c @ colmap_scene_w2c
 
                 if i == 0:
+                    total_transform = image_extrinsics @ T_to_colmap
 
-                    colmap_points = scene_pcd.transform(T_to_colmap)
-                    cam_points = colmap_points.transform(image_extrinsics)
+                    cache_key = (seq_name, str(id), self.format, bytes(total_transform.data)) if self.use_lru_cache else None
 
-                    # world_points = np.asarray(colmap_points.points)
-                    cam_points = np.asarray(cam_points.points)
-                    point_masks = np.ones(len(cam_points), dtype=bool)
-                    # self.save_debug_points(world_points, output_dir="debug_points", filename=f"{seq_name}_{id}_world_points.ply")
-                    # self.save_debug_points(cam_points, output_dir="debug_points", filename=f"{seq_name}_{id}_da3_cam_points.ply")
+                    if self.use_lru_cache and cache_key in self.cam_points_cache and self.split != "test":
+                        self.cam_points_cache.move_to_end(cache_key)
+                        cam_points, point_masks = self.cam_points_cache[cache_key]
+                    else:
+                        if self.format == "pointcloud":
+                            scene_pcd = o3d.io.read_point_cloud(anno["world_points_path"])
+                            pts = np.asarray(scene_pcd.points)
+                            pts_homo = np.hstack([pts, np.ones((pts.shape[0], 1))])
+                            cam_points = (total_transform @ pts_homo.T).T[:, :3]
+                            point_masks = np.ones(len(cam_points), dtype=bool)
+                            del scene_pcd
+                        elif self.format == "mesh":
+                            scene_mesh = trimesh.load(anno["world_points_path"], force="mesh", merge_primitives=True)
+                            scene_mesh.apply_transform(total_transform)
+                            cam_points = hunyuan_loader(scene_mesh)
+                            point_masks = np.ones(len(cam_points), dtype=bool)
+                            if self.split != "test":
+                                del scene_mesh
+
+                        # Only update cache if caching functionality is enabled
+                        if self.use_lru_cache:
+                            self.cam_points_cache[cache_key] = (cam_points, point_masks)
+                            if len(self.cam_points_cache) > self.cache_capacity:
+                                self.cam_points_cache.popitem(last=False)
+
                 images.append(image)
                 original_sizes.append(original_size)
-                # extrinsics in w2c
                 extrinsics.append(torch.from_numpy(image_extrinsics).float())
                 intrinsics.append(subseq_intrinsics)
 
-        # We add a dummy batch dimension because _normalize_extrinsics expects it like (B, N, 4, 4)
         ex_t_batched = torch.stack(extrinsics).unsqueeze(0)
         normalized_extrinsics = self._normalize_extrinsics(ex_t_batched).squeeze(0)
 
-        # Save normalized extrinsics as JSON for debugging / downstream use
-        # norm_ex_np = normalized_extrinsics.cpu().numpy().tolist()
-        # save_path = os.path.join("debug_points", f"{seq_name}_{str(id)}_normalized_extrinsics.json")
-        # with open(save_path, "w") as jf:
-        #     json.dump(norm_ex_np, jf, indent=4)
-
+        del replica_scene
         intrinsics = torch.from_numpy(np.array(intrinsics))
         set_name = "replica_pano"
         batch = {
@@ -252,10 +266,12 @@ class ReplicaPanoDataset(BaseDataset):
             "extrinsics": normalized_extrinsics,
             "intrinsics": intrinsics,
             "cam_points": cam_points,
-            # "world_points": world_points,
             "point_masks": point_masks,
             "original_sizes": original_sizes,
         }
+
+        if self.split == "test" and self.format == "mesh":
+            batch["test_points"] = torch.from_numpy(scene_mesh.vertices).float()
 
         return batch
 
@@ -264,7 +280,6 @@ class ReplicaPanoDataset(BaseDataset):
         return self.get_data(seq_name=seq_name, id=id)
 
     def _normalize_extrinsics(self, ex_t: torch.Tensor | None) -> torch.Tensor | None:
-        """Normalize extrinsics"""
         if ex_t is None:
             return None
         transform = affine_inverse(ex_t[:, :1])
@@ -278,20 +293,12 @@ class ReplicaPanoDataset(BaseDataset):
         return ex_t_norm
 
     def transform_points_post(self, points, transform_matrix):
-        """
-        Transforms points using post-multiplication (Point @ Matrix).
-        Assumes points are shape (N, 3).
-        """
         ones = np.ones((points.shape[0], 1))
         points_homo = np.hstack([points, ones])
         result_homo = points_homo @ transform_matrix
         return result_homo[:, :3]
 
     def transform_points_pre(self, points, transform_matrix):
-        """
-        Transforms points using pre-multiplication (Matrix @ Point).
-        Assumes points are shape (N, 3).
-        """
         ones = np.ones((points.shape[0], 1))
         points_homo = np.hstack([points, ones])
         result_homo = (transform_matrix @ points_homo.T).T
@@ -299,10 +306,6 @@ class ReplicaPanoDataset(BaseDataset):
 
     @staticmethod
     def save_debug_points(points, output_dir="debug_points", filename="points.ply"):
-        """Saves points array to a PLY file for debugging"""
-        import os
-        import numpy as np
-
         os.makedirs(output_dir, exist_ok=True)
         if not isinstance(points, np.ndarray):
             pts_np = np.asarray(points.points)
@@ -321,50 +324,39 @@ class ReplicaPanoDataset(BaseDataset):
         print(f"Saved {ply_path}")
 
     def dynamic_pad_collate_fn(self, batch):
-        """
-        Collates variable-sized point clouds by dynamically finding the max
-        point count within this specific batch, padding them to the front,
-        and packaging the rest of the metadata.
-        """
-        # 1. Find the maximum number of points present ONLY in this batch
-        max_pts_in_batch = max([item["cam_points"].shape[0] for item in batch])
+        max_pts_in_batch = max([item["cam_points"].shape[1] if item["cam_points"].ndim == 3 else item["cam_points"].shape[0] for item in batch])
+        num_channels = batch[0]["cam_points"].shape[-1]
         batch_size = len(batch)
 
-        # 2. Allocate uniform tensors for the point data
-        # padded_world_pts = torch.zeros((batch_size, max_pts_in_batch, 3), dtype=torch.float32)
-        padded_cam_pts = torch.zeros((batch_size, max_pts_in_batch, 3), dtype=torch.float32)
+        padded_cam_pts = torch.zeros((batch_size, max_pts_in_batch, num_channels), dtype=torch.float32)
         point_masks = torch.zeros((batch_size, max_pts_in_batch), dtype=torch.bool)
         valid_counts = torch.zeros(batch_size, dtype=torch.long)
 
-        # 3. Populate tensors (this naturally places valid data at the front)
         for idx, item in enumerate(batch):
-            # w_pts = torch.as_tensor(item["world_points"], dtype=torch.float32)
             c_pts = torch.as_tensor(item["cam_points"], dtype=torch.float32)
+
+            if c_pts.ndim == 3 and c_pts.shape[0] == 1:
+                c_pts = c_pts.squeeze(0)
+
             num_pts = c_pts.shape[0]
 
-            # padded_world_pts[idx, :num_pts, :] = w_pts
             padded_cam_pts[idx, :num_pts, :] = c_pts
             point_masks[idx, :num_pts] = True
             valid_counts[idx] = num_pts
 
-        # 4. Handle all other keys (images, matrices, names) smoothly
         collated_batch = {}
         for key in batch[0].keys():
-            if key in ["cam_points", "point_masks"]:  # "world_points"
-                continue  # We already handled these manually above
+            if key in ["cam_points", "point_masks"]:
+                continue
 
-            if key in ["seq_name", "id"]:
-                # Keep strings/IDs as simple lists
+            if key in ["seq_name", "id", "subseq_ids"]:
                 collated_batch[key] = [item[key] for item in batch]
             else:
-                # Let PyTorch handle uniform items like images, extrinsics, and intrinsics
                 collated_batch[key] = default_collate([item[key] for item in batch])
 
-        # Add our freshly padded point tensors back into the final dictionary
-        # collated_batch["world_points"] = padded_world_pts
         collated_batch["cam_points"] = padded_cam_pts
         collated_batch["point_masks"] = point_masks
-        collated_batch["valid_counts"] = valid_counts  # Crucial for your GPU FPS kernel!
+        collated_batch["valid_counts"] = valid_counts
 
         return collated_batch
 
@@ -378,9 +370,7 @@ if __name__ == "__main__":
     conf = {
         "img_size": 518,
         "patch_size": 16,
-        "aug_scale": {
-            "scales": [0.5, 1.0, 1.5],
-        },
+        "aug_scale": {"scales": [0.5, 1.0, 1.5]},
         "rescale": True,
         "rescale_aug": True,
         "landscape_check": True,
@@ -388,21 +378,30 @@ if __name__ == "__main__":
     }
     from omegaconf import OmegaConf
 
-    common_conf = OmegaConf.create(conf)  # Assuming OmegaConf is defined elsewhere
+    common_conf = OmegaConf.create(conf)
+
+    # Example turning LRU off
     dataset = ReplicaPanoDataset(
         common_conf=common_conf,
         data_root=args.data_root,
         split=args.split,
-        # scenes_list_path="/workspaces/projects/nova3r/data/replica_pano/train_list.json"
+        samples_list_path="data/replica_pano/o_train_list.json",
+        format="mesh",
+        use_lru_cache=False,  # Switch this to True/False as needed
     )
 
-    print(f"Dataset length: {len(dataset)}")
+    import cProfile
+    import pstats
 
-    for scene in dataset:
-        print(f"Scene: {scene['seq_name']}, ID: {scene['id']}, Frame Num: {scene['frame_num']}")
-        print(f"Image shapes: {[img.shape for img in scene['images']]}")
-        print(f"Extrinsics shapes: {[ext.shape for ext in scene['extrinsics']]}")
-        print(f"Intrinsics shapes: {[int.shape for int in scene['intrinsics']]}")
-        print(f"Cam points shape: {scene['cam_points'].shape}")
-        print(f"World points shape: {scene['world_points'].shape}")
-        print(f"Point masks shape: {scene['point_masks'].shape}")
+    def profile_dataset():
+        for i in range(20):
+            _ = dataset[i]
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    profile_dataset()
+    profiler.disable()
+
+    stats = pstats.Stats(profiler).sort_stats("cumulative")
+    stats.print_stats(30)

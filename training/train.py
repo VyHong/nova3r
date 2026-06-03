@@ -77,7 +77,6 @@ def main():
         callbacks=[checkpoint_callback, last_checkpoint, lr_monitor],
         precision=cfg.amp_dtype,
         log_every_n_steps=1,
-        # num_sanity_val_steps=0,
     )
 
     trainer.fit(module, datamodule=datamodule)

@@ -181,7 +181,7 @@ def main():
     # Look for each sequence entry folder (i.e. rooms)
     i = 0
     for room_folder in tqdm(list(scene_info_dir.iterdir()), desc=f"Rooms in {scene_name}"):
-        if i == 1:
+        if i == 0:
             if not room_folder.is_dir():
                 continue
 

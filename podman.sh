@@ -35,7 +35,8 @@ podman run -v /mnt:/mnt:rw \
     -v /usr/bin/start-ssh-server:/usr/bin/start-ssh-server:ro \
     -v /etc/ssh/node_rsa_key:/etc/ssh/node_rsa_key \
     -v ~/.ssh/authorized_keys:/root/.ssh/authorized_keys \
-    -v /mnt/home/vyhong/.vscode-server-extensions:/root/.vscode-server/extensions \
+    -v /mnt/home/vyhong/.vscode-server-extensions:/root/.vscode-server-insiders/extensions \
+    -v /mnt/home/vyhong/.vscode-server-extensions:/root/.vscode-server/extensions-cache \
     -w /mnt/home/${USER}/projects/nova3r \
     --cap-add=SYS_ADMIN \
     --cap-add=SYS_PTRACE \
@@ -50,6 +51,7 @@ podman run -v /mnt:/mnt:rw \
     --name=nova3r \
     --shm-size=64gb \
     -e CUDA_VISIBLE_DEVICES=0 \
+    -e PYTHONPATH="\$PYTHONPATH:/absolute/path/to/nova3r" \
     --device=/dev/fuse \
     -d \
     nova3r \

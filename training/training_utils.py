@@ -8,8 +8,6 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib
 
-from nova3r.heads.hunyuan_model.surface_loaders import SharpEdgeSurfaceLoader
-
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from dust3r.utils.device import to_cpu, collate_with_cat
@@ -23,11 +21,6 @@ from nova3r.utils.sampling import sampling_train_gen_target
 from einops import rearrange
 
 path = AffineProbPath(scheduler=CosineScheduler())
-
-hunyuan_loader = SharpEdgeSurfaceLoader(
-    num_sharp_points=5120,
-    num_uniform_points=5120,
-)
 
 
 def save_points_ply(points, filename):
@@ -138,10 +131,8 @@ def get_all_pts3d(gt_list, mode=None, down_resolution=112):
     elif "src_complete_hunyuan" in mode:
         # batch_size = int(mode.split("_")[-1])
         gt_pts, valid = get_complete_pts3d(gt_list)
-        surface_pts = hunyuan_loader(gt_pts).to(gt_pts.device)
-        valid = torch.ones(surface_pts.shape[0], dtype=torch.bool, device=surface_pts.device)
 
-        return surface_pts, valid
+        return gt_pts, valid
 
     elif mode == "cube_global":
         pts_xyz = gt_list[0]["global_center_xyz"]

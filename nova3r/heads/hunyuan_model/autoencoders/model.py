@@ -263,7 +263,9 @@ class ShapeVAE(VectsetVAE):
 
     def load_state_dict(self, state_dict, **kw):
         kw.pop("aggregator_ckpt", None)
+        kw.pop("stage", None)
         state_dict = self.prepare_hunyuan_weights(state_dict)
+
         missing_keys, unexpected_keys = super().load_state_dict(state_dict, **kw)
 
         print(f"Loaded Hunyuan weights with {len(missing_keys)} missing keys and {len(unexpected_keys)} unexpected keys.")
@@ -293,7 +295,7 @@ class ShapeVAE(VectsetVAE):
         latents = self.encode(pointmaps, sample_posterior=sample_posterior)
         return {"tokens": latents}
 
-    def _decode(self, tokens, images, token_mask, query_points, timestep, **kwargs):
+    def _decode(self, tokens, images, token_mask=None, query_points=None, timestep=None, **kwargs):
         latents = self.decode(tokens)
 
         B, S = images.shape[:2]

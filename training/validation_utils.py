@@ -76,7 +76,7 @@ def generate_pointcloud(cfg, model, batch, num_queries, device, stage="val"):
 
     if stage == "val":
         pointmaps = batch["pts3d_src_norm"] if "pts3d_src_norm" in batch else None
-        if "normals_src" in batch:
+        if batch["normals_src"] is not None:
             pointmaps = torch.cat([pointmaps, batch["normals_src"]], dim=-1)
 
     if stage == "test":
@@ -137,7 +137,8 @@ def run_validation_loss(gt_pts3d, gt_valid, pts3d, criterion, device):
 def run_test_score(batch, pts3d, criterion, device):
 
     B = batch["cam_points"].shape[0]
-    gt_list = [{"pcd_eval": batch["cam_points"], "camera_pose": torch.eye(4, device=device).unsqueeze(0).expand(B, -1, -1)}]
+    eval_points = batch["test_points"] if "test_points" in batch else batch["cam_points"]
+    gt_list = [{"pcd_eval": eval_points, "camera_pose": torch.eye(4, device=device).unsqueeze(0).expand(B, -1, -1)}]
 
     pts3d = pts3d.to(device=device)
     pred = {"pts3d_xyz": pts3d}

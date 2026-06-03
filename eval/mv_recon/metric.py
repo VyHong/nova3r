@@ -9,6 +9,7 @@ from dust3r.utils.geometry import geotrf, inv
 from nova3r.utils.sampling import sampling_train_gen_target
 from einops import rearrange
 from pytorch3d.loss import chamfer_distance
+from training.training_utils import save_points_ply
 
 
 @torch.no_grad()
@@ -228,9 +229,7 @@ def scale_shift_alignment_cd(pred_xyz, gt_xyz, gt_mask):
         s = icp_solution.RTs.s  # [B]
 
         # Apply transformation to original pred_xyz: s * R @ x + T
-        aligned_pred_xyz_b = s.unsqueeze(-1).unsqueeze(-1) * torch.bmm(
-            pred_xyz[b].unsqueeze(0), R.transpose(-2, -1)
-        ) + T.unsqueeze(1)
+        aligned_pred_xyz_b = s.unsqueeze(-1).unsqueeze(-1) * torch.bmm(pred_xyz[b].unsqueeze(0), R.transpose(-2, -1)) + T.unsqueeze(1)
         pred_xyz_aligned[b] = aligned_pred_xyz_b.squeeze(0)
 
     return pred_xyz_aligned, outlier_mask
@@ -286,9 +285,7 @@ def scale_shift_alignment_pointcloud(pred_xyz, gt_xyz, gt_mask, num_sample=None)
 
     pred_xyz += gt_center
 
-    pred_xyz_new = scale_shift_alignment_chamfer(
-        pred_xyz, gt_xyz_raw, gt_mask, max_iterations=100, lr=0.01, num_sample=num_sample
-    )
+    pred_xyz_new = scale_shift_alignment_chamfer(pred_xyz, gt_xyz_raw, gt_mask, max_iterations=100, lr=0.01, num_sample=num_sample)
     pred_mask = outlier_filtering(pred_xyz_new)
 
     return pred_xyz_new, pred_mask
@@ -338,9 +335,7 @@ def scale_shift_commonlayers_alignment_inverse(prediction, target, mask):
 
     # prediction_update = prediction.clone()
     prediction_update = x_0[..., None, None, None, None] * prediction_init.clone()
-    prediction_update[..., 2] = (
-        prediction_update[..., 2] + x_1[:, None, None, None]
-    )  # apply scale to all xyz and shift to z
+    prediction_update[..., 2] = prediction_update[..., 2] + x_1[:, None, None, None]  # apply scale to all xyz and shift to z
     gt_update = mask_update[..., None] * target_init  # B H W L 3
 
     return prediction_update, gt_update, mask_update, (x_0, x_1), valid
@@ -504,9 +499,7 @@ class SSI3DScore(nn.Module):
 
         # Generate random sampling indices within each batch
 
-        rand_ids = torch.randint(
-            low=0, high=int(valid_counts.max().item()), size=(B, num_samples), device=device
-        ) % valid_counts.unsqueeze(
+        rand_ids = torch.randint(low=0, high=int(valid_counts.max().item()), size=(B, num_samples), device=device) % valid_counts.unsqueeze(
             1
         )  # (B, num_samples)
 
@@ -522,9 +515,7 @@ class SSI3DScore(nn.Module):
         return NotImplementedError()
 
 
-def scale_shift_alignment_chamfer(
-    pred_xyz, gt_xyz, gt_mask=None, max_iterations=100, lr=0.01, num_sample=None, return_transform=False
-):
+def scale_shift_alignment_chamfer(pred_xyz, gt_xyz, gt_mask=None, max_iterations=100, lr=0.01, num_sample=None, return_transform=False):
     """
     Align pred_xyz to gt_xyz using gradient descent to minimize chamfer distance.
 
@@ -544,36 +535,36 @@ def scale_shift_alignment_chamfer(
         B, N_pred, C = pred_xyz.shape
         B, N_gt, C = gt_xyz.shape
         device = pred_xyz.device
-    
+
         # Initialize parameters to optimize
         scale = torch.ones(B, 1, 1, device=device, requires_grad=True)
         shift = torch.zeros(B, 1, 3, device=device, requires_grad=True)
-    
+
         # Setup optimizer
         optimizer = torch.optim.Adam([scale, shift], lr=lr)
-    
+
         best_loss = float("inf")
         best_scale = scale.clone()
         best_shift = shift.clone()
-    
+
         target_xyz = gt_xyz.clone().detach()
         target_xyz.requires_grad = True
         source_xyz = pred_xyz.clone().detach()
         source_xyz.requires_grad = True
         if num_sample is None:
             num_sample = max(N_pred, N_gt) // 4
-    
+
         for i in range(max_iterations):
             optimizer.zero_grad()
-    
+
             # Apply transformation: aligned = scale * pred + shift
             aligned_pred = scale * source_xyz + shift
-    
+
             # Compute chamfer distance
             # randomly down sample
             idx_pred = torch.randint(0, N_pred, (B, min(N_pred, num_sample)), device=device)
             idx_gt = torch.randint(0, N_gt, (B, min(N_gt, num_sample)), device=device)
-    
+
             if num_sample < N_pred:
                 aligned_pred_sampled = aligned_pred[:, idx_pred[0], :]
             else:
@@ -582,27 +573,27 @@ def scale_shift_alignment_chamfer(
                 target_xyz_sampled = target_xyz[:, idx_gt[0], :]
             else:
                 target_xyz_sampled = target_xyz
-    
+
             cd_loss, _ = chamfer_distance(aligned_pred_sampled, target_xyz_sampled, batch_reduction="mean")
-    
+
             # Backpropagation
             cd_loss.backward()
             optimizer.step()
-    
+
             # Clamp scale to reasonable bounds
             with torch.no_grad():
                 scale.clamp_(0.01, 100.0)
-    
+
             # Track best solution
             if cd_loss.item() < best_loss:
                 best_loss = cd_loss.item()
                 best_scale = scale.clone()
                 best_shift = shift.clone()
-    
+
         # Apply best transformation
         with torch.no_grad():
             aligned_pred_xyz = best_scale * pred_xyz + best_shift
-    
+
         if return_transform:
             return aligned_pred_xyz, best_shift.detach(), best_scale.detach()
         else:
@@ -695,15 +686,11 @@ class SSI3DScore_Scene(SSI3DScore):
                     use_single_dir=use_single_dir,
                 )
             else:
-                details = self.chamfer_and_fscore(
-                    pts3d_pred_eval, pts3d_uniform_gt, eval_layers=eval_layers, use_single_dir=use_single_dir
-                )
+                details = self.chamfer_and_fscore(pts3d_pred_eval, pts3d_uniform_gt, eval_layers=eval_layers, use_single_dir=use_single_dir)
 
             details_overall.update(details)
 
-        pts3d_uniform_gt_vis_rgb = (
-            data[0]["pcd_eval_visible_rgb"].clone() if "pcd_eval_visible_rgb" in data[0] else None
-        )
+        pts3d_uniform_gt_vis_rgb = data[0]["pcd_eval_visible_rgb"].clone() if "pcd_eval_visible_rgb" in data[0] else None
 
         pts3d_uniform_gt_unseen = data[0]["pcd_eval_unseen"]
 
@@ -744,9 +731,7 @@ class SSI3DScore_Scene_Multi(SSI3DScore):
 
         elif self.alignment == "depth":
             mask_gt = mask_gt > 0
-            pts3d_pred_new, pred_mask = scale_shift_alignment_pointcloud(
-                pts3d_pred, pts3d_gt, mask_gt, num_sample=25000
-            )
+            pts3d_pred_new, pred_mask = scale_shift_alignment_pointcloud(pts3d_pred, pts3d_gt, mask_gt, num_sample=25000)
         elif self.alignment == "none":
             pred_mask = outlier_filtering(pts3d_pred)
             pts3d_pred_new = pts3d_pred
@@ -800,14 +785,14 @@ class SSI3DScore_Scene_Multi(SSI3DScore):
                 if align_shift is not None and align_scale is not None:
                     pts3d_pred_eval = pts3d_pred_eval * align_scale + align_shift
                 else:
+                    # lr inscreased for hunyuan's method
                     pts3d_pred_eval, align_shift, align_scale = scale_shift_alignment_chamfer(
-                        pts3d_pred_eval, pts3d_uniform_gt, max_iterations=200, lr=0.01, return_transform=True
+                        pts3d_pred_eval, pts3d_uniform_gt, max_iterations=300, lr=0.02, return_transform=True
                     )
-
+            save_points_ply(pts3d_pred_eval[0], "debug_points/pred_eval.ply")
+            save_points_ply(pts3d_uniform_gt[0], "debug_points/gt_eval.ply")
             if valid_batch_mask is not None:
-                details = self.chamfer_and_fscore(
-                    pts3d_pred_eval[valid_batch_mask], pts3d_uniform_gt[valid_batch_mask], eval_layers=eval_layers
-                )
+                details = self.chamfer_and_fscore(pts3d_pred_eval[valid_batch_mask], pts3d_uniform_gt[valid_batch_mask], eval_layers=eval_layers)
             else:
                 details = self.chamfer_and_fscore(pts3d_pred_eval, pts3d_uniform_gt, eval_layers=eval_layers)
 

@@ -98,7 +98,7 @@ class Nova3RLightningModule(pl.LightningModule):
 
     def on_validation_epoch_end(self):
         if hasattr(self, "val_batch_to_log") and self.val_batch_to_log is not None:
-            max_elements = 4
+            max_elements = 1
             for k, v in self.val_batch_to_log.items():
                 if k in ["images", "intrinsics", "extrinsics"] and isinstance(v, list):
                     new_v = []
@@ -165,10 +165,15 @@ class Nova3RLightningModule(pl.LightningModule):
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, self.parameters()), lr=self.learning_rate, weight_decay=self.cfg.weight_decay)
 
-        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=self.cfg.warmup_epochs)
         cosine = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.trainer.max_epochs)
         exponential = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=1)
-        scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine], milestones=[self.cfg.warmup_epochs])
+
+        if self.cfg.warmup_epochs > 0:
+            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=self.cfg.warmup_epochs)
+
+            scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine], milestones=[self.cfg.warmup_epochs])
+        else:
+            scheduler = cosine
 
         plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=100)
 
