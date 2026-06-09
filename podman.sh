@@ -49,7 +49,7 @@ podman run -v /mnt:/mnt:rw \
     --network=host -e USER=root --replace \
     -e PORT=$(python -c "import random; print(random.randint(20000,30000))") \
     --name=nova3r \
-    --shm-size=64gb \
+    --shm-size=1024gb \
     -e CUDA_VISIBLE_DEVICES=0 \
     -e PYTHONPATH="\$PYTHONPATH:/absolute/path/to/nova3r" \
     --device=/dev/fuse \

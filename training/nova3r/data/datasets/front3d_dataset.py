@@ -12,9 +12,10 @@ from pathlib import Path
 import open3d as o3d
 from torchvision import transforms
 from depth_anything_3.utils.geometry import affine_inverse
-from training.data.dataset_utils import read_image_cv2
-from training.data.datasets.replica_utils.igibson_utils import ReplicaPanoScene
-from training.data.base_dataset import BaseDataset
+from training.nova3r.data.dataset_utils import read_image_cv2
+
+from training.nova3r.data.datasets.replica_utils.igibson_utils import ReplicaPanoScene
+from training.nova3r.data.base_dataset import BaseDataset
 import cv2
 import os
 import torch

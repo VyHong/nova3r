@@ -5,7 +5,7 @@ import argparse
 import os
 from omegaconf import OmegaConf
 import torch
-from lightning_module import Nova3RLightningModule
+from training.nova3r.lightning_module import Nova3RLightningModule
 from lightning_data import Nova3RDataModule
 from demo_nova3r import load_model
 

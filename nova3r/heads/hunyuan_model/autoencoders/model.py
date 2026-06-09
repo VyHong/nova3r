@@ -232,22 +232,22 @@ class ShapeVAE(VectsetVAE):
             n_ctx=num_latents, width=width, layers=num_decoder_layers, heads=heads, qkv_bias=qkv_bias, qk_norm=qk_norm, drop_path_rate=drop_path_rate
         )
 
-        # self.geo_decoder = CrossAttentionDecoder(
-        #     fourier_embedder=self.fourier_embedder,
-        #     out_channels=1,
-        #     num_latents=num_latents,
-        #     mlp_expand_ratio=geo_decoder_mlp_expand_ratio,
-        #     downsample_ratio=geo_decoder_downsample_ratio,
-        #     enable_ln_post=self.geo_decoder_ln_post,
-        #     width=width // geo_decoder_downsample_ratio,
-        #     heads=heads // geo_decoder_downsample_ratio,
-        #     qkv_bias=qkv_bias,
-        #     qk_norm=qk_norm,
-        #     label_type=label_type,
-        # )
-
         if cfg is not None and "pts3d_head" in cfg:
             self.pts3d_head = eval(cfg.pts3d_head.name)(**cfg.pts3d_head.params)
+        else:
+            self.geo_decoder = CrossAttentionDecoder(
+                fourier_embedder=self.fourier_embedder,
+                out_channels=1,
+                num_latents=num_latents,
+                mlp_expand_ratio=geo_decoder_mlp_expand_ratio,
+                downsample_ratio=geo_decoder_downsample_ratio,
+                enable_ln_post=self.geo_decoder_ln_post,
+                width=width // geo_decoder_downsample_ratio,
+                heads=heads // geo_decoder_downsample_ratio,
+                qkv_bias=qkv_bias,
+                qk_norm=qk_norm,
+                label_type=label_type,
+            )
 
         self.scale_factor = scale_factor
         self.latent_shape = (num_latents, embed_dim)
@@ -256,6 +256,7 @@ class ShapeVAE(VectsetVAE):
             self.init_from_ckpt(ckpt_path)
 
     def prepare_hunyuan_weights(self, state_dict):
+        
         for key in list(state_dict.keys()):
             if key.startswith("geo_decoder"):
                 state_dict.pop(key)
@@ -264,7 +265,8 @@ class ShapeVAE(VectsetVAE):
     def load_state_dict(self, state_dict, **kw):
         kw.pop("aggregator_ckpt", None)
         kw.pop("stage", None)
-        state_dict = self.prepare_hunyuan_weights(state_dict)
+
+        # state_dict = self.prepare_hunyuan_weights(state_dict)
 
         missing_keys, unexpected_keys = super().load_state_dict(state_dict, **kw)
 

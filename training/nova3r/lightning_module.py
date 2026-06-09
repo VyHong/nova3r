@@ -1,7 +1,7 @@
 import pytorch_lightning as pl
 import torch
-from training.training_utils import get_all_pts3d, loss_of_one_batch_train, normalize_input, save_points_ply
-from training.validation_utils import (
+from training.nova3r.training_utils import get_all_pts3d, loss_of_one_batch_train, normalize_input, save_points_ply
+from training.nova3r.validation_utils import (
     generate_example,
     generate_pointcloud,
     run_test_score,
@@ -119,7 +119,7 @@ class Nova3RLightningModule(pl.LightningModule):
                 batch=self.val_batch_to_log,
                 num_queries=self.cfg.decoder_sample_size,
                 device=self.device,
-                stage="test",
+                stage="val",
             )
 
             generate_example(
@@ -173,7 +173,7 @@ class Nova3RLightningModule(pl.LightningModule):
 
             scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine], milestones=[self.cfg.warmup_epochs])
         else:
-            scheduler = cosine
+            scheduler = exponential
 
         plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=100)
 

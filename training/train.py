@@ -7,7 +7,8 @@ from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 import argparse
 from omegaconf import OmegaConf
 import torch
-from lightning_module import Nova3RLightningModule
+from training.nova3r.lightning_module import Nova3RLightningModule
+from training.mesh2sdf.lightning_module import Mesh2SDFLightningModule
 from lightning_data import Nova3RDataModule
 from demo_nova3r import load_model
 
@@ -45,7 +46,7 @@ def main():
     datamodule = Nova3RDataModule(
         data_cfg,
     )
-    module = Nova3RLightningModule(cfg, model)
+    module = eval(cfg.lightning_module)(cfg, model)
 
     os.makedirs(cfg.output_dir, exist_ok=True)
     if args.wandb:

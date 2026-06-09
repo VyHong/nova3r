@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 
-from training.data.datasets.front3d_utils.generate_pointclouds import (
+from training.nova3r.data.datasets.front3d_utils.generate_pointclouds import (
     build_output_paths,
     load_scene_mesh,
     sample_points_from_mesh,
@@ -59,6 +59,7 @@ def process_glb(glb_path: Path, args: argparse.Namespace) -> None:
             save_pointcloud(points, output_path)
     except Exception as e:
         print(f"Failed to process {glb_path}: {e}")
+
 
 def main() -> None:
     args = parse_args()

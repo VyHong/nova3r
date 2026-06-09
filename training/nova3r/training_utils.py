@@ -20,7 +20,13 @@ from nova3r.flow_matching.path import AffineProbPath
 from nova3r.utils.sampling import sampling_train_gen_target
 from einops import rearrange
 
+from nova3r.heads.hunyuan_model.surface_loaders_cuda import SharpEdgeSurfaceLoader
+
 path = AffineProbPath(scheduler=CosineScheduler())
+hunyuan_loader = SharpEdgeSurfaceLoader(
+    num_sharp_points=5120,
+    num_uniform_points=5120,
+)
 
 
 def save_points_ply(points, filename):
@@ -129,8 +135,8 @@ def get_all_pts3d(gt_list, mode=None, down_resolution=112):
         gt_pts, valid = sampling_train_gen_target(gt_pts, valid, None, target_sampling="fps_edge_fast", batch_size=batch_size)
 
     elif "src_complete_hunyuan" in mode:
-        # batch_size = int(mode.split("_")[-1])
-        gt_pts, valid = get_complete_pts3d(gt_list)
+        gt_pts = hunyuan_loader(gt_list)
+        valid = torch.ones_like(gt_pts[..., 0]).bool()  # B, N
 
         return gt_pts, valid
 
@@ -185,8 +191,9 @@ def get_all_pts3d(gt_list, mode=None, down_resolution=112):
     return gt_pts, valid
 
 
-def get_complete_pts3d(gt_list, valid_front=False):
-    """Get complete (amodal) 3D point clouds from all views, transformed to camera 1 coordinates."""
+def get_complete_pts3d(gt_list, valid_front=False, format="pointcloud"):
+    if format == "mesh":
+        return gt_list["cam_points"], gt_list["point_masks"], gt_list["cam_faces"], gt_list["face_masks"]
     return gt_list["cam_points"], gt_list["point_masks"]
 
 

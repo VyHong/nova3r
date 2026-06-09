@@ -6,6 +6,7 @@
 from copy import copy, deepcopy
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from chamferdist import ChamferDistance
 
@@ -45,6 +46,13 @@ class LLoss(BaseCriterion):
 
     def distance(self, a, b):
         raise NotImplementedError()
+
+
+class MSECriterion(LLoss):
+    """Basic Mean Squared Error criterion to fit the BaseCriterion wrapper."""
+
+    def forward(self, pred, target):
+        return F.mse_loss(pred, target, reduction=self.reduction)
 
 
 class L21Loss(LLoss):
@@ -90,6 +98,7 @@ class GTtoPredCDLoss(LLoss):
 L21 = L21Loss()
 LCD = CDLoss()
 GTtoPredCD = GTtoPredCDLoss()
+MSE = MSECriterion()
 
 
 class Criterion(nn.Module):
@@ -270,13 +279,56 @@ class ReconstructionLoss(Criterion, MultiLoss):
         alpha_t = torch.cos(torch.pi * 0.5 * ex_t)
         sigma_t = torch.sin(torch.pi * 0.5 * ex_t)
 
-        # 2. Non-linear target projection formula
         pred_pts = alpha_t * pr_xt + sigma_t * pr_v
 
-        dist_backward, backward_nn = self.chamfer_dist(gt_pts_b_valid, pred_pts, bidirectional=False, batch_reduction=None, point_reduction=None)
-
+        dist_backward, _ = self.chamfer_dist(gt_pts_b_valid, pred_pts, bidirectional=False, batch_reduction=None, point_reduction=None)
         dist_backward_euclidean = torch.sqrt(dist_backward + 1e-12)
+
+        # # 2. Forward Direction: Pred to GT (Flipped the order of point clouds)
+        # dist_forward, _ = self.chamfer_dist(pred_pts, gt_pts_b_valid, bidirectional=False, batch_reduction=None, point_reduction=None)
+        # dist_forward_euclidean = torch.sqrt(dist_forward + 1e-12)
+        # 3. Combine both losses (Mean of both directional averages)
+        # loss = 0.5 * (dist_backward_euclidean.mean() + dist_forward_euclidean.mean())
+
         loss = dist_backward_euclidean.mean()
         details = {type(self.criterion).__name__: float(loss.detach().cpu().item())}
 
         return loss, details
+
+
+class SDFReconstructionLoss(Criterion, MultiLoss):
+    """
+    Computes MSE Loss between predicted and ground truth SDF values.
+    """
+
+    def __init__(self, criterion=None):
+        # Default to MSECriterion if none is provided
+        if criterion is None:
+            criterion = MSECriterion(reduction="none")
+        super().__init__(criterion)
+
+    def compute_loss(self, gt_list, pred_dict, **kw):
+        # 1. Extract ground truth and predicted SDF values
+        gt_sdf = gt_list["sdf_target"]
+        pred_sdf = pred_dict["sdf_pred"]
+
+        # Optional: Apply a valid mask if you only query specific points (e.g., near surface)
+        valid_mask = gt_list.get("valid_sdf_mask", None)
+
+        # 2. Compute point-wise MSE loss
+        mse_loss_raw = self.criterion(pred_sdf, gt_sdf)
+
+        if valid_mask is not None:
+            mse_loss_valid = mse_loss_raw[valid_mask.bool()]
+            sdf_loss = mse_loss_valid.mean() if mse_loss_valid.numel() > 0 else mse_loss_raw.new_zeros(())
+        else:
+            sdf_loss = mse_loss_raw.mean()
+
+        # 3. Store details for logging
+        self_name = type(self).__name__
+        details = {
+            f"{self_name}_MSE": float(sdf_loss.detach().cpu().item()),
+        }
+
+        # Return total_loss and the details dictionary
+        return sdf_loss, details

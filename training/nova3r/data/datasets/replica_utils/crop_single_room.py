@@ -5,8 +5,8 @@ from pathlib import Path
 from tqdm import tqdm
 
 # Adjust the import based on your real module path
-from training.data.datasets.replica_utils.igibson_utils import ReplicaPanoScene
-from training.data.datasets.replica_utils.mesh_utils import load_mesh, save_mesh
+from training.nova3r.data.datasets.replica_utils.igibson_utils import ReplicaPanoScene
+from training.nova3r.data.datasets.replica_utils.mesh_utils import load_mesh, save_mesh
 
 
 def compute_crop_mask(points, trimesh_mesh, padding=(0.07, 0.07, 0.07, 0.07, 0.07, 0.07)):

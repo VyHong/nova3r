@@ -11,7 +11,7 @@ from pathlib import Path
 
 # Assuming you have corresponding mesh utilities in your repository structure
 # If not, you can use packages like trimesh or open3d directly here.
-from training.data.datasets.front3d_utils.generate_pointclouds import (
+from training.nova3r.data.datasets.front3d_utils.generate_pointclouds import (
     build_output_paths,  # Can adapt this for mesh extensions
     load_scene_mesh,
 )

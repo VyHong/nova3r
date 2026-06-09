@@ -13,22 +13,17 @@ from pathlib import Path
 import open3d as o3d
 from torchvision import transforms
 from depth_anything_3.utils.geometry import affine_inverse
-from training.data.dataset_utils import read_image_cv2
-from training.data.datasets.replica_utils.igibson_utils import ReplicaPanoScene
-from training.data.base_dataset import BaseDataset
+from training.nova3r.data.dataset_utils import read_image_cv2
+from training.nova3r.data.datasets.replica_utils.igibson_utils import ReplicaPanoScene
+from training.nova3r.data.base_dataset import BaseDataset
 import torch
 from torch.utils.data._utils.collate import default_collate
 import trimesh
 
 from nova3r.heads.hunyuan_model.surface_loaders import SharpEdgeSurfaceLoader
 
-hunyuan_loader = SharpEdgeSurfaceLoader(
-    num_sharp_points=5120,
-    num_uniform_points=5120,
-)
 
-
-class ReplicaPanoDataset(BaseDataset):
+class ReplicaPanoSDFDataset(BaseDataset):
     """
     ReplicaPano Dataset implementation for loading 360-degree panoramic scenes.
 
@@ -61,7 +56,6 @@ class ReplicaPanoDataset(BaseDataset):
         self.data_root = Path(data_root)
         self.split = split
         self.format = format
-        self.use_lru_cache = use_lru_cache
 
         self.sequence_list = []
         if samples_list_path is None:
@@ -86,10 +80,15 @@ class ReplicaPanoDataset(BaseDataset):
             ]
         )
 
-        # Initialize a 10-item LRU cache for cam_points and point_masks
-        if self.use_lru_cache:
-            self.cache_capacity = 10
-            self.cam_points_cache = OrderedDict()
+        self.pc_size = common_conf.pc_size
+        self.pc_sharpedge_size = common_conf.pc_sharpedge_size
+        self.return_normal = common_conf.return_normal
+        self.sharpedge_label = common_conf.sharpedge_label
+
+        self.sdf_size = common_conf.sdf_size
+        self.sdf_near_size = common_conf.sdf_near_size
+        self.sdf_sharpedge_size = common_conf.sdf_sharpedge_size
+        self.sdf_label = common_conf.sdf_label
 
     def __len__(self):
         return len(self.samples_list)
@@ -122,7 +121,15 @@ class ReplicaPanoDataset(BaseDataset):
                     else:
                         seq_entry_metadata["world_points_path"] = f"{self.data_root}/{scene}/{scene}/{scene[:-3]}1_cropped.ply"
                 else:
-                    seq_entry_metadata["world_points_path"] = f"{self.data_root}/{scene}/{scene}/{scene[:-3]}aligned.ply"
+                    # only adapt for room2 for now
+                    # seq_entry_metadata["surface"] = f"{self.data_root}/{scene}/{scene}/{scene[:-3]}512_384_surface.npz"
+                    # seq_entry_metadata["geo_points"] = f"{self.data_root}/{scene}/{scene}/{scene[:-3]}512_384_sdf.npz"
+
+                    # seq_entry_metadata["surface"] = "/mnt/home/vyhong/projects/nova3r/datasets/hunyuan/00a4cff37043361068376104a292f5b44b5eacbd174651553b6a7ae35647a2a6_surface.npz"
+                    # seq_entry_metadata["geo_points"] = "/mnt/home/vyhong/projects/nova3r/datasets/hunyuan/00a4cff37043361068376104a292f5b44b5eacbd174651553b6a7ae35647a2a6_sdf.npz"
+                    seq_entry_metadata["surface"] = "/mnt/home/vyhong/projects/nova3r/datasets/hunyuan/room_2_512_384_2m_surface.npz"
+                    seq_entry_metadata["geo_points"] = "/mnt/home/vyhong/projects/nova3r/datasets/hunyuan/room_2_512_384_2m_sdf.npz"
+
                 seq_entry_metadata["seq_entry_folder"] = f"{seq_entry_folder}"
                 pkl_file = seq_entry_folder / "data.pkl"
                 seq_entry_metadata["pkl_path"] = pkl_file
@@ -144,6 +151,76 @@ class ReplicaPanoDataset(BaseDataset):
         """
         return cv2.resize(image, (self.img_size, self.img_size), interpolation=interpolation)
 
+    def load_surface_points(self, rng, random_surface, sharpedge_surface):
+        surface_normal = []
+        if self.pc_size > 0:
+            ind = rng.choice(random_surface.shape[0], self.pc_size, replace=False)
+            random_surface = random_surface[ind]
+            if self.sharpedge_label:
+                sharpedge_label = np.zeros((self.pc_size, 1))
+                random_surface = np.concatenate((random_surface, sharpedge_label), axis=1)
+            surface_normal.append(random_surface)
+
+        if self.pc_sharpedge_size > 0:
+            ind_sharpedge = rng.choice(sharpedge_surface.shape[0], self.pc_sharpedge_size, replace=False)
+            sharpedge_surface = sharpedge_surface[ind_sharpedge]
+            if self.sharpedge_label:
+                sharpedge_label = np.ones((self.pc_sharpedge_size, 1))
+                sharpedge_surface = np.concatenate((sharpedge_surface, sharpedge_label), axis=1)
+            surface_normal.append(sharpedge_surface)
+
+        surface_normal = np.concatenate(surface_normal, axis=0)
+        surface_normal = torch.FloatTensor(surface_normal)
+        surface = surface_normal[:, 0:3]
+        normal = surface_normal[:, 3:6]
+        assert surface.shape[0] == self.pc_size + self.pc_sharpedge_size
+
+        normal = torch.nn.functional.normalize(normal, p=2, dim=1)
+        if self.return_normal:
+            surface = torch.cat([surface, normal], dim=-1)
+        if self.sharpedge_label:
+            surface = torch.cat([surface, surface_normal[:, -1:]], dim=-1)
+        return surface
+
+    def load_sdf_points(
+        self,
+        rng,
+        vol_points,
+        vol_label,
+        near_points,
+        near_label,
+        sharpedge_points,
+        sharpedge_label,
+    ):
+        sdf_points = []
+        if self.sdf_size > 0:
+            ind = rng.choice(vol_points.shape[0], self.sdf_size, replace=False)
+            vol_sdf_points = np.concatenate((vol_points[ind], vol_label[ind][:, None]), axis=1)
+            if self.sdf_label:
+                sdf_label = np.zeros((self.sdf_size, 1))
+                vol_sdf_points = np.concatenate((vol_sdf_points, sdf_label), axis=1)
+            sdf_points.append(vol_sdf_points)
+
+        if self.sdf_near_size > 0:
+            ind_near = rng.choice(near_points.shape[0], self.sdf_near_size, replace=False)
+            near_sdf_points = np.concatenate((near_points[ind_near], near_label[ind_near][:, None]), axis=1)
+            if self.sdf_label:
+                sdf_label = np.ones((self.sdf_near_size, 1))
+                near_sdf_points = np.concatenate((near_sdf_points, sdf_label), axis=1)
+            sdf_points.append(near_sdf_points)
+
+        if self.sdf_sharpedge_size > 0:
+            ind_sharpedge = rng.choice(sharpedge_points.shape[0], self.sdf_sharpedge_size, replace=False)
+            sharpedge_sdf_points = np.concatenate((sharpedge_points[ind_sharpedge], sharpedge_label[ind_sharpedge][:, None]), axis=1)
+            if self.sdf_label:
+                sdf_label = np.ones((self.sdf_sharpedge_size, 1)) * 2
+                sharpedge_sdf_points = np.concatenate((sharpedge_sdf_points, sdf_label), axis=1)
+            sdf_points.append(sharpedge_sdf_points)
+
+        sdf_points = np.concatenate(sdf_points, axis=0)
+        sdf_points = torch.FloatTensor(sdf_points)
+        return sdf_points
+
     def get_data(
         self,
         seq_name: str = None,
@@ -153,14 +230,11 @@ class ReplicaPanoDataset(BaseDataset):
         subseq_ids: list = None,
         aspect_ratio: float = 1.0,
     ) -> dict:
-        """
-        Retrieve data for a specific sequence.
-        """
         if seq_name is None:
             seq_name = self.sequence_list[seq_index]
         if subseq_ids is None:
             subseq_ids = np.arange(6)
-            if self.split == "trai":
+            if self.split == "train":
                 subseq_ids = np.random.choice(subseq_ids, len(subseq_ids), replace=self.allow_duplicate_img)
 
         metadata = self.data_store[seq_name]
@@ -172,18 +246,7 @@ class ReplicaPanoDataset(BaseDataset):
 
         annos = [metadata[i] for i in ids]
 
-        if subseq_ids is None:
-            subseq_ids = np.arange(len(annos[0]["subsequence_images"]))
-
-        target_image_shape = self.get_target_shape(aspect_ratio)
-
-        images = []
-        extrinsics = []
-        intrinsics = []
-        original_sizes = []
-
-        cam_points = None
-        point_masks = None
+        images, extrinsics, intrinsics, original_sizes = [], [], [], []
 
         for anno in annos:
             replica_scene = ReplicaPanoScene.from_pickle(anno["pkl_path"])
@@ -196,7 +259,6 @@ class ReplicaPanoDataset(BaseDataset):
                 image_path = os.path.join(self.data_root, filepath)
                 image = read_image_cv2(image_path)
                 orig_size_hw = image.shape[:2]
-
                 image = self.resize_image(image, cv2.INTER_LANCZOS4)
                 new_size_hw = image.shape[:2]
 
@@ -204,7 +266,6 @@ class ReplicaPanoDataset(BaseDataset):
                 original_size = np.array(image.shape[1:])
 
                 subseq_intrinsics = np.array(camera_data[f"{subseq_id:04d}"]["intrinsics"], dtype=np.float32)
-
                 subseq_intrinsics[0, :] *= new_size_hw[1] / float(orig_size_hw[1])
                 subseq_intrinsics[1, :] *= new_size_hw[0] / float(orig_size_hw[0])
 
@@ -213,38 +274,26 @@ class ReplicaPanoDataset(BaseDataset):
 
                 scene_w2c = replica_scene.transform_3d.camera["world2cam3d"]
                 colmap_scene_w2c = T_to_colmap @ scene_w2c @ T_to_colmap.T
-
                 image_extrinsics = subseq_w2c @ colmap_scene_w2c
 
                 if i == 0:
                     total_transform = image_extrinsics @ T_to_colmap
 
-                    cache_key = (seq_name, str(id), self.format, bytes(total_transform.data)) if self.use_lru_cache else None
+                    rng = np.random.default_rng()
+                    surface = np.load(anno["surface"], allow_pickle=True)
+                    geo_points = np.load(anno["geo_points"], allow_pickle=True)
 
-                    if self.use_lru_cache and cache_key in self.cam_points_cache and self.split != "test":
-                        self.cam_points_cache.move_to_end(cache_key)
-                        cam_points, point_masks = self.cam_points_cache[cache_key]
-                    else:
-                        if self.format == "pointcloud":
-                            scene_pcd = o3d.io.read_point_cloud(anno["world_points_path"])
-                            pts = np.asarray(scene_pcd.points)
-                            pts_homo = np.hstack([pts, np.ones((pts.shape[0], 1))])
-                            cam_points = (total_transform @ pts_homo.T).T[:, :3]
-                            point_masks = np.ones(len(cam_points), dtype=bool)
-                            del scene_pcd
-                        elif self.format == "mesh":
-                            scene_mesh = trimesh.load(anno["world_points_path"], force="mesh", merge_primitives=True)
-                            scene_mesh.apply_transform(total_transform)
-                            cam_points = hunyuan_loader(scene_mesh)
-                            point_masks = np.ones(len(cam_points), dtype=bool)
-                            if self.split != "test":
-                                del scene_mesh
+                    surface = self.load_surface_points(rng, random_surface=surface["random_surface"], sharpedge_surface=surface["sharp_surface"])
 
-                        # Only update cache if caching functionality is enabled
-                        if self.use_lru_cache:
-                            self.cam_points_cache[cache_key] = (cam_points, point_masks)
-                            if len(self.cam_points_cache) > self.cache_capacity:
-                                self.cam_points_cache.popitem(last=False)
+                    geo_points = self.load_sdf_points(
+                        rng,
+                        vol_points=geo_points["vol_points"],
+                        vol_label=geo_points["vol_label"],
+                        near_points=geo_points["random_near_points"],
+                        near_label=geo_points["random_near_label"],
+                        sharpedge_points=geo_points["sharp_near_points"],
+                        sharpedge_label=geo_points["sharp_near_label"],
+                    )
 
                 images.append(image)
                 original_sizes.append(original_size)
@@ -257,21 +306,15 @@ class ReplicaPanoDataset(BaseDataset):
         del replica_scene
         intrinsics = torch.from_numpy(np.array(intrinsics))
         set_name = "replica_pano"
+
         batch = {
             "seq_name": set_name + "_" + seq_name,
-            "id": id,
-            "subseq_ids": subseq_ids,
-            "frame_num": len(extrinsics),
             "images": images,
             "extrinsics": normalized_extrinsics,
             "intrinsics": intrinsics,
-            "cam_points": cam_points,
-            "point_masks": point_masks,
-            "original_sizes": original_sizes,
+            "surface": surface,
+            "geo_points": geo_points,
         }
-
-        if self.split == "test" and self.format == "mesh":
-            batch["test_points"] = torch.from_numpy(scene_mesh.vertices).float()
 
         return batch
 
@@ -292,73 +335,8 @@ class ReplicaPanoDataset(BaseDataset):
         ex_t_norm[..., :3, 3] = ex_t_norm[..., :3, 3] / median_dist
         return ex_t_norm
 
-    def transform_points_post(self, points, transform_matrix):
-        ones = np.ones((points.shape[0], 1))
-        points_homo = np.hstack([points, ones])
-        result_homo = points_homo @ transform_matrix
-        return result_homo[:, :3]
-
-    def transform_points_pre(self, points, transform_matrix):
-        ones = np.ones((points.shape[0], 1))
-        points_homo = np.hstack([points, ones])
-        result_homo = (transform_matrix @ points_homo.T).T
-        return result_homo[:, :3]
-
-    @staticmethod
-    def save_debug_points(points, output_dir="debug_points", filename="points.ply"):
-        os.makedirs(output_dir, exist_ok=True)
-        if not isinstance(points, np.ndarray):
-            pts_np = np.asarray(points.points)
-        else:
-            pts_np = points
-        pts_np = pts_np.reshape(-1, 3)
-
-        ply_path = os.path.join(output_dir, filename)
-        header = f"ply\nformat ascii 1.0\nelement vertex {len(pts_np)}\nproperty float x\nproperty float y\nproperty float z\nend_header\n"
-
-        with open(ply_path, "w") as f:
-            f.write(header)
-            for p in pts_np:
-                f.write(f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")
-
-        print(f"Saved {ply_path}")
-
     def dynamic_pad_collate_fn(self, batch):
-        max_pts_in_batch = max([item["cam_points"].shape[1] if item["cam_points"].ndim == 3 else item["cam_points"].shape[0] for item in batch])
-        num_channels = batch[0]["cam_points"].shape[-1]
-        batch_size = len(batch)
-
-        padded_cam_pts = torch.zeros((batch_size, max_pts_in_batch, num_channels), dtype=torch.float32)
-        point_masks = torch.zeros((batch_size, max_pts_in_batch), dtype=torch.bool)
-        valid_counts = torch.zeros(batch_size, dtype=torch.long)
-
-        for idx, item in enumerate(batch):
-            c_pts = torch.as_tensor(item["cam_points"], dtype=torch.float32)
-
-            if c_pts.ndim == 3 and c_pts.shape[0] == 1:
-                c_pts = c_pts.squeeze(0)
-
-            num_pts = c_pts.shape[0]
-
-            padded_cam_pts[idx, :num_pts, :] = c_pts
-            point_masks[idx, :num_pts] = True
-            valid_counts[idx] = num_pts
-
-        collated_batch = {}
-        for key in batch[0].keys():
-            if key in ["cam_points", "point_masks"]:
-                continue
-
-            if key in ["seq_name", "id", "subseq_ids"]:
-                collated_batch[key] = [item[key] for item in batch]
-            else:
-                collated_batch[key] = default_collate([item[key] for item in batch])
-
-        collated_batch["cam_points"] = padded_cam_pts
-        collated_batch["point_masks"] = point_masks
-        collated_batch["valid_counts"] = valid_counts
-
-        return collated_batch
+        return default_collate(batch)
 
 
 if __name__ == "__main__":
@@ -381,7 +359,7 @@ if __name__ == "__main__":
     common_conf = OmegaConf.create(conf)
 
     # Example turning LRU off
-    dataset = ReplicaPanoDataset(
+    dataset = ReplicaPanoSDFDataset(
         common_conf=common_conf,
         data_root=args.data_root,
         split=args.split,

@@ -9,7 +9,7 @@ from dust3r.utils.geometry import geotrf, inv
 from nova3r.utils.sampling import sampling_train_gen_target
 from einops import rearrange
 from pytorch3d.loss import chamfer_distance
-from training.training_utils import save_points_ply
+from training.nova3r.training_utils import save_points_ply
 
 
 @torch.no_grad()

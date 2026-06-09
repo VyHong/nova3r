@@ -25,7 +25,7 @@ podman run -v /mnt:/mnt:rw \
     -w /mnt/home/${USER}/projects/nova3r \
     --device=nvidia.com/gpu=all \
     --network=host -e USER=root --replace \
-    --shm-size=32gb \
+    --shm-size=1000gb \
     -e CUDA_VISIBLE_DEVICES=0 \
     --device=/dev/fuse \
     --cap-add=SYS_ADMIN \

@@ -11,8 +11,8 @@ import torch
 import time
 import numpy as np
 from omegaconf import OmegaConf
-from training.training_utils import get_all_pts3d, normalize_input
-from training.training_utils import save_points_ply
+from training.nova3r.training_utils import get_all_pts3d, normalize_input
+from training.nova3r.training_utils import save_points_ply
 
 
 def normalize_pointclouds(cfg, batch):
