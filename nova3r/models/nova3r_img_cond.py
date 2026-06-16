@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from huggingface_hub import PyTorchModelHubMixin  # used for model hub
 
+from nova3r.heads.hunyuan_model.autoencoders.model import DiagonalGaussianDistribution
 from nova3r.models.aggregator_pts3d import AggregatorPts3D
 from nova3r.heads.pts3d_decoder import *
 from nova3r.heads.triposg_model.autoencoder_kl_triposg import FrequencyPositionalEmbedding
@@ -18,6 +19,21 @@ from einops import rearrange
 
 from safetensors.torch import load_file
 from nova3r.models.aggregator_da3 import DepthAnything3
+from nova3r.heads.hunyuan_model.autoencoders.model import ShapeVAE, ShapeVAEDecoder
+
+
+def _load_checkpoint_state_dict(path):
+    if path.endswith(".safetensors"):
+        state_dict = load_file(path)
+    else:
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        state_dict = checkpoint["state_dict"]
+
+    # remove model.
+    if state_dict and all(key.startswith("model.") for key in state_dict):
+        state_dict = {key[len("model.") :]: value for key, value in state_dict.items()}
+
+    return state_dict
 
 
 class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
@@ -79,8 +95,14 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
         else:
             self.token_norm = None
 
+        self.pts3d_head = None
+        self.first_stage = None
         if "pts3d_head" in cfg:
             self.pts3d_head = eval(cfg.pts3d_head.name)(**cfg.pts3d_head.params)
+
+        if "decoder_head" in cfg:
+            self.token_to_moments = nn.Linear(token_dim, self.cfg.first_stage.params.embed_dim * 2)
+            self.first_stage = eval(cfg.first_stage.name)(**cfg.first_stage.params)
 
     def _embed_3d(self, pts3d: torch.Tensor):
         x = self.embedder(pts3d)  # [B, N, d_point]
@@ -118,7 +140,7 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
 
         return sampled_points
 
-    def prepare_nova_checkpoint(self, nova3r_checkpoint):
+    def remove_aggregator_weights(self, nova3r_checkpoint):
         for key in list(nova3r_checkpoint.keys()):
             if key.startswith("vggt_aggregator"):
                 nova3r_checkpoint.pop(key)
@@ -127,16 +149,46 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
 
         return nova3r_checkpoint
 
+    def remove_decoder_weights(self, nova3r_checkpoint):
+        for key in list(nova3r_checkpoint.keys()):
+            if key.startswith("pts3d"):
+                nova3r_checkpoint.pop(key)
+
+        return nova3r_checkpoint
+
+    def prep_ckpt_for_3d_token(self, ckpt):
+        if self.cfg.aggregator.params.token_dim != 128:
+
+            ckpt.pop("token_proj.weight")
+            ckpt.pop("token_proj.bias")
+            ckpt.pop("pts3d_head.mlp_token.weight")
+            ckpt.pop("pts3d_head.mlp_token.bias")
+        if self.cfg.aggregator.params.num_3d_tokens != 768:
+            ckpt.pop("vggt_aggregator.pts3d_token")
+        return ckpt
+
     def load_state_dict(self, ckpt, **kw):
-        # duplicate all weights for the pts3d_blocks if not present
         new_ckpt = dict(ckpt)
         if self.cfg.aggregator.name == "DepthAnything3Net" and kw.get("stage") != "test":
             state_dict = load_file(kw.get("aggregator_ckpt"))
             missing_keys, unexpected_keys = self.da3_aggregator.load_state_dict(state_dict, strict=False)
-            print(f"Loaded DepthAnything3Net aggregator weights with {len(missing_keys)} missing keys")
-            print(f"{"-"*100}")
+            print(f"Loaded DepthAnything3Net aggregator weights")
+            print(f"Missing keys: {len(missing_keys)}")
             print(f"Unexpected keys: {len(unexpected_keys)}")
-            new_ckpt = self.prepare_nova_checkpoint(new_ckpt)
+            print(f"{"-"*100}")
+            new_ckpt = self.remove_aggregator_weights(new_ckpt)
+
+        if "decoder_head" in self.cfg and kw.get("stage") != "test":
+            state_dict = _load_checkpoint_state_dict(kw.get("vae_ckpt"))
+            missing_keys, unexpected_keys = self.first_stage.load_state_dict(state_dict, strict=False)
+            print(f"Loaded ShapeVAEDecoder weights")
+            print(f"Missing keys: {len(missing_keys)}")
+            print(f"Unexpected keys: {len(unexpected_keys)}")
+            print(f"{"-"*100}")
+            new_ckpt = self.remove_decoder_weights(new_ckpt)
+
+        if kw.pop("stage", None) != "test":
+            new_ckpt = self.prep_ckpt_for_3d_token(new_ckpt)
 
         missing_keys, unexpected_keys = super().load_state_dict(new_ckpt, strict=False)
         print(f"Loaded Nova3RImgCond weights with {len(missing_keys)} missing keys and {len(unexpected_keys)} unexpected keys.")
@@ -343,6 +395,14 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
             predictions["query_points"] = query_points
             predictions["timestep"] = timestep
 
+        if self.first_stage is not None:
+            moments = self.token_to_moments(tokens)
+            posterior = DiagonalGaussianDistribution(moments, feat_dim=-1)
+            latents = posterior.sample()
+            latents = self.first_stage.decode(latents)
+            predictions["latents"] = latents
+            predictions["posterior"] = posterior
+
         predictions["images"] = images
         predictions["S"] = S
 
@@ -374,3 +434,61 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
         predictions = self._decode(tokens, images, token_mask=token_mask, query_points=query_points, timestep=timestep)
 
         return predictions
+
+    def lightning_forward(self, batch: dict, criterion, kl_weight=0.0):
+
+        images = torch.stack(batch["images"], dim=1)
+        encoder_data = self._encode(images, batch=batch)
+        tokens = encoder_data["tokens"]
+        tokens = self._apply_cfg_dropout(tokens)
+        predictions = self._decode(tokens, images)
+        latents = predictions["latents"]
+
+        geo_points = batch["geo_points"]
+        geo_points_coords = geo_points[:, :, :3]
+        geo_points_label = geo_points[:, :, 3:4]
+
+        geo_points_label = geo_points_label * 128
+        geo_points_label = geo_points_label.clamp(-1.0, 1.0)
+
+        logits = self.first_stage.geo_decoder(queries=geo_points_coords, latents=latents)
+        posterior = predictions["posterior"]
+        kl_loss = posterior.kl(dims=(0, 1, 2))
+
+        gt_list = {"sdf_target": geo_points_label}
+        pred_list = {"sdf_pred": logits}
+
+        loss, details = criterion(gt_list, pred_list)
+
+        loss += kl_loss * kl_weight
+        details["kl_loss"] = kl_loss.item()
+        return loss, details, latents
+
+    def lightning_forward_latent(self, batch: dict, criterion, kl_weight=0.0, recon_latents=False):
+        with torch.no_grad():
+            surface = batch["surface"]
+            pc, feats = surface[:, :, :3], surface[:, :, 3:]
+            encoded_latents, _ = self.first_stage.encoder(pc, feats)
+            gt_posterior = DiagonalGaussianDistribution(self.first_stage.pre_kl(encoded_latents), feat_dim=-1)
+            print(f"gt posterior mean={gt_posterior.mean.mean().item():.6f}, variance={gt_posterior.var.mean().item():.6f}")
+            sampling_floor = gt_posterior.mean.var(dim=0, unbiased=False).mean()
+            print(f"target mean sampling floor variance={sampling_floor.item():.6f}")
+
+        images = torch.stack(batch["images"], dim=1)
+        encoder_data = self._encode(images, batch=batch)
+        tokens = encoder_data["tokens"]
+        moments = self.token_to_moments(tokens)
+        pred_posterior = DiagonalGaussianDistribution(moments, feat_dim=-1)
+        print(f"pred posterior mean={pred_posterior.mean.mean().item():.6f}, variance={pred_posterior.var.mean().item():.6f}")
+
+        loss = gt_posterior.kl(pred_posterior, dims=(0, 1, 2))
+
+        if recon_latents == True:
+            with torch.no_grad():
+                latents = self.first_stage.decode(pred_posterior.sample())
+        else:
+            latents = None
+
+        details = None
+
+        return loss, details, latents

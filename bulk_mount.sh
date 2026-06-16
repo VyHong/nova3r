@@ -31,6 +31,7 @@ mount_single_zip() {
     echo "Mounting: $zip_path"
     echo "Mount point: $mount_point"
     fuse-zip -o nonempty "$zip_path" "$mount_point"
+    #fusermount -u "$mount_point" 
 
     if [ $? -eq 0 ]; then
         echo "✅ Mounted: $zip_name"

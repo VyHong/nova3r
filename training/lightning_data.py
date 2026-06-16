@@ -6,6 +6,7 @@ from omegaconf import OmegaConf
 
 from training.nova3r.data.datasets.front3d_dataset import Front3DDataset
 from training.nova3r.data.datasets.replica_dataset import ReplicaPanoDataset
+from training.mesh2sdf.data.front3d_dataset import Front3DSDFDataset
 from training.mesh2sdf.data.replica_dataset import ReplicaPanoSDFDataset
 
 
@@ -20,6 +21,7 @@ class Nova3RDataModule(pl.LightningDataModule):
 
         self.dataset_registry = {
             "Front3DDataset": Front3DDataset,
+            "Front3DSDFDataset": Front3DSDFDataset,
             "ReplicaPanoDataset": ReplicaPanoDataset,
             "ReplicaPanoSDFDataset": ReplicaPanoSDFDataset,
         }

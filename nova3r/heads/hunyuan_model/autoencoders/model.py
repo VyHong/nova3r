@@ -25,7 +25,7 @@ from .attention_blocks import FourierEmbedder, Transformer, CrossAttentionDecode
 from .surface_extractors import MCSurfaceExtractor, SurfaceExtractors
 from .volume_decoders import VanillaVolumeDecoder, FlashVDMVolumeDecoding, HierarchicalVolumeDecoding
 from ..utils import logger, synchronize_timer, smart_load_model
-from ...pts3d_decoder import PointJointFMDecoderV2
+from ...pts3d_decoder import LatentJointFMDecoderV2, PointJointFMDecoderV2
 
 
 class DiagonalGaussianDistribution(object):
@@ -265,12 +265,14 @@ class ShapeVAE(VectsetVAE):
     def load_state_dict(self, state_dict, **kw):
         kw.pop("aggregator_ckpt", None)
         kw.pop("stage", None)
+        kw.pop("vae_ckpt",None)
 
         # state_dict = self.prepare_hunyuan_weights(state_dict)
 
         missing_keys, unexpected_keys = super().load_state_dict(state_dict, **kw)
 
         print(f"Loaded Hunyuan weights with {len(missing_keys)} missing keys and {len(unexpected_keys)} unexpected keys.")
+        return missing_keys,unexpected_keys
 
     def forward(self, latents):
         latents = self.post_kl(latents)
@@ -328,3 +330,151 @@ class ShapeVAE(VectsetVAE):
         predictions["S"] = S
 
         return predictions
+
+    def lightning_forward(self, batch, criterion,kl_weight=0.0):
+        surface = batch["surface"]
+        # np.save("debug_points/surface_sample.npy", surface.cpu().numpy())
+        # save_surface_to_ply(surface[0].cpu(), f"debug_points/surface_sample.ply")
+
+        pc, feats = surface[:, :, :3], surface[:, :, 3:]
+        latents, _ = self.encoder(pc, feats)
+        moments = self.pre_kl(latents)
+        posterior = DiagonalGaussianDistribution(moments, feat_dim=-1)
+        latents = posterior.sample()
+
+        latents = self.decode(latents)
+
+        geo_points = batch["geo_points"]
+        geo_points_coords = geo_points[:, :, :3]
+        geo_points_label = geo_points[:, :, 3:4]
+
+        geo_points_label = geo_points_label * 128
+        geo_points_label = geo_points_label.clamp(-1.0, 1.0)
+
+        logits = self.geo_decoder(queries=geo_points_coords, latents=latents)
+        kl_loss = posterior.kl(dims=(0, 1, 2))
+
+        gt_list = {"sdf_target": geo_points_label}
+        pred_list = {"sdf_pred": logits}
+
+        loss, details = criterion(gt_list, pred_list)
+
+        loss += kl_loss * kl_weight
+        details["kl_loss"] = kl_loss.item()
+        return loss, details, latents
+
+
+
+class ShapeVAEDecoder(VectsetVAE):
+    """Decoder-only ShapeVAE with checkpoint keys matching the full model."""
+
+    def __init__(
+        self,
+        *,
+        num_latents: int,
+        embed_dim: int,
+        width: int,
+        heads: int,
+        num_decoder_layers: int,
+        num_encoder_layers: int = 8,
+        pc_size: int = 5120,
+        pc_sharpedge_size: int = 5120,
+        point_feats: int = 3,
+        downsample_ratio: int = 20,
+        geo_decoder_downsample_ratio: int = 1,
+        geo_decoder_mlp_expand_ratio: int = 4,
+        geo_decoder_ln_post: bool = True,
+        num_freqs: int = 8,
+        include_pi: bool = True,
+        qkv_bias: bool = True,
+        qk_norm: bool = False,
+        label_type: str = "binary",
+        drop_path_rate: float = 0.0,
+        scale_factor: float = 1.0,
+        use_ln_post: bool = True,
+        ckpt_path=None,
+        cfg=None,
+    ):
+        super().__init__()
+
+        # Accepted for compatibility with the full ShapeVAE config.
+        del (
+            num_encoder_layers,
+            pc_size,
+            pc_sharpedge_size,
+            point_feats,
+            downsample_ratio,
+            use_ln_post,
+        )
+
+        self.geo_decoder_ln_post = geo_decoder_ln_post
+        self.fourier_embedder = FourierEmbedder(
+            num_freqs=num_freqs,
+            include_pi=include_pi,
+        )
+        self.post_kl = nn.Linear(embed_dim, width)
+        self.transformer = Transformer(
+            n_ctx=num_latents,
+            width=width,
+            layers=num_decoder_layers,
+            heads=heads,
+            qkv_bias=qkv_bias,
+            qk_norm=qk_norm,
+            drop_path_rate=drop_path_rate,
+        )
+
+        self.geo_decoder = None
+        self.pts3d_head = None
+        if cfg is not None and "pts3d_head" in cfg:
+            self.pts3d_head = eval(cfg.pts3d_head.name)(
+                **cfg.pts3d_head.params
+            )
+        else:
+            self.geo_decoder = CrossAttentionDecoder(
+                fourier_embedder=self.fourier_embedder,
+                out_channels=1,
+                num_latents=num_latents,
+                mlp_expand_ratio=geo_decoder_mlp_expand_ratio,
+                downsample_ratio=geo_decoder_downsample_ratio,
+                enable_ln_post=self.geo_decoder_ln_post,
+                width=width // geo_decoder_downsample_ratio,
+                heads=heads // geo_decoder_downsample_ratio,
+                qkv_bias=qkv_bias,
+                qk_norm=qk_norm,
+                label_type=label_type,
+            )
+
+        self.scale_factor = scale_factor
+        self.latent_shape = (num_latents, embed_dim)
+
+        if ckpt_path is not None:
+            self.init_from_ckpt(ckpt_path)
+
+    def remove_encoder_keys(self, state_dict):
+        encoder_keys = [key for key in state_dict.keys() if key.startswith("encoder")]
+        # remove pre_kl
+        encoder_keys += [key for key in state_dict.keys() if key.startswith("pre_kl")]
+        for key in encoder_keys:
+            del state_dict[key]
+        return state_dict
+
+    def load_state_dict(self, state_dict, **kwargs):
+        kwargs.pop("aggregator_ckpt", None)
+        kwargs.pop("stage", None)
+        state_dict = self.remove_encoder_keys(state_dict)
+
+        decoder_keys = self.state_dict().keys()
+        decoder_state_dict = {
+            key: value
+            for key, value in state_dict.items()
+            if key in decoder_keys
+        }
+        return super().load_state_dict(decoder_state_dict, **kwargs)
+
+    def forward(self, latents):
+        return self.decode(latents)
+
+    def decode(self, latents):
+        latents = self.post_kl(latents)
+        return self.transformer(latents)
+

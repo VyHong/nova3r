@@ -48,6 +48,8 @@ def load_model(ckpt_path, device, **kw):
     config_dir = os.path.join(os.path.dirname(ckpt_path), ".hydra")
     if os.path.exists(os.path.join(config_dir, "config.yaml")):
         cfg = OmegaConf.load(os.path.join(config_dir, "config.yaml"))
+        # Resolve absolute interpolations before nested model configs are copied
+        OmegaConf.resolve(cfg)
         cfg = cfg.experiment
     else:
         raise FileNotFoundError(f"No .hydra/config.yaml found at {config_dir}. " "Please ensure the checkpoint directory contains the Hydra config.")
@@ -66,8 +68,8 @@ def load_model(ckpt_path, device, **kw):
             else:
                 state_dict[k] = v
         model.load_state_dict(state_dict, **kw)
-    else:
-        model.load_state_dict(ckpt, **kw)
+    # else:
+    #     model.load_state_dict(ckpt, **kw)
 
     del ckpt
     return model, cfg

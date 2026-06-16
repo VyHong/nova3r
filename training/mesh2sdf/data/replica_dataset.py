@@ -54,6 +54,7 @@ class ReplicaPanoSDFDataset(BaseDataset):
         self.allow_duplicate_img = common_conf.allow_duplicate_img
 
         self.data_root = Path(data_root)
+        self.sdf_data_root = "/mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/sdf"
         self.split = split
         self.format = format
 
@@ -114,21 +115,24 @@ class ReplicaPanoSDFDataset(BaseDataset):
                 seq_entry_metadata = {}
 
                 if scene.startswith("large_apartment"):
-                    seq_entry_metadata["world_points_path"] = f"{self.data_root}/{scene}/{scene}/{scene[:-3]}cropped.ply"
+                    seq_entry_metadata["surface"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}cropped_surface.npz"
+                    seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}cropped_sdf.npz"
                 elif scene.startswith("hotel"):
                     if int(seq_entry_folder.name) < 18:
-                        seq_entry_metadata["world_points_path"] = f"{self.data_root}/{scene}/{scene}/{scene[:-3]}0_cropped.ply"
+                        seq_entry_metadata["surface"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}0_cropped_surface.npz"
+                        seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}0_cropped_sdf.npz"
                     else:
-                        seq_entry_metadata["world_points_path"] = f"{self.data_root}/{scene}/{scene}/{scene[:-3]}1_cropped.ply"
+                        seq_entry_metadata["surface"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}1_cropped_surface.npz"
+                        seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}1_cropped_sdf.npz"
                 else:
                     # only adapt for room2 for now
-                    # seq_entry_metadata["surface"] = f"{self.data_root}/{scene}/{scene}/{scene[:-3]}512_384_surface.npz"
-                    # seq_entry_metadata["geo_points"] = f"{self.data_root}/{scene}/{scene}/{scene[:-3]}512_384_sdf.npz"
+                    seq_entry_metadata["surface"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}aligned_surface.npz"
+                    seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}aligned_sdf.npz"
 
                     # seq_entry_metadata["surface"] = "/mnt/home/vyhong/projects/nova3r/datasets/hunyuan/00a4cff37043361068376104a292f5b44b5eacbd174651553b6a7ae35647a2a6_surface.npz"
                     # seq_entry_metadata["geo_points"] = "/mnt/home/vyhong/projects/nova3r/datasets/hunyuan/00a4cff37043361068376104a292f5b44b5eacbd174651553b6a7ae35647a2a6_sdf.npz"
-                    seq_entry_metadata["surface"] = "/mnt/home/vyhong/projects/nova3r/datasets/hunyuan/room_2_512_384_2m_surface.npz"
-                    seq_entry_metadata["geo_points"] = "/mnt/home/vyhong/projects/nova3r/datasets/hunyuan/room_2_512_384_2m_sdf.npz"
+                    # seq_entry_metadata["surface"] = "/mnt/home/vyhong/projects/nova3r/datasets/hunyuan/room_2_512_384_2m_surface.npz"
+                    # seq_entry_metadata["geo_points"] = "/mnt/home/vyhong/projects/nova3r/datasets/hunyuan/room_2_512_384_2m_sdf.npz"
 
                 seq_entry_metadata["seq_entry_folder"] = f"{seq_entry_folder}"
                 pkl_file = seq_entry_folder / "data.pkl"
@@ -234,7 +238,7 @@ class ReplicaPanoSDFDataset(BaseDataset):
             seq_name = self.sequence_list[seq_index]
         if subseq_ids is None:
             subseq_ids = np.arange(6)
-            if self.split == "train":
+            if self.split == "for da3 in training":
                 subseq_ids = np.random.choice(subseq_ids, len(subseq_ids), replace=self.allow_duplicate_img)
 
         metadata = self.data_store[seq_name]
@@ -277,14 +281,20 @@ class ReplicaPanoSDFDataset(BaseDataset):
                 image_extrinsics = subseq_w2c @ colmap_scene_w2c
 
                 if i == 0:
-                    total_transform = image_extrinsics @ T_to_colmap
 
                     rng = np.random.default_rng()
                     surface = np.load(anno["surface"], allow_pickle=True)
                     geo_points = np.load(anno["geo_points"], allow_pickle=True)
 
-                    surface = self.load_surface_points(rng, random_surface=surface["random_surface"], sharpedge_surface=surface["sharp_surface"])
+                    total_transform = image_extrinsics @ T_to_colmap
+                    scale = surface["scale"]
+                    centroid = surface["centroid"]
 
+                    transformed_centroid = total_transform[:3, :3] @ centroid
+                    total_transform[:3, 3] += transformed_centroid
+                    total_transform[:3, 3] /= scale
+
+                    surface = self.load_surface_points(rng, random_surface=surface["random_surface"], sharpedge_surface=surface["sharp_surface"])
                     geo_points = self.load_sdf_points(
                         rng,
                         vol_points=geo_points["vol_points"],
@@ -294,6 +304,10 @@ class ReplicaPanoSDFDataset(BaseDataset):
                         sharpedge_points=geo_points["sharp_near_points"],
                         sharpedge_label=geo_points["sharp_near_label"],
                     )
+                    total_transform = torch.from_numpy(total_transform).float()
+                    surface[:, :3] = (total_transform[:3, :3] @ surface[:, :3].T).T + total_transform[:3, 3]
+                    surface[:, 3:6] = (total_transform[:3, :3] @ surface[:, 3:6].T).T
+                    geo_points[:, :3] = (total_transform[:3, :3] @ geo_points[:, :3].T).T + total_transform[:3, 3]
 
                 images.append(image)
                 original_sizes.append(original_size)
