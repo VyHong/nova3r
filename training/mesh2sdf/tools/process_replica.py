@@ -7,7 +7,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
-PROCESSING_SCRIPT = Path(__file__).with_name("watertight_and_sample.py").resolve()
+WATERTIGHT_PROCESSING_SCRIPT = Path(__file__).with_name("watertight_and_sample.py").resolve()
+UDF_PROCESSING_SCRIPT = Path(__file__).with_name("udf_sample.py").resolve()
 
 
 def output_prefix_for(file_path, data_root, output_root):
@@ -18,20 +19,23 @@ def output_prefix_for(file_path, data_root, output_root):
     return (output_root / relative_path).with_suffix("")
 
 
-def process_mesh(file_path, output_prefix):
+def process_mesh(file_path, output_prefix, udf_only):
     """Worker function to process a single mesh file."""
-    expected_surface = Path(f"{output_prefix}_surface.npz")
-    expected_sdf = Path(f"{output_prefix}_sdf.npz")
+    processing_script = UDF_PROCESSING_SCRIPT if udf_only else WATERTIGHT_PROCESSING_SCRIPT
+    expected_outputs = (
+        [Path(f"{output_prefix}_udf.npz")]
+        if udf_only
+        else [Path(f"{output_prefix}_surface.npz"), Path(f"{output_prefix}_sdf.npz")]
+    )
 
-    # Check if both output files already exist
-    if expected_surface.exists() and expected_sdf.exists():
+    if all(output.exists() for output in expected_outputs):
         print(f"[Skipping] Files already exist for: {file_path.name}")
         return True
 
     output_prefix.parent.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable,
-        str(PROCESSING_SCRIPT),
+        str(processing_script),
         "--input_obj",
         str(file_path),
         "--output_prefix",
@@ -53,7 +57,7 @@ def process_mesh(file_path, output_prefix):
         return False
 
 
-def main(data_root, output_root, num_workers):
+def main(data_root, output_root, num_workers, udf_only):
     root_path = data_root.resolve()
     output_root = output_root.resolve() if output_root is not None else None
 
@@ -88,7 +92,8 @@ def main(data_root, output_root, num_workers):
     print(f"Found {len(files_to_process)} valid meshes to process based on rules.")
     for f in files_to_process:
         output_prefix = output_prefix_for(f, root_path, output_root)
-        print(f" - {f.relative_to(root_path)} -> {output_prefix}_{{surface,sdf}}.npz")
+        output_suffixes = "udf" if udf_only else "surface,sdf"
+        print(f" - {f.relative_to(root_path)} -> {output_prefix}_{{{output_suffixes}}}.npz")
     if not files_to_process:
         print("No files to process. Exiting.")
         return
@@ -107,6 +112,7 @@ def main(data_root, output_root, num_workers):
                 process_mesh,
                 file_path,
                 output_prefix_for(file_path, root_path, output_root),
+                udf_only,
             ): file_path
             for file_path in files_to_process
         }
@@ -136,6 +142,11 @@ if __name__ == "__main__":
         "By default, outputs are written beside each input mesh.",
     )
     parser.add_argument("--workers", type=int, default=os.cpu_count(), help="Number of concurrent subprocesses to run.")
+    parser.add_argument(
+        "--udf-only",
+        action="store_true",
+        help="Sample unsigned distance data with udf_sample.py instead of running watertight_and_sample.py.",
+    )
     args = parser.parse_args()
 
-    main(args.data_root, args.output_root, args.workers)
+    main(args.data_root, args.output_root, args.workers, args.udf_only)

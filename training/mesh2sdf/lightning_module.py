@@ -15,7 +15,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
     def __init__(self, cfg, model):
         super().__init__()
 
-        self.save_hyperparameters(cfg)
+        self.save_hyperparameters(ignore=["model"])
         self.cfg = cfg
 
         self.learning_rate = cfg.lr
@@ -36,9 +36,34 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         self.val_criterion = SDFReconstructionLoss(MSE)
         self.test_criterion = None
 
+    # def on_after_backward(self):
+    #     if self.global_step % 50 != 0:
+    #         return
+
+    #     groups = {
+    #         "da3": "da3_aggregator",
+    #         "img_proj": "img_token_proj",
+    #         "fm_head": "pts3d_head",
+    #         "first_stage": "first_stage",
+    #     }
+
+    #     for label, key in groups.items():
+    #         norms = []
+    #         for name, p in self.model.named_parameters():
+    #             if key in name and p.grad is not None:
+    #                 norms.append(p.grad.detach().float().norm().item())
+    #         if norms:
+    #             print(f"grad/{label}: mean={sum(norms)/len(norms):.3e}, max={max(norms):.3e}, n={len(norms)}")
+    #         else:
+    #             print(f"grad/{label}: NONE")
+
     def training_step(self, batch, batch_idx):
         # loss, details, _ = self.model.lightning_forward(batch, self.train_criterion, kl_weight=self.kl_weight)
-        loss, details, _ = self.model.lightning_forward_latent(batch, self.train_criterion, kl_weight=self.kl_weight)
+        loss, details, _ = self.model.lightning_forward(
+            batch,
+            self.train_criterion,
+            kl_weight=self.kl_weight,
+        )
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
 
@@ -46,7 +71,11 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         if not hasattr(self, "val_batch_to_log") or self.val_batch_to_log is None:
             self.val_batch_to_log = batch  # Store the first batch for logging at epoch end
         # reconstruction_loss, _, _ = self.model.lightning_forward(batch, self.val_criterion, kl_weight=0.0)
-        reconstruction_loss, _, _ = self.model.lightning_forward_latent(batch, self.val_criterion, kl_weight=0.0)
+        reconstruction_loss, _, _ = self.model.lightning_forward(
+            batch,
+            self.val_criterion,
+            kl_weight=0.0,
+        )
 
         self.log(
             "val_loss",
@@ -58,42 +87,87 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         return reconstruction_loss
 
     def on_validation_epoch_end(self):
-        if hasattr(self, "val_batch_to_log") and self.val_batch_to_log is not None:
-            max_elements = 1
-            for k, v in self.val_batch_to_log.items():
-                if k in ["images", "intrinsics", "extrinsics"] and isinstance(v, list):
-                    new_v = []
-                    for item in v:
-                        if isinstance(item, torch.Tensor):
-                            new_v.append(item[:max_elements])
-                        elif isinstance(item, list):
-                            new_v.append([t[:max_elements] if isinstance(t, torch.Tensor) else t for t in item])
-                        else:
-                            new_v.append(item)
-                    self.val_batch_to_log[k] = new_v
-                elif isinstance(v, torch.Tensor) or isinstance(v, list):
-                    self.val_batch_to_log[k] = v[:max_elements]
+        if not hasattr(self, "val_batch_to_log") or self.val_batch_to_log is None:
+            return
+
+        max_elements = max(1, int(getattr(self.cfg, "val_num_save", 1)))
+        val_batch_to_log = self._slice_batch(self.val_batch_to_log, max_elements)
+
         with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
             # _, _, latents = self.model.lightning_forward(self.val_batch_to_log, self.val_criterion, kl_weight=0.0)
-            _, _, latents = self.model.lightning_forward_latent(self.val_batch_to_log, self.val_criterion, kl_weight=0.0,recon_latents = True)
+            _, _, latents = self.model.lightning_forward(
+                val_batch_to_log,
+                self.val_criterion,
+                kl_weight=0.0,
+                recon_latents=True,
+            )
 
-            surface = self.val_batch_to_log["surface"]
+            surface = val_batch_to_log["surface"]
+
+            # save_sdf_to_ply(self.val_batch_to_log["geo_points"][0], filename="debug_points/sdf_hole.ply")
             mins = surface[:, :, :3].min(dim=1).values.detach().cpu().numpy()
             maxs = surface[:, :, :3].max(dim=1).values.detach().cpu().numpy()
             box_size = maxs - mins
-            padding = box_size * 0.1
-            bounds = np.concatenate([mins - padding, maxs + padding], axis=None)
+            padding = box_size * 0.2
 
-            mesh = self.model.decoder_head.latents2mesh(
-                latents, output_type="trimesh", bounds=bounds, mc_level=0.0, num_chunks=20000, octree_resolution=512, mc_algo="mc", enable_pbar=True
-            )
-            mesh = export_to_trimesh(mesh)[0]
+            if hasattr(self.model, "decoder_head"):
+                decoder = self.model.decoder_head
+            elif hasattr(self.model, "first_stage"):
+                decoder = self.model.first_stage
+            else:
+                decoder = self.model
+
             sample_dir = f"{self.current_log_dir}/val_points/epoch_{self.current_epoch}"
-            glb_path = os.path.join(sample_dir, "val_mesh.ply")
             os.makedirs(sample_dir, exist_ok=True)
-        if mesh is not None:
-            mesh.export(glb_path)
-            render_360_video(glb_path, sample_dir)
+
+            meshes_to_render = []
+            for sample_idx in range(latents.shape[0]):
+                bounds = np.concatenate(
+                    [mins[sample_idx] - padding[sample_idx], maxs[sample_idx] + padding[sample_idx]],
+                    axis=0,
+                )
+                mesh = decoder.latents2mesh(
+                    latents[sample_idx : sample_idx + 1],
+                    output_type="trimesh",
+                    bounds=bounds,
+                    mc_level=0.0,
+                    num_chunks=20000,
+                    octree_resolution=512,
+                    mc_algo="mc",
+                    enable_pbar=True,
+                )
+                mesh = export_to_trimesh(mesh)[0]
+                if mesh is not None:
+                    mesh_dir = os.path.join(sample_dir, f"{val_batch_to_log["seq_name"][sample_idx]}_{sample_idx:03d}")
+                    glb_path = os.path.join(mesh_dir, "val_mesh.ply")
+                    os.makedirs(mesh_dir, exist_ok=True)
+                    mesh.export(glb_path)
+                    meshes_to_render.append((glb_path, mesh_dir))
+
+        for glb_path, mesh_dir in meshes_to_render:
+            render_360_video(glb_path, mesh_dir)
+
+    @staticmethod
+    def _slice_batch(batch, max_elements):
+        sliced = {}
+        for key, value in batch.items():
+            if key in ["images", "intrinsics", "extrinsics"] and isinstance(value, list):
+                sliced[key] = [Mesh2SDFLightningModule._slice_batch_value(item, max_elements) for item in value]
+            elif isinstance(value, torch.Tensor):
+                sliced[key] = value[:max_elements]
+            elif isinstance(value, list):
+                sliced[key] = value[:max_elements]
+            else:
+                sliced[key] = value
+        return sliced
+
+    @staticmethod
+    def _slice_batch_value(value, max_elements):
+        if isinstance(value, torch.Tensor):
+            return value[:max_elements]
+        if isinstance(value, list):
+            return [Mesh2SDFLightningModule._slice_batch_value(item, max_elements) for item in value]
+        return value
 
     def test_step(self, batch, batch_idx):
         pass
@@ -117,7 +191,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
             warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=self.cfg.warmup_epochs)
 
             scheduler = torch.optim.lr_scheduler.SequentialLR(
-                optimizer, schedulers=[warmup_scheduler, exponential], milestones=[self.cfg.warmup_epochs]
+                optimizer, schedulers=[warmup_scheduler, cosine], milestones=[self.cfg.warmup_epochs]
             )
         else:
             scheduler = exponential
@@ -198,34 +272,69 @@ def save_surface_to_ply(surface, filename):
         f.write(header.encode("utf-8"))
         f.write(vertex_data.tobytes())
 
-        # test_scales = [64,80,90,96,100,110,128, 140 ]
-        # scale_losses = []
-        # logits = self.model.geo_decoder(queries=geo_points_coords, latents=latents)
-        # kl_loss = posterior.kl(dims=(0, 1, 2))
-        # for scale in test_scales:
-        #     geo_points_label_test = geo_points_label * scale
-        #     geo_points_label_test = geo_points_label_test.clamp(-1.0, 1.0)
 
-        #     gt_list = {"sdf_target": geo_points_label_test}
-        #     pred_list = {"sdf_pred": logits}
+def save_sdf_to_ply(sdf_points, filename):
+    """
+    Saves SDF samples and labels to a binary PLY file.
 
-        #     loss, details = self.train_criterion(gt_list, pred_list)
-        #     scale_losses.append(loss.item())
+    Args:
+        sdf_points: numpy array or torch Tensor of shape (N, 4) or (N, 5).
+                    Columns: [x, y, z, sdf] or [x, y, z, sdf, sample_label]
+        filename: str, path to save the .ply file (e.g., 'output.ply')
+    """
+    if isinstance(sdf_points, torch.Tensor):
+        sdf_points = sdf_points.detach().cpu().numpy()
 
-        # # --- Plotting the Results ---
-        # plt.figure(figsize=(8, 5))
-        # plt.plot(test_scales, scale_losses, marker='o', linestyle='-', color='#1f77b4', linewidth=2)
+    if sdf_points.ndim != 2 or sdf_points.shape[1] not in (4, 5):
+        raise ValueError(f"Expected SDF shape (N, 4) or (N, 5), got {sdf_points.shape}")
 
-        # # Formatting the plot
-        # plt.title('Loss vs. Scale', fontsize=14)
-        # plt.xlabel('Scale', fontsize=12)
-        # plt.ylabel('Loss', fontsize=12)
+    num_points = sdf_points.shape[0]
+    has_sample_label = sdf_points.shape[1] == 5
 
-        # # Using a log scale for the X-axis is usually best since your scales double each time
-        # plt.xscale('log', base=2)
-        # plt.xticks(test_scales, test_scales) # Force x-ticks to display your exact scale values
+    xyz = sdf_points[:, 0:3].astype(np.float32)
+    sdf = sdf_points[:, 3].astype(np.float32)
+    colors = np.empty((num_points, 3), dtype=np.uint8)
+    colors[sdf > 0] = (220, 70, 70)
+    colors[sdf < 0] = (70, 120, 220)
+    colors[sdf == 0] = (180, 180, 180)
 
-        # plt.grid(True, which="both", linestyle="--", alpha=0.6)
-        # plt.tight_layout()
-        # plt.savefig("loss_vs_scale.png")
-        # plt.close()
+    vertex_dtype = [
+        ("x", "f4"),
+        ("y", "f4"),
+        ("z", "f4"),
+        ("sdf", "f4"),
+        ("red", "u1"),
+        ("green", "u1"),
+        ("blue", "u1"),
+    ]
+    if has_sample_label:
+        vertex_dtype.append(("sample_label", "u1"))
+
+    vertex_data = np.empty(num_points, dtype=vertex_dtype)
+    vertex_data["x"] = xyz[:, 0]
+    vertex_data["y"] = xyz[:, 1]
+    vertex_data["z"] = xyz[:, 2]
+    vertex_data["sdf"] = sdf
+    vertex_data["red"] = colors[:, 0]
+    vertex_data["green"] = colors[:, 1]
+    vertex_data["blue"] = colors[:, 2]
+    if has_sample_label:
+        vertex_data["sample_label"] = sdf_points[:, 4].astype(np.uint8)
+
+    properties = (
+        "property float x\n"
+        "property float y\n"
+        "property float z\n"
+        "property float sdf\n"
+        "property uchar red\n"
+        "property uchar green\n"
+        "property uchar blue\n"
+    )
+    if has_sample_label:
+        properties += "property uchar sample_label\n"
+
+    header = "ply\n" "format binary_little_endian 1.0\n" f"element vertex {num_points}\n" f"{properties}" "end_header\n"
+
+    with open(filename, "wb") as f:
+        f.write(header.encode("utf-8"))
+        f.write(vertex_data.tobytes())

@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from huggingface_hub import PyTorchModelHubMixin  # used for model hub
 
 from nova3r.heads.hunyuan_model.autoencoders.model import DiagonalGaussianDistribution
@@ -20,6 +21,12 @@ from einops import rearrange
 from safetensors.torch import load_file
 from nova3r.models.aggregator_da3 import DepthAnything3
 from nova3r.heads.hunyuan_model.autoencoders.model import ShapeVAE, ShapeVAEDecoder
+
+from nova3r.flow_matching.path.scheduler import LinearScheduler
+from nova3r.flow_matching.path import AffineProbPath
+
+from nova3r.flow_matching.solver import ODESolver
+from nova3r.models.model_wrapper import BatchModelWrapper
 
 
 def _load_checkpoint_state_dict(path):
@@ -89,6 +96,7 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
         self.use_token_ln = self.cfg.aggregator.params.get("use_token_ln", False)
         self.token_noise_prob = self.cfg.aggregator.params.get("token_noise_prob", 0.0)
         self.token_noise_sigma = self.cfg.aggregator.params.get("token_noise_sigma", 0.0)
+        self.sample_posterior = getattr(self.cfg, "sample_posterior", True)
 
         if self.use_token_ln:
             self.token_norm = nn.LayerNorm(self.cfg.aggregator.params.token_dim)
@@ -100,7 +108,7 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
         if "pts3d_head" in cfg:
             self.pts3d_head = eval(cfg.pts3d_head.name)(**cfg.pts3d_head.params)
 
-        if "decoder_head" in cfg:
+        if "first_stage" in cfg:
             self.token_to_moments = nn.Linear(token_dim, self.cfg.first_stage.params.embed_dim * 2)
             self.first_stage = eval(cfg.first_stage.name)(**cfg.first_stage.params)
 
@@ -158,7 +166,6 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
 
     def prep_ckpt_for_3d_token(self, ckpt):
         if self.cfg.aggregator.params.token_dim != 128:
-
             ckpt.pop("token_proj.weight")
             ckpt.pop("token_proj.bias")
             ckpt.pop("pts3d_head.mlp_token.weight")
@@ -178,16 +185,17 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
             print(f"{"-"*100}")
             new_ckpt = self.remove_aggregator_weights(new_ckpt)
 
-        if "decoder_head" in self.cfg and kw.get("stage") != "test":
+        if "first_stage" in self.cfg and kw.get("stage") != "test":
             state_dict = _load_checkpoint_state_dict(kw.get("vae_ckpt"))
             missing_keys, unexpected_keys = self.first_stage.load_state_dict(state_dict, strict=False)
             print(f"Loaded ShapeVAEDecoder weights")
             print(f"Missing keys: {len(missing_keys)}")
             print(f"Unexpected keys: {len(unexpected_keys)}")
             print(f"{"-"*100}")
+            # when we use the vae the pts3d head from nova3r is never used
             new_ckpt = self.remove_decoder_weights(new_ckpt)
 
-        if kw.pop("stage", None) != "test":
+        if kw.pop("stage", None) != "test" and self.cfg.aggregator.name == "AggregatorPts3D":
             new_ckpt = self.prep_ckpt_for_3d_token(new_ckpt)
 
         missing_keys, unexpected_keys = super().load_state_dict(new_ckpt, strict=False)
@@ -435,7 +443,7 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
 
         return predictions
 
-    def lightning_forward(self, batch: dict, criterion, kl_weight=0.0):
+    def lightning_forward_sdf_based(self, batch: dict, criterion, kl_weight=0.0):
 
         images = torch.stack(batch["images"], dim=1)
         encoder_data = self._encode(images, batch=batch)
@@ -464,28 +472,66 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
         details["kl_loss"] = kl_loss.item()
         return loss, details, latents
 
-    def lightning_forward_latent(self, batch: dict, criterion, kl_weight=0.0, recon_latents=False):
+    def lightning_forward(self, batch: dict, criterion, kl_weight=0.0, recon_latents=False):
         with torch.no_grad():
             surface = batch["surface"]
-            pc, feats = surface[:, :, :3], surface[:, :, 3:]
-            encoded_latents, _ = self.first_stage.encoder(pc, feats)
-            gt_posterior = DiagonalGaussianDistribution(self.first_stage.pre_kl(encoded_latents), feat_dim=-1)
-            print(f"gt posterior mean={gt_posterior.mean.mean().item():.6f}, variance={gt_posterior.var.mean().item():.6f}")
-            sampling_floor = gt_posterior.mean.var(dim=0, unbiased=False).mean()
-            print(f"target mean sampling floor variance={sampling_floor.item():.6f}")
+            gt_latents = self.first_stage.encode(surface, sample_posterior=self.sample_posterior)
+            # print(f"gt_latents variance={gt_latents.float().var(unbiased=False).item():.6f}")
 
         images = torch.stack(batch["images"], dim=1)
         encoder_data = self._encode(images, batch=batch)
         tokens = encoder_data["tokens"]
-        moments = self.token_to_moments(tokens)
-        pred_posterior = DiagonalGaussianDistribution(moments, feat_dim=-1)
-        print(f"pred posterior mean={pred_posterior.mean.mean().item():.6f}, variance={pred_posterior.var.mean().item():.6f}")
 
-        loss = gt_posterior.kl(pred_posterior, dims=(0, 1, 2))
+        device = tokens.device
+        B, _, _ = tokens.shape
+        gt_latents = gt_latents.to(device=device, dtype=tokens.dtype).contiguous()
+
+        x_0 = torch.rand_like(gt_latents)
+        t = torch.rand(B, device=device)
+
+        path = AffineProbPath(scheduler=LinearScheduler())
+        fm_path = path
+        path_sample = fm_path.sample(x_0=x_0, x_1=gt_latents, t=t)
+
+        x_t = path_sample.x_t
+        dx_t = path_sample.dx_t
+        t_query = t[:, None].expand(B, x_t.shape[1])
+
+        v_pred = self.pts3d_head(decout=[tokens], noised_latents=x_t, timestep=t_query)
+        loss = F.mse_loss(v_pred, dx_t)
 
         if recon_latents == True:
             with torch.no_grad():
-                latents = self.first_stage.decode(pred_posterior.sample())
+                step_size = 0.02
+                method = "euler"
+                token_mask = None
+                pts3d_src = None
+
+                num_steps = int(1 // step_size)
+
+                wrapped_vf = BatchModelWrapper(model=self)
+
+                wrapped_vf.eval()
+                self.eval()
+
+                x_init = torch.rand_like(gt_latents)
+
+                T = torch.linspace(0, 1, num_steps).to(device)
+                solver = ODESolver(velocity_model=wrapped_vf)
+
+                sol = solver.sample(
+                    time_grid=T,
+                    x_init=x_init,
+                    method=method,
+                    step_size=step_size,
+                    return_intermediates=False,
+                    images=images,
+                    token_mask=token_mask,
+                    encoder_data=encoder_data,
+                    pointmaps=pts3d_src,
+                )
+
+                latents = self.first_stage.decode(sol)
         else:
             latents = None
 

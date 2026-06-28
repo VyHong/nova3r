@@ -1,8 +1,9 @@
 #!/bin/sh
- 
+
 #SBATCH --job-name=podman
 #SBATCH --output=podman.out
 #SBATCH --error=podman.err
+#SBATCH --open-mode=append
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 
@@ -46,7 +47,7 @@ podman run -v /mnt:/mnt:rw \
     --security-opt=apparmor:unconfined \
     --security-opt=seccomp=unconfined \
     --device=nvidia.com/gpu=all \
-    --network=host -e USER=root --replace \
+    --network=host -e USER=root \
     -e PORT=$(python -c "import random; print(random.randint(20000,30000))") \
     --name=nova3r \
     --shm-size=1024gb \

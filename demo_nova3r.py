@@ -68,8 +68,8 @@ def load_model(ckpt_path, device, **kw):
             else:
                 state_dict[k] = v
         model.load_state_dict(state_dict, **kw)
-    # else:
-    #     model.load_state_dict(ckpt, **kw)
+    else:
+        model.load_state_dict(ckpt, **kw)
 
     del ckpt
     return model, cfg

@@ -1,10 +1,8 @@
-import os
-
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
-from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
+from pytorch_lightning.loggers import TensorBoardLogger
 import argparse
+import os
 from omegaconf import OmegaConf
 import torch
 from training.nova3r.lightning_module import Nova3RLightningModule
@@ -15,12 +13,9 @@ from demo_nova3r import load_model
 
 def parse_args():
     parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
-    parser.add_argument("--ckpt", default="checkpoints/da3_base/checkpoint-last.pth", help="Path to model checkpoint")
+    parser.add_argument("--ckpt", default="checkpoints/da3_base/last_full.ckpt", help="Path to model checkpoint")
     parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
-    parser.add_argument("--aggregator_ckpt", default="./checkpoints/da3_base/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
-    parser.add_argument("--vae_ckpt", default="./checkpoints/da3/shape_vae.ckpt", help="VAE checkpoint path")
-    parser.add_argument("--wandb", default=False, action="store_true", help="Use Weights and Biases logger")
-    parser.add_argument("--wandb_project", default="nova3r", help="WandB project name")
+    parser.add_argument("--aggregator_ckpt", default="./checkpoints/da3_giant/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
     args = parser.parse_args()
 
     return args
@@ -36,11 +31,9 @@ def load_data_config(ckpt_path):
 
 
 def main():
-    # torch.cuda.memory._record_memory_history()
-    torch.set_float32_matmul_precision("medium")
     args = parse_args()
 
-    model, cfg = load_model(args.ckpt, args.device, aggregator_ckpt=args.aggregator_ckpt, vae_ckpt=args.vae_ckpt, strict=False)
+    model, cfg = load_model(args.ckpt, args.device, aggregator_ckpt=args.aggregator_ckpt, stage="test")
     data_cfg = load_data_config(args.ckpt)
     cfg.data = data_cfg
 
@@ -50,10 +43,7 @@ def main():
     module = eval(cfg.lightning_module)(cfg, model)
 
     os.makedirs(cfg.output_dir, exist_ok=True)
-    if args.wandb:
-        logger = WandbLogger(project=args.wandb_project, name="nova3r_training", save_dir=cfg.output_dir)
-    else:
-        logger = TensorBoardLogger(save_dir=cfg.output_dir, name="nova3r_training")
+    logger = TensorBoardLogger(save_dir=cfg.output_dir, name="nova3r_training")
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=os.path.join(cfg.output_dir, "checkpoints"),
@@ -85,12 +75,7 @@ def main():
         check_val_every_n_epoch=cfg.eval_freq,
     )
 
-    trainer.fit(
-        module,
-        datamodule=datamodule,
-        ckpt_path="exp_output/da3_img_cond_shape_vae/checkpoints/last.ckpt",
-        weights_only=False,
-    )
+    trainer.fit(module, datamodule=datamodule)
 
 
 if __name__ == "__main__":

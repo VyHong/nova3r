@@ -30,13 +30,14 @@ podman import ~/projects/demo/nova3r.tar nova3r
 podman save -o ~/projects/demo/nova3r.tar demo:v1
 
 ## mount replicaPano
-bash bulk_mount.sh /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano /tmp/datasets/replica_pano
+bash bulk_mount_mount_zip.sh /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano /tmp/datasets/replica_pano -o notrim
 
 ## mount 3dfront
 bash bulk_mount.sh /mnt/datasets/3dfront/3D-FRONT-TEST-SCENE.zip  /tmp/datasets/3dfront
 bash bulk_mount.sh /mnt/datasets/3dfront/3D-FRONT-SCENE.zip  /tmp/datasets/3dfront
 
 bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/3dfront/3D-FRONT-TEST-SCENE-SDF.zip /tmp/datasets/3dfront
+
 ## run demo with 6 views
 python demo_nova3r.py --images /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0000.jpg /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0001.jpg /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0002.jpg /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0003.jpg /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0004.jpg /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0005.jpg --ckpt checkpoints/scene_n2/checkpoint-last.pth --num_queries 200000
 
@@ -60,5 +61,3 @@ cp /tmp/datasets/replica_pano/large_apartment_0_001/large_apartment_0_001/large_
 
 # Point cloud autoencoding from a SCRREAM scene
 python demo_nova3r_ae.py   --input_ply  nova3r/debug_points/room_2_aligned.ply --ckpt checkpoints/scene_ae/checkpoint-last.pth  --num_queries 50000
-
-nohup [1] 3239502

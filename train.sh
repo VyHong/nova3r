@@ -50,7 +50,7 @@ RUN bash -c "
   python -c 'import torch; print(f\"Num GPUs: {torch.cuda.device_count()}\")'
   
   echo 'Mounting dataset using FUSE...'
-  bash bulk_mount.sh /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano /tmp/datasets/replica_pano
+  bash bulk_mount_mount_zip.sh /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano /tmp/datasets/replica_pano -o notrim
   echo 'Mounting 3D-FRONT dataset using Mount Zip...'
   bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/3dfront/3D-FRONT-TEST-SCENE-SDF.zip /tmp/datasets/3dfront
   export PYTHONUNBUFFERED=1

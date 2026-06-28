@@ -6,12 +6,14 @@
 
 from .scheduler import (
     CosineScheduler,
+    LinearScheduler,
     Scheduler,
     SchedulerOutput,
 )
 
 __all__ = [
     "CosineScheduler",
+    "LinearScheduler",
     "Scheduler",
     "SchedulerOutput",
 ]

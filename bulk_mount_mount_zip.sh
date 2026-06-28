@@ -1,16 +1,38 @@
 #!/usr/bin/env bash
 
-# Usage: ./bulk_mount_mount_zip.sh <zip_or_directory> <mount_root>
+# Usage: ./bulk_mount_mount_zip.sh <zip_or_directory> <mount_root> [-o notrim]
 
 set -u
 
 SRC_TARGET=${1:-}
 DEST_DIR=${2:-}
+shift 2 2>/dev/null || true
+
+MOUNT_OPTIONS=()
 
 if [[ -z "$SRC_TARGET" || -z "$DEST_DIR" ]]; then
-    echo "Usage: $0 <source_folder_or_single_zip> <target_mount_folder>" >&2
+    echo "Usage: $0 <source_folder_or_single_zip> <target_mount_folder> [-o notrim]" >&2
     exit 1
 fi
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -o)
+            if [[ "${2:-}" != "notrim" ]]; then
+                echo "Error: unsupported -o option: ${2:-}" >&2
+                echo "Usage: $0 <source_folder_or_single_zip> <target_mount_folder> [-o notrim]" >&2
+                exit 1
+            fi
+            MOUNT_OPTIONS=(-o notrim)
+            shift 2
+            ;;
+        *)
+            echo "Error: unknown argument: $1" >&2
+            echo "Usage: $0 <source_folder_or_single_zip> <target_mount_folder> [-o notrim]" >&2
+            exit 1
+            ;;
+    esac
+done
 
 if ! command -v mount-zip >/dev/null 2>&1; then
     echo "Error: mount-zip is not installed or not available in PATH." >&2
@@ -46,7 +68,8 @@ mount_single_zip() {
     echo "Mounting: $zip_path"
     echo "Mount point: $mount_point"
 
-    if mount-zip "$zip_path" "$mount_point"; then
+    # if fusermount -u "$mount_point"; then
+    if mount-zip "${MOUNT_OPTIONS[@]}" "$zip_path" "$mount_point"; then
         echo "Mounted: $zip_name"
         ((mounted_count += 1))
         return 0

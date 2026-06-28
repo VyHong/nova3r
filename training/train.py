@@ -7,6 +7,7 @@ from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 import argparse
 from omegaconf import OmegaConf
 import torch
+import torch.nn as nn
 from training.nova3r.lightning_module import Nova3RLightningModule
 from training.mesh2sdf.lightning_module import Mesh2SDFLightningModule
 from lightning_data import Nova3RDataModule
@@ -15,9 +16,9 @@ from demo_nova3r import load_model
 
 def parse_args():
     parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
-    parser.add_argument("--ckpt", default="checkpoints/scene_n2/checkpoint-last.pth", help="Path to model checkpoint")
+    parser.add_argument("--ckpt", default="checkpoints/da3_base/checkpoint-last.pth", help="Path to model checkpoint")
     parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
-    parser.add_argument("--aggregator_ckpt", default="./checkpoints/da3/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
+    parser.add_argument("--aggregator_ckpt", default="./checkpoints/da3_base/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
     parser.add_argument("--vae_ckpt", default="./checkpoints/da3/shape_vae.ckpt", help="VAE checkpoint path")
     parser.add_argument("--wandb", default=False, action="store_true", help="Use Weights and Biases logger")
     parser.add_argument("--wandb_project", default="nova3r", help="WandB project name")
@@ -35,12 +36,30 @@ def load_data_config(ckpt_path):
         raise FileNotFoundError(f"No .hydra/config.yaml found at {config_dir}. " f"Please ensure the checkpoint directory contains the Hydra config.")
 
 
+def print_parameter_tree(module: nn.Module, name: str = "model", max_depth: int = 3, depth: int = 0):
+    """Print parameter counts for a module and its children up to max_depth."""
+    indent = "  " * depth
+    own_params = sum(param.numel() for param in module.parameters(recurse=False))
+    total_params = sum(param.numel() for param in module.parameters())
+    trainable_params = sum(param.numel() for param in module.parameters() if param.requires_grad)
+    print(f"{indent}{name}: own={own_params:,}, total={total_params:,} " f"({total_params / 1e6:.2f}M), trainable={trainable_params:,}")
+
+    if depth >= max_depth:
+        return
+
+    for child_name, child_module in module.named_children():
+        print_parameter_tree(child_module, f"{name}.{child_name}", max_depth=max_depth, depth=depth + 1)
+
+
 def main():
     # torch.cuda.memory._record_memory_history()
     torch.set_float32_matmul_precision("medium")
     args = parse_args()
 
     model, cfg = load_model(args.ckpt, args.device, aggregator_ckpt=args.aggregator_ckpt, vae_ckpt=args.vae_ckpt, strict=False)
+
+    print_parameter_tree(model)
+
     data_cfg = load_data_config(args.ckpt)
     cfg.data = data_cfg
 
@@ -83,6 +102,7 @@ def main():
         accumulate_grad_batches=cfg.accum_iter,
         log_every_n_steps=1,
         check_val_every_n_epoch=cfg.eval_freq,
+        num_sanity_val_steps=0,
     )
 
     trainer.fit(module, datamodule=datamodule)

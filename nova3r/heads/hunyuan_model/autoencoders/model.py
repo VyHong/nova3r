@@ -25,7 +25,7 @@ from .attention_blocks import FourierEmbedder, Transformer, CrossAttentionDecode
 from .surface_extractors import MCSurfaceExtractor, SurfaceExtractors
 from .volume_decoders import VanillaVolumeDecoder, FlashVDMVolumeDecoding, HierarchicalVolumeDecoding
 from ..utils import logger, synchronize_timer, smart_load_model
-from ...pts3d_decoder import LatentJointFMDecoderV2, PointJointFMDecoderV2
+from ...pts3d_decoder import LatentJointFMDecoder, PointJointFMDecoderV2
 
 
 class DiagonalGaussianDistribution(object):
@@ -256,7 +256,7 @@ class ShapeVAE(VectsetVAE):
             self.init_from_ckpt(ckpt_path)
 
     def prepare_hunyuan_weights(self, state_dict):
-        
+
         for key in list(state_dict.keys()):
             if key.startswith("geo_decoder"):
                 state_dict.pop(key)
@@ -265,14 +265,14 @@ class ShapeVAE(VectsetVAE):
     def load_state_dict(self, state_dict, **kw):
         kw.pop("aggregator_ckpt", None)
         kw.pop("stage", None)
-        kw.pop("vae_ckpt",None)
+        kw.pop("vae_ckpt", None)
 
         # state_dict = self.prepare_hunyuan_weights(state_dict)
 
         missing_keys, unexpected_keys = super().load_state_dict(state_dict, **kw)
 
         print(f"Loaded Hunyuan weights with {len(missing_keys)} missing keys and {len(unexpected_keys)} unexpected keys.")
-        return missing_keys,unexpected_keys
+        return missing_keys, unexpected_keys
 
     def forward(self, latents):
         latents = self.post_kl(latents)
@@ -331,7 +331,7 @@ class ShapeVAE(VectsetVAE):
 
         return predictions
 
-    def lightning_forward(self, batch, criterion,kl_weight=0.0):
+    def lightning_forward(self, batch, criterion, kl_weight=0.0, recon_latents=None):
         surface = batch["surface"]
         # np.save("debug_points/surface_sample.npy", surface.cpu().numpy())
         # save_surface_to_ply(surface[0].cpu(), f"debug_points/surface_sample.ply")
@@ -349,9 +349,10 @@ class ShapeVAE(VectsetVAE):
         geo_points_label = geo_points[:, :, 3:4]
 
         geo_points_label = geo_points_label * 128
-        geo_points_label = geo_points_label.clamp(-1.0, 1.0)
+        geo_points_label = geo_points_label.clamp(0, 1.0)
 
         logits = self.geo_decoder(queries=geo_points_coords, latents=latents)
+
         kl_loss = posterior.kl(dims=(0, 1, 2))
 
         gt_list = {"sdf_target": geo_points_label}
@@ -362,7 +363,6 @@ class ShapeVAE(VectsetVAE):
         loss += kl_loss * kl_weight
         details["kl_loss"] = kl_loss.item()
         return loss, details, latents
-
 
 
 class ShapeVAEDecoder(VectsetVAE):
@@ -426,9 +426,7 @@ class ShapeVAEDecoder(VectsetVAE):
         self.geo_decoder = None
         self.pts3d_head = None
         if cfg is not None and "pts3d_head" in cfg:
-            self.pts3d_head = eval(cfg.pts3d_head.name)(
-                **cfg.pts3d_head.params
-            )
+            self.pts3d_head = eval(cfg.pts3d_head.name)(**cfg.pts3d_head.params)
         else:
             self.geo_decoder = CrossAttentionDecoder(
                 fourier_embedder=self.fourier_embedder,
@@ -464,11 +462,7 @@ class ShapeVAEDecoder(VectsetVAE):
         state_dict = self.remove_encoder_keys(state_dict)
 
         decoder_keys = self.state_dict().keys()
-        decoder_state_dict = {
-            key: value
-            for key, value in state_dict.items()
-            if key in decoder_keys
-        }
+        decoder_state_dict = {key: value for key, value in state_dict.items() if key in decoder_keys}
         return super().load_state_dict(decoder_state_dict, **kwargs)
 
     def forward(self, latents):
@@ -477,4 +471,3 @@ class ShapeVAEDecoder(VectsetVAE):
     def decode(self, latents):
         latents = self.post_kl(latents)
         return self.transformer(latents)
-

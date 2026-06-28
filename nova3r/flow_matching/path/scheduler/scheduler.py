@@ -72,3 +72,18 @@ class CosineScheduler(Scheduler):
 
     def snr_inverse(self, snr: Tensor) -> Tensor:
         return 2.0 * torch.atan(snr) / torch.pi
+
+
+class LinearScheduler(Scheduler):
+    """Linear Scheduler."""
+
+    def __call__(self, t: Tensor) -> SchedulerOutput:
+        return SchedulerOutput(
+            alpha_t=t,
+            sigma_t=1.0 - t,
+            d_alpha_t=torch.ones_like(t),
+            d_sigma_t=-torch.ones_like(t),
+        )
+
+    def snr_inverse(self, snr: Tensor) -> Tensor:
+        return snr / (1.0 + snr)

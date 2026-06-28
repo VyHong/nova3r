@@ -54,7 +54,7 @@ class ReplicaPanoSDFDataset(BaseDataset):
         self.allow_duplicate_img = common_conf.allow_duplicate_img
 
         self.data_root = Path(data_root)
-        self.sdf_data_root = "/mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/sdf"
+        self.sdf_data_root = "/mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/sdf_0.05"
         self.split = split
         self.format = format
 
@@ -90,6 +90,7 @@ class ReplicaPanoSDFDataset(BaseDataset):
         self.sdf_near_size = common_conf.sdf_near_size
         self.sdf_sharpedge_size = common_conf.sdf_sharpedge_size
         self.sdf_label = common_conf.sdf_label
+        self.debug_vis_dir = None  # "debug_points/replica_sdf_vis"
 
     def __len__(self):
         return len(self.samples_list)
@@ -125,14 +126,8 @@ class ReplicaPanoSDFDataset(BaseDataset):
                         seq_entry_metadata["surface"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}1_cropped_surface.npz"
                         seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}1_cropped_sdf.npz"
                 else:
-                    # only adapt for room2 for now
                     seq_entry_metadata["surface"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}aligned_surface.npz"
                     seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}aligned_sdf.npz"
-
-                    # seq_entry_metadata["surface"] = "/mnt/home/vyhong/projects/nova3r/datasets/hunyuan/00a4cff37043361068376104a292f5b44b5eacbd174651553b6a7ae35647a2a6_surface.npz"
-                    # seq_entry_metadata["geo_points"] = "/mnt/home/vyhong/projects/nova3r/datasets/hunyuan/00a4cff37043361068376104a292f5b44b5eacbd174651553b6a7ae35647a2a6_sdf.npz"
-                    # seq_entry_metadata["surface"] = "/mnt/home/vyhong/projects/nova3r/datasets/hunyuan/room_2_512_384_2m_surface.npz"
-                    # seq_entry_metadata["geo_points"] = "/mnt/home/vyhong/projects/nova3r/datasets/hunyuan/room_2_512_384_2m_sdf.npz"
 
                 seq_entry_metadata["seq_entry_folder"] = f"{seq_entry_folder}"
                 pkl_file = seq_entry_folder / "data.pkl"
@@ -225,6 +220,24 @@ class ReplicaPanoSDFDataset(BaseDataset):
         sdf_points = torch.FloatTensor(sdf_points)
         return sdf_points
 
+    @staticmethod
+    def _median_normalize_camera_frame(surface, geo_points, target_median=1.0):
+        valid_xyz = surface[:, :3]
+        valid_dis = valid_xyz.norm(dim=-1)
+
+        norm_factor = valid_dis.median()
+        norm_factor = norm_factor.clamp(min=0.01, max=100.0)
+
+        factor = target_median / norm_factor
+
+        surface[:, :3] = torch.clamp(surface[:, :3] * factor, -1000.0, 1000.0)
+        geo_points[:, :3] = torch.clamp(geo_points[:, :3] * factor, -1000.0, 1000.0)
+
+        # SDF distance column. This must use the same scale as xyz.
+        geo_points[:, 3] = torch.clamp(geo_points[:, 3] * factor, -1000.0, 1000.0)
+
+        return norm_factor
+
     def get_data(
         self,
         seq_name: str = None,
@@ -238,7 +251,7 @@ class ReplicaPanoSDFDataset(BaseDataset):
             seq_name = self.sequence_list[seq_index]
         if subseq_ids is None:
             subseq_ids = np.arange(6)
-            if self.split == "for da3 in training":
+            if self.split == "no train":
                 subseq_ids = np.random.choice(subseq_ids, len(subseq_ids), replace=self.allow_duplicate_img)
 
         metadata = self.data_store[seq_name]
@@ -251,6 +264,7 @@ class ReplicaPanoSDFDataset(BaseDataset):
         annos = [metadata[i] for i in ids]
 
         images, extrinsics, intrinsics, original_sizes = [], [], [], []
+        camera_translation_scale = None
 
         for anno in annos:
             replica_scene = ReplicaPanoScene.from_pickle(anno["pkl_path"])
@@ -308,6 +322,16 @@ class ReplicaPanoSDFDataset(BaseDataset):
                     surface[:, :3] = (total_transform[:3, :3] @ surface[:, :3].T).T + total_transform[:3, 3]
                     surface[:, 3:6] = (total_transform[:3, :3] @ surface[:, 3:6].T).T
                     geo_points[:, :3] = (total_transform[:3, :3] @ geo_points[:, :3].T).T + total_transform[:3, 3]
+                    # median_norm_factor = self._median_normalize_camera_frame(surface, geo_points, target_median=1.0)
+                    median_norm_factor = 1
+                    camera_translation_scale = (
+                        torch.as_tensor(
+                            float(scale),
+                            dtype=surface.dtype,
+                            device=surface.device,
+                        )
+                        * median_norm_factor
+                    )
 
                 images.append(image)
                 original_sizes.append(original_size)
@@ -315,7 +339,12 @@ class ReplicaPanoSDFDataset(BaseDataset):
                 intrinsics.append(subseq_intrinsics)
 
         ex_t_batched = torch.stack(extrinsics).unsqueeze(0)
-        normalized_extrinsics = self._normalize_extrinsics(ex_t_batched).squeeze(0)
+        normalized_extrinsics = self._normalize_extrinsics(
+            ex_t_batched,
+            translation_scale=camera_translation_scale,
+        ).squeeze(0)
+
+        self._export_debug_visualization(seq_name, ids, surface, normalized_extrinsics, images)
 
         del replica_scene
         intrinsics = torch.from_numpy(np.array(intrinsics))
@@ -332,21 +361,77 @@ class ReplicaPanoSDFDataset(BaseDataset):
 
         return batch
 
+    def _export_debug_visualization(self, seq_name, ids, surface, extrinsics, images):
+        if not self.debug_vis_dir:
+            return
+
+        output_dir = Path(self.debug_vis_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        id_part = "_".join(str(item) for item in ids)
+        stem = f"{seq_name}_{id_part}"
+
+        points = surface[:, :3].detach().cpu().numpy().astype(np.float64)
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(np.ascontiguousarray(points))
+
+        if surface.shape[1] >= 6:
+            normals = surface[:, 3:6].detach().cpu().numpy().astype(np.float64)
+            pcd.normals = o3d.utility.Vector3dVector(np.ascontiguousarray(normals))
+
+        if self.sharpedge_label and surface.shape[1] >= 7:
+            labels = surface[:, -1].detach().cpu().numpy() > 0.5
+            colors = np.zeros((len(points), 3), dtype=np.float64)
+            colors[~labels] = [0.2, 0.55, 1.0]
+            colors[labels] = [1.0, 0.25, 0.1]
+            pcd.colors = o3d.utility.Vector3dVector(colors)
+
+        ply_path = output_dir / f"{stem}_surface.ply"
+        extrinsics_path = output_dir / f"{stem}_normalized_extrinsics.json"
+        images_path = output_dir / f"{stem}_images.png"
+
+        o3d.io.write_point_cloud(str(ply_path), pcd)
+        with open(extrinsics_path, "w", encoding="utf-8") as f:
+            json.dump(extrinsics.detach().cpu().numpy().tolist(), f, indent=2)
+        image_tiles = []
+        for image in images:
+            image_np = image.detach().cpu().permute(1, 2, 0).numpy()
+            image_np = np.clip(image_np * 255.0, 0, 255).astype(np.uint8)
+            image_tiles.append(image_np)
+        if image_tiles:
+            image_grid = np.concatenate(image_tiles, axis=1)
+            cv2.imwrite(str(images_path), cv2.cvtColor(image_grid, cv2.COLOR_RGB2BGR))
+
+        print(f"Saved debug point cloud: {ply_path}")
+        print(f"Saved debug extrinsics: {extrinsics_path}")
+        print(f"Saved debug images: {images_path}")
+
     def __getitem__(self, index):
         seq_name, id = self.samples_list[index].split(" ")
         return self.get_data(seq_name=seq_name, id=id)
 
-    def _normalize_extrinsics(self, ex_t: torch.Tensor | None) -> torch.Tensor | None:
+    def _normalize_extrinsics(
+        self,
+        ex_t: torch.Tensor | None,
+        translation_scale: torch.Tensor | float | None = None,
+    ) -> torch.Tensor | None:
         if ex_t is None:
             return None
         transform = affine_inverse(ex_t[:, :1])
         ex_t_norm = ex_t @ transform
-        c2ws = affine_inverse(ex_t_norm)
-        translations = c2ws[..., :3, 3]
-        dists = translations.norm(dim=-1)
-        median_dist = torch.median(dists)
-        median_dist = torch.clamp(median_dist, min=1e-1)
-        ex_t_norm[..., :3, 3] = ex_t_norm[..., :3, 3] / median_dist
+        if translation_scale is None:
+            c2ws = affine_inverse(ex_t_norm)
+            translations = c2ws[..., :3, 3]
+            dists = translations.norm(dim=-1)
+            translation_scale = torch.median(dists).clamp(min=1e-1)
+        else:
+            translation_scale = torch.as_tensor(
+                translation_scale,
+                dtype=ex_t_norm.dtype,
+                device=ex_t_norm.device,
+            ).clamp(min=1e-6)
+
+        ex_t_norm[..., :3, 3] = ex_t_norm[..., :3, 3] / translation_scale
         return ex_t_norm
 
     def dynamic_pad_collate_fn(self, batch):

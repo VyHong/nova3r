@@ -324,7 +324,7 @@ if __name__ == "__main__":
 
     # Now libigl can read the .ply file flawlessly
     V, F = load_vertices_and_faces(input_file)
-    V, F = add_bounding_box(V, F, distance=0.005)
+    V, F = add_bounding_box(V, F, distance=0.05)
     V, scale, centroid = normalize_to_centroid_sphere(V)
     print(f"Scale: {scale} Centroid: {centroid}")
     # mc_verts, mc_faces = Watertight(V, F, epsilon=2 / 512, grid_res=384)
