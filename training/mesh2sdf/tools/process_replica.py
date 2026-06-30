@@ -23,7 +23,7 @@ def process_mesh(file_path, output_prefix, udf_only):
     """Worker function to process a single mesh file."""
     processing_script = UDF_PROCESSING_SCRIPT if udf_only else WATERTIGHT_PROCESSING_SCRIPT
     expected_outputs = (
-        [Path(f"{output_prefix}_udf.npz")]
+        [Path(f"{output_prefix}_surface.npz"), Path(f"{output_prefix}_udf.npz")]
         if udf_only
         else [Path(f"{output_prefix}_surface.npz"), Path(f"{output_prefix}_sdf.npz")]
     )
@@ -92,7 +92,7 @@ def main(data_root, output_root, num_workers, udf_only):
     print(f"Found {len(files_to_process)} valid meshes to process based on rules.")
     for f in files_to_process:
         output_prefix = output_prefix_for(f, root_path, output_root)
-        output_suffixes = "udf" if udf_only else "surface,sdf"
+        output_suffixes = "surface,udf" if udf_only else "surface,sdf"
         print(f" - {f.relative_to(root_path)} -> {output_prefix}_{{{output_suffixes}}}.npz")
     if not files_to_process:
         print("No files to process. Exiting.")

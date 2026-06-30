@@ -19,7 +19,7 @@ def parse_args():
     parser.add_argument("--ckpt", default="checkpoints/da3_base/checkpoint-last.pth", help="Path to model checkpoint")
     parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
     parser.add_argument("--aggregator_ckpt", default="./checkpoints/da3_base/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
-    parser.add_argument("--vae_ckpt", default="./checkpoints/da3/shape_vae.ckpt", help="VAE checkpoint path")
+    parser.add_argument("--vae_ckpt", default="./checkpoints/hunyuan_mini/last-udf.ckpt", help="VAE checkpoint path")
     parser.add_argument("--wandb", default=False, action="store_true", help="Use Weights and Biases logger")
     parser.add_argument("--wandb_project", default="nova3r", help="WandB project name")
     args = parser.parse_args()
@@ -102,7 +102,6 @@ def main():
         accumulate_grad_batches=cfg.accum_iter,
         log_every_n_steps=1,
         check_val_every_n_epoch=cfg.eval_freq,
-        num_sanity_val_steps=0,
     )
 
     trainer.fit(module, datamodule=datamodule)

@@ -217,15 +217,22 @@ def sample_mesh_udf(V, F, scale, centroid):
 
     sample_num = (1048576 * 2) // 4
 
-    random_surface, _ = random_sample_pointcloud(mesh, num=sample_num)
-    sharp_surface, _ = sharp_sample_pointcloud(mesh, num=sample_num)
+    random_surface, random_normal = random_sample_pointcloud(mesh, num=sample_num)
+    sharp_surface, sharp_normal = sharp_sample_pointcloud(mesh, num=sample_num)
+
+    surface_data = {
+        "random_surface": np.concatenate((random_surface, random_normal), axis=1).astype(np.float16),
+        "sharp_surface": np.concatenate((sharp_surface, sharp_normal), axis=1).astype(np.float16),
+        "scale": np.float16(scale),
+        "centroid": centroid.astype(np.float16),
+    }
 
     udf_data = sample_udf(mesh, random_surface, sharp_surface)
 
     udf_data["scale"] = np.float16(scale)
     udf_data["centroid"] = centroid.astype(np.float16)
 
-    return udf_data
+    return surface_data, udf_data
 
 
 if __name__ == "__main__":
@@ -257,15 +264,19 @@ if __name__ == "__main__":
     print(f"Scale: {scale}")
     print(f"Centroid: {centroid}")
 
-    udf_data = sample_mesh_udf(V, F, scale, centroid)
+    surface_data, udf_data = sample_mesh_udf(V, F, scale, centroid)
 
     parent_folder = os.path.dirname(args.output_prefix)
     if parent_folder:
         os.makedirs(parent_folder, exist_ok=True)
 
+    export_surface = f"{args.output_prefix}_surface.npz"
+    np.savez(export_surface, **surface_data)
+
     export_udf = f"{args.output_prefix}_udf.npz"
     np.savez(export_udf, **udf_data)
 
+    print(f"Saved surface samples to: {export_surface}")
     print(f"Saved UDF samples to: {export_udf}")
 
     # Optional debug export of normalized mesh

@@ -126,11 +126,15 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                     [mins[sample_idx] - padding[sample_idx], maxs[sample_idx] + padding[sample_idx]],
                     axis=0,
                 )
+                # bbox_size = bounds[3:6] - bounds[0:3]
+                # voxel_size = np.max(bbox_size) / 512
+                # mc_level = 128 * voxel_size * 0.5
+
                 mesh = decoder.latents2mesh(
                     latents[sample_idx : sample_idx + 1],
                     output_type="trimesh",
                     bounds=bounds,
-                    mc_level=0.0,
+                    mc_level=0.4,
                     num_chunks=20000,
                     octree_resolution=512,
                     mc_algo="mc",
@@ -191,7 +195,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
             warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=self.cfg.warmup_epochs)
 
             scheduler = torch.optim.lr_scheduler.SequentialLR(
-                optimizer, schedulers=[warmup_scheduler, cosine], milestones=[self.cfg.warmup_epochs]
+                optimizer, schedulers=[warmup_scheduler, exponential], milestones=[self.cfg.warmup_epochs]
             )
         else:
             scheduler = exponential

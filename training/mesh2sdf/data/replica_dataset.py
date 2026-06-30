@@ -54,7 +54,7 @@ class ReplicaPanoSDFDataset(BaseDataset):
         self.allow_duplicate_img = common_conf.allow_duplicate_img
 
         self.data_root = Path(data_root)
-        self.sdf_data_root = "/mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/sdf_0.05"
+        self.sdf_data_root = "/mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/udf"
         self.split = split
         self.format = format
 
@@ -90,7 +90,7 @@ class ReplicaPanoSDFDataset(BaseDataset):
         self.sdf_near_size = common_conf.sdf_near_size
         self.sdf_sharpedge_size = common_conf.sdf_sharpedge_size
         self.sdf_label = common_conf.sdf_label
-        self.debug_vis_dir = None  # "debug_points/replica_sdf_vis"
+        self.debug_vis_dir = None #"debug_points/replica_sdf_vis"
 
     def __len__(self):
         return len(self.samples_list)
@@ -115,19 +115,33 @@ class ReplicaPanoSDFDataset(BaseDataset):
             for seq_entry_folder in Path(self.data_root / f"{scene}/{scene}/Scene_Info").iterdir():
                 seq_entry_metadata = {}
 
+                # if scene.startswith("large_apartment"):
+                #     seq_entry_metadata["surface"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}cropped_surface.npz"
+                #     seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}cropped_sdf.npz"
+                # elif scene.startswith("hotel"):
+                #     if int(seq_entry_folder.name) < 18:
+                #         seq_entry_metadata["surface"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}0_cropped_surface.npz"
+                #         seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}0_cropped_sdf.npz"
+                #     else:
+                #         seq_entry_metadata["surface"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}1_cropped_surface.npz"
+                #         seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}1_cropped_sdf.npz"
+                # else:
+                #     seq_entry_metadata["surface"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}aligned_surface.npz"
+                #     seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}aligned_sdf.npz"
+
                 if scene.startswith("large_apartment"):
                     seq_entry_metadata["surface"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}cropped_surface.npz"
-                    seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}cropped_sdf.npz"
+                    seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}cropped_udf.npz"
                 elif scene.startswith("hotel"):
                     if int(seq_entry_folder.name) < 18:
                         seq_entry_metadata["surface"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}0_cropped_surface.npz"
-                        seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}0_cropped_sdf.npz"
+                        seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}0_cropped_udf.npz"
                     else:
                         seq_entry_metadata["surface"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}1_cropped_surface.npz"
-                        seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}1_cropped_sdf.npz"
+                        seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}1_cropped_udf.npz"
                 else:
                     seq_entry_metadata["surface"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}aligned_surface.npz"
-                    seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}aligned_sdf.npz"
+                    seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}aligned_udf.npz"
 
                 seq_entry_metadata["seq_entry_folder"] = f"{seq_entry_folder}"
                 pkl_file = seq_entry_folder / "data.pkl"
@@ -322,6 +336,7 @@ class ReplicaPanoSDFDataset(BaseDataset):
                     surface[:, :3] = (total_transform[:3, :3] @ surface[:, :3].T).T + total_transform[:3, 3]
                     surface[:, 3:6] = (total_transform[:3, :3] @ surface[:, 3:6].T).T
                     geo_points[:, :3] = (total_transform[:3, :3] @ geo_points[:, :3].T).T + total_transform[:3, 3]
+
                     # median_norm_factor = self._median_normalize_camera_frame(surface, geo_points, target_median=1.0)
                     median_norm_factor = 1
                     camera_translation_scale = (
@@ -352,6 +367,7 @@ class ReplicaPanoSDFDataset(BaseDataset):
 
         batch = {
             "seq_name": set_name + "_" + seq_name,
+            "id": id,
             "images": images,
             "extrinsics": normalized_extrinsics,
             "intrinsics": intrinsics,

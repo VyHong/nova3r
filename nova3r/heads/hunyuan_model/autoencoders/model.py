@@ -19,6 +19,7 @@ from typing import Union, List
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import yaml
 
 from .attention_blocks import FourierEmbedder, Transformer, CrossAttentionDecoder, PointCrossAttentionEncoder
@@ -152,6 +153,9 @@ class VectsetVAE(nn.Module):
     def latents2mesh(self, latents: torch.FloatTensor, **kwargs):
         with synchronize_timer("Volume decoding"):
             grid_logits = self.volume_decoder(latents, self.geo_decoder, **kwargs)
+
+        grid_logits = F.softplus(grid_logits)
+
         with synchronize_timer("Surface extraction"):
             outputs = self.surface_extractor(grid_logits, **kwargs)
         return outputs
@@ -267,6 +271,7 @@ class ShapeVAE(VectsetVAE):
         kw.pop("stage", None)
         kw.pop("vae_ckpt", None)
 
+        # when using pointcloud decoder
         # state_dict = self.prepare_hunyuan_weights(state_dict)
 
         missing_keys, unexpected_keys = super().load_state_dict(state_dict, **kw)
@@ -352,6 +357,7 @@ class ShapeVAE(VectsetVAE):
         geo_points_label = geo_points_label.clamp(0, 1.0)
 
         logits = self.geo_decoder(queries=geo_points_coords, latents=latents)
+        logits = F.softplus(logits)
 
         kl_loss = posterior.kl(dims=(0, 1, 2))
 

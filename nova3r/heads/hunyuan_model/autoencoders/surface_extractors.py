@@ -56,6 +56,10 @@ class SurfaceExtractor:
                 faces = np.ascontiguousarray(faces)
                 outputs.append(Latent2MeshOutput(mesh_v=vertices, mesh_f=faces))
 
+            except ValueError as error:
+                print(f"Surface extraction skipped: {error}")
+                outputs.append(None)
+
             except Exception:
                 import traceback
                 traceback.print_exc()
@@ -66,6 +70,18 @@ class SurfaceExtractor:
 
 class MCSurfaceExtractor(SurfaceExtractor):
     def run(self, grid_logit, *, mc_level, bounds, octree_resolution, **kwargs):
+        finite_grid = grid_logit[torch.isfinite(grid_logit)]
+        if finite_grid.numel() == 0:
+            raise ValueError("Cannot extract a surface from a grid with no finite values.")
+
+        grid_min = finite_grid.min().item()
+        grid_max = finite_grid.max().item()
+        if not (grid_min <= mc_level <= grid_max):
+            raise ValueError(
+                f"Surface level {mc_level} must be within volume data range "
+                f"[{grid_min:.6g}, {grid_max:.6g}]."
+            )
+
         vertices, faces, normals, _ = measure.marching_cubes(
             grid_logit.cpu().numpy(),
             mc_level,
