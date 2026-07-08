@@ -32,10 +32,28 @@ from depth_anything_3.utils.alignment import (
 )
 from depth_anything_3.utils.geometry import affine_inverse, as_homogeneous, map_pdf_to_opacity
 from depth_anything_3.utils.ray_utils import get_extrinsic_from_camray
+from depth_anything_3.utils.parallel_utils import save_image
 
 
 def _wrap_cfg(cfg_obj):
     return OmegaConf.create(cfg_obj)
+
+
+def _debug_save_first_batch_images(x: torch.Tensor, save_path: str = "/tmp/da3_x_first_batch.png") -> None:
+    """Temporary debug helper: save all views from the first batch item as a strip."""
+    with torch.no_grad():
+        images = x[0].detach().float().cpu()
+        if images.ndim == 3:
+            images = images[None]
+
+        if images.min() < 0 or images.max() > 1:
+            mean = torch.tensor([0.485, 0.456, 0.406], dtype=images.dtype).view(1, 3, 1, 1)
+            std = torch.tensor([0.229, 0.224, 0.225], dtype=images.dtype).view(1, 3, 1, 1)
+            images = images * std + mean
+
+        images = images.clamp(0, 1).permute(0, 2, 3, 1)
+        image_strip = torch.cat(list(images), dim=1)
+        save_image((image_strip.numpy() * 255).astype("uint8"), save_path)
 
 
 class DepthAnything3Net(nn.Module):
@@ -119,6 +137,8 @@ class DepthAnything3Net(nn.Module):
                 cam_token = self.cam_enc(extrinsics, intrinsics, x.shape[-2:])
         else:
             cam_token = None
+
+        # _debug_save_first_batch_images(x)
 
         feats, output_3d_list, aux_feats = self.backbone(
             x, cam_token=cam_token, export_feat_layers=export_feat_layers, ref_view_strategy=ref_view_strategy

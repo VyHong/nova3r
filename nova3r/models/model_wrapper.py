@@ -25,5 +25,5 @@ class BatchModelWrapper(nn.Module):
         if encoder_data is None:
             raise ValueError("encoder_data is required. Call model._encode() first and pass the result.")
 
-        output = self._model._decode(tokens=encoder_data['tokens'], images=images, query_points=x, timestep=t)
+        output = self._model._decode(tokens=encoder_data['tokens'], images=images, query_points=x, timestep=t, **extras)
         return output['pts3d_xyz']

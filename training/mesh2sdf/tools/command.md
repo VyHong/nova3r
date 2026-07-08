@@ -1,0 +1,1 @@
+python training/mesh2sdf/tools/process_replica.py --data_root /tmp/datasets/replica_pano/ --output_root datasets/ReplicaPano/median_pad_udf --udf-only

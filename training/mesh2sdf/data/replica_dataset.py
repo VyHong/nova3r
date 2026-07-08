@@ -38,7 +38,6 @@ class ReplicaPanoSDFDataset(BaseDataset):
         split="train",
         samples_list_path=None,
         format="pointcloud",
-        use_lru_cache=False,
     ):
         """
         Initialize the ReplicaPano dataset.
@@ -54,7 +53,7 @@ class ReplicaPanoSDFDataset(BaseDataset):
         self.allow_duplicate_img = common_conf.allow_duplicate_img
 
         self.data_root = Path(data_root)
-        self.sdf_data_root = "/mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/udf"
+        self.sdf_data_root = "/mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/median_pad_0.2_udf"
         self.split = split
         self.format = format
 
@@ -69,8 +68,7 @@ class ReplicaPanoSDFDataset(BaseDataset):
         else:
             with open(samples_list_path, "r") as f:
                 self.samples_list = json.load(f)
-            for scene in self.samples_list:
-                self.sequence_list.append(f"{scene.split(' ')[0]}")
+            self.sequence_list = list(dict.fromkeys(scene.split(" ")[0] for scene in self.samples_list))
 
         self.data_store = {}
         self._load_metadata()
@@ -90,7 +88,7 @@ class ReplicaPanoSDFDataset(BaseDataset):
         self.sdf_near_size = common_conf.sdf_near_size
         self.sdf_sharpedge_size = common_conf.sdf_sharpedge_size
         self.sdf_label = common_conf.sdf_label
-        self.debug_vis_dir = None #"debug_points/replica_sdf_vis"
+        self.debug_vis_dir = "debug_points/replica_udf_vis"
 
     def __len__(self):
         return len(self.samples_list)
@@ -114,21 +112,6 @@ class ReplicaPanoSDFDataset(BaseDataset):
             sequence_metadata = {}
             for seq_entry_folder in Path(self.data_root / f"{scene}/{scene}/Scene_Info").iterdir():
                 seq_entry_metadata = {}
-
-                # if scene.startswith("large_apartment"):
-                #     seq_entry_metadata["surface"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}cropped_surface.npz"
-                #     seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}cropped_sdf.npz"
-                # elif scene.startswith("hotel"):
-                #     if int(seq_entry_folder.name) < 18:
-                #         seq_entry_metadata["surface"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}0_cropped_surface.npz"
-                #         seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}0_cropped_sdf.npz"
-                #     else:
-                #         seq_entry_metadata["surface"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}1_cropped_surface.npz"
-                #         seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}1_cropped_sdf.npz"
-                # else:
-                #     seq_entry_metadata["surface"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}aligned_surface.npz"
-                #     seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}aligned_sdf.npz"
-
                 if scene.startswith("large_apartment"):
                     seq_entry_metadata["surface"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}cropped_surface.npz"
                     seq_entry_metadata["geo_points"] = f"{self.sdf_data_root}/{scene}/{scene}/{scene[:-3]}cropped_udf.npz"
@@ -146,10 +129,10 @@ class ReplicaPanoSDFDataset(BaseDataset):
                 seq_entry_metadata["seq_entry_folder"] = f"{seq_entry_folder}"
                 pkl_file = seq_entry_folder / "data.pkl"
                 seq_entry_metadata["pkl_path"] = pkl_file
-                for subsequence_folder in seq_entry_folder.iterdir():
+                for subsequence_folder in sorted(seq_entry_folder.iterdir(), key=lambda path: path.name):
                     if subsequence_folder.is_dir():
                         seq_entry_metadata["subsequence_images"] = []
-                        for subsequence_file in subsequence_folder.iterdir():
+                        for subsequence_file in sorted(subsequence_folder.iterdir(), key=lambda path: path.name):
                             if subsequence_file.suffix == ".jpg":
                                 seq_entry_metadata["subsequence_images"].append(subsequence_file)
                             if subsequence_file.suffix == ".json":
@@ -163,6 +146,20 @@ class ReplicaPanoSDFDataset(BaseDataset):
         Resize image to the target img_size.
         """
         return cv2.resize(image, (self.img_size, self.img_size), interpolation=interpolation)
+
+    @staticmethod
+    def _intrinsics_to_resized_pixels(intrinsics, orig_size_hw, new_size_hw):
+        intrinsics = intrinsics.copy()
+        uses_normalized_intrinsics = (
+            abs(intrinsics[0, 0]) <= 2.0 and abs(intrinsics[1, 1]) <= 2.0 and abs(intrinsics[0, 2]) <= 2.0 and abs(intrinsics[1, 2]) <= 2.0
+        )
+        if uses_normalized_intrinsics:
+            intrinsics[0, :] *= float(orig_size_hw[1])
+            intrinsics[1, :] *= float(orig_size_hw[0])
+
+        intrinsics[0, :] *= new_size_hw[1] / float(orig_size_hw[1])
+        intrinsics[1, :] *= new_size_hw[0] / float(orig_size_hw[0])
+        return intrinsics
 
     def load_surface_points(self, rng, random_surface, sharpedge_surface):
         surface_normal = []
@@ -234,38 +231,20 @@ class ReplicaPanoSDFDataset(BaseDataset):
         sdf_points = torch.FloatTensor(sdf_points)
         return sdf_points
 
-    @staticmethod
-    def _median_normalize_camera_frame(surface, geo_points, target_median=1.0):
-        valid_xyz = surface[:, :3]
-        valid_dis = valid_xyz.norm(dim=-1)
-
-        norm_factor = valid_dis.median()
-        norm_factor = norm_factor.clamp(min=0.01, max=100.0)
-
-        factor = target_median / norm_factor
-
-        surface[:, :3] = torch.clamp(surface[:, :3] * factor, -1000.0, 1000.0)
-        geo_points[:, :3] = torch.clamp(geo_points[:, :3] * factor, -1000.0, 1000.0)
-
-        # SDF distance column. This must use the same scale as xyz.
-        geo_points[:, 3] = torch.clamp(geo_points[:, 3] * factor, -1000.0, 1000.0)
-
-        return norm_factor
-
     def get_data(
         self,
         seq_name: str = None,
         id: int = None,
         seq_index: int = None,
         img_per_seq: int = 1,
-        subseq_ids: list = None,
+        subseq_ids: list = None,  # [0, 4, 5, 1, 3, 2],
         aspect_ratio: float = 1.0,
     ) -> dict:
         if seq_name is None:
             seq_name = self.sequence_list[seq_index]
         if subseq_ids is None:
             subseq_ids = np.arange(6)
-            if self.split == "no train":
+            if self.split == "train":
                 subseq_ids = np.random.choice(subseq_ids, len(subseq_ids), replace=self.allow_duplicate_img)
 
         metadata = self.data_store[seq_name]
@@ -298,8 +277,11 @@ class ReplicaPanoSDFDataset(BaseDataset):
                 original_size = np.array(image.shape[1:])
 
                 subseq_intrinsics = np.array(camera_data[f"{subseq_id:04d}"]["intrinsics"], dtype=np.float32)
-                subseq_intrinsics[0, :] *= new_size_hw[1] / float(orig_size_hw[1])
-                subseq_intrinsics[1, :] *= new_size_hw[0] / float(orig_size_hw[0])
+                subseq_intrinsics = self._intrinsics_to_resized_pixels(
+                    subseq_intrinsics,
+                    orig_size_hw=orig_size_hw,
+                    new_size_hw=new_size_hw,
+                )
 
                 subseq_w2c = np.array(camera_data[f"{subseq_id:04d}"]["extrinsics"])
                 T_to_colmap = np.array([[1, 0, 0, 0], [0, 0, -1, 0], [0, 1, 0, 0], [0, 0, 0, 1]])
@@ -314,6 +296,7 @@ class ReplicaPanoSDFDataset(BaseDataset):
                     surface = np.load(anno["surface"], allow_pickle=True)
                     geo_points = np.load(anno["geo_points"], allow_pickle=True)
 
+                    # the normalized-mesh centroid offset.
                     total_transform = image_extrinsics @ T_to_colmap
                     scale = surface["scale"]
                     centroid = surface["centroid"]
@@ -321,6 +304,10 @@ class ReplicaPanoSDFDataset(BaseDataset):
                     transformed_centroid = total_transform[:3, :3] @ centroid
                     total_transform[:3, 3] += transformed_centroid
                     total_transform[:3, 3] /= scale
+                    # testing
+                    # total_transform[:3, 3] = 0.0
+
+                    total_transform = torch.from_numpy(total_transform).float()
 
                     surface = self.load_surface_points(rng, random_surface=surface["random_surface"], sharpedge_surface=surface["sharp_surface"])
                     geo_points = self.load_sdf_points(
@@ -332,21 +319,11 @@ class ReplicaPanoSDFDataset(BaseDataset):
                         sharpedge_points=geo_points["sharp_near_points"],
                         sharpedge_label=geo_points["sharp_near_label"],
                     )
-                    total_transform = torch.from_numpy(total_transform).float()
                     surface[:, :3] = (total_transform[:3, :3] @ surface[:, :3].T).T + total_transform[:3, 3]
                     surface[:, 3:6] = (total_transform[:3, :3] @ surface[:, 3:6].T).T
                     geo_points[:, :3] = (total_transform[:3, :3] @ geo_points[:, :3].T).T + total_transform[:3, 3]
 
-                    # median_norm_factor = self._median_normalize_camera_frame(surface, geo_points, target_median=1.0)
-                    median_norm_factor = 1
-                    camera_translation_scale = (
-                        torch.as_tensor(
-                            float(scale),
-                            dtype=surface.dtype,
-                            device=surface.device,
-                        )
-                        * median_norm_factor
-                    )
+                    camera_translation_scale = float(scale)
 
                 images.append(image)
                 original_sizes.append(original_size)
@@ -359,7 +336,7 @@ class ReplicaPanoSDFDataset(BaseDataset):
             translation_scale=camera_translation_scale,
         ).squeeze(0)
 
-        self._export_debug_visualization(seq_name, ids, surface, normalized_extrinsics, images)
+        # self._export_debug_visualization(seq_name, ids, surface, normalized_extrinsics, images)
 
         del replica_scene
         intrinsics = torch.from_numpy(np.array(intrinsics))
@@ -368,6 +345,7 @@ class ReplicaPanoSDFDataset(BaseDataset):
         batch = {
             "seq_name": set_name + "_" + seq_name,
             "id": id,
+            "subseq_ids": torch.as_tensor(subseq_ids, dtype=torch.long),
             "images": images,
             "extrinsics": normalized_extrinsics,
             "intrinsics": intrinsics,

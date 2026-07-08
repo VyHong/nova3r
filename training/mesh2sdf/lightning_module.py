@@ -1,5 +1,7 @@
 import pytorch_lightning as pl
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from demo_nova3r import render_360_video
 from nova3r.heads.hunyuan_model.autoencoders.model import DiagonalGaussianDistribution
 from nova3r.losses import L21, FMVelocity, Pts3D_Regr3D_CD_V4, ReconstructionLoss, SDFReconstructionLoss, MSE
@@ -7,9 +9,75 @@ from eval.mv_recon.metric import SSI3DScore_Scene_Multi
 
 from nova3r.heads.hunyuan_model.pipelines import export_to_trimesh
 import os
+import sys
+from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
+import math
+from torch.optim.lr_scheduler import LRScheduler
+
+from training.mesh2sdf.tools.mesh_udf.mesh_udf import get_mesh_udf_fast
+
+
+class UDFGeoDecoderAdapter(nn.Module):
+    def __init__(self, geo_decoder, latent, bounds, udf_scale=128.0):
+        super().__init__()
+        self.geo_decoder = geo_decoder
+        self.latent = latent
+        self.udf_scale = float(udf_scale)
+        bounds = torch.as_tensor(bounds, dtype=latent.dtype, device=latent.device)
+        mins, maxs = bounds[:3], bounds[3:]
+        self.center = (mins + maxs) * 0.5
+        self.half_extent = ((maxs - mins).max() * 0.5).clamp_min(1e-6)
+
+    def forward(self, decoder_input):
+        unit_queries = decoder_input[:, -3:].view(1, -1, 3).to(device=self.latent.device, dtype=self.latent.dtype)
+        queries = unit_queries * self.half_extent + self.center
+        logits = self.geo_decoder(queries=queries, latents=self.latent)
+        # Training predicts UDF distances scaled by 128; MC expects distances in unit-grid coordinates.
+        return (F.softplus(logits) / (self.udf_scale * self.half_extent)).view(-1, 1)
+
+    def mesh_to_world(self, mesh):
+        mesh.vertices = mesh.vertices * float(self.half_extent.detach().cpu()) + self.center.detach().cpu().numpy()
+        return mesh
+
+class PowerCosineAnnealingLR(LRScheduler):
+    """
+    Drop-in replacement for torch.optim.lr_scheduler.CosineAnnealingLR,
+    but with a power parameter controlling decay aggressiveness.
+
+    power = 1.0  -> normal cosine
+    power > 1.0  -> faster decay early, stays lower longer
+    power < 1.0  -> slower decay early
+    """
+
+    def __init__(
+        self,
+        optimizer,
+        T_max,
+        eta_min=0.0,
+        power=1.0,
+        last_epoch=-1,
+    ):
+        self.T_max = T_max
+        self.eta_min = eta_min
+        self.power = power
+        super().__init__(optimizer, last_epoch)
+
+    def get_lr(self):
+        if self.T_max <= 0:
+            raise ValueError("T_max must be > 0")
+
+        progress = min(self.last_epoch / self.T_max, 1.0)
+
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        factor = cosine ** self.power
+
+        return [
+            self.eta_min + (base_lr - self.eta_min) * factor
+            for base_lr in self.base_lrs
+        ]
 
 class Mesh2SDFLightningModule(pl.LightningModule):
     def __init__(self, cfg, model):
@@ -23,11 +91,15 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         self.kl_weight = cfg.kl_weight
 
         layers_to_freeze = getattr(cfg, "layers_to_freeze", [])
+        frozen_layers_logged = set()
 
         for name, param in model.named_parameters():
-            if any(layer in name for layer in layers_to_freeze):
+            matched_layer = next((layer for layer in layers_to_freeze if layer in name), None)
+            if matched_layer is not None:
                 param.requires_grad = False
-                print(f"Froze: {name}")
+                if matched_layer not in frozen_layers_logged:
+                    print(f"Froze: {matched_layer}")
+                    frozen_layers_logged.add(matched_layer)
             else:
                 # print(f"Kept active: {name}")
                 pass
@@ -36,29 +108,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         self.val_criterion = SDFReconstructionLoss(MSE)
         self.test_criterion = None
 
-    # def on_after_backward(self):
-    #     if self.global_step % 50 != 0:
-    #         return
-
-    #     groups = {
-    #         "da3": "da3_aggregator",
-    #         "img_proj": "img_token_proj",
-    #         "fm_head": "pts3d_head",
-    #         "first_stage": "first_stage",
-    #     }
-
-    #     for label, key in groups.items():
-    #         norms = []
-    #         for name, p in self.model.named_parameters():
-    #             if key in name and p.grad is not None:
-    #                 norms.append(p.grad.detach().float().norm().item())
-    #         if norms:
-    #             print(f"grad/{label}: mean={sum(norms)/len(norms):.3e}, max={max(norms):.3e}, n={len(norms)}")
-    #         else:
-    #             print(f"grad/{label}: NONE")
-
     def training_step(self, batch, batch_idx):
-        # loss, details, _ = self.model.lightning_forward(batch, self.train_criterion, kl_weight=self.kl_weight)
         loss, details, _ = self.model.lightning_forward(
             batch,
             self.train_criterion,
@@ -70,7 +120,6 @@ class Mesh2SDFLightningModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         if not hasattr(self, "val_batch_to_log") or self.val_batch_to_log is None:
             self.val_batch_to_log = batch  # Store the first batch for logging at epoch end
-        # reconstruction_loss, _, _ = self.model.lightning_forward(batch, self.val_criterion, kl_weight=0.0)
         reconstruction_loss, _, _ = self.model.lightning_forward(
             batch,
             self.val_criterion,
@@ -94,8 +143,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         val_batch_to_log = self._slice_batch(self.val_batch_to_log, max_elements)
 
         with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-            # _, _, latents = self.model.lightning_forward(self.val_batch_to_log, self.val_criterion, kl_weight=0.0)
-            _, _, latents = self.model.lightning_forward(
+            _, recon_details, latents = self.model.lightning_forward(
                 val_batch_to_log,
                 self.val_criterion,
                 kl_weight=0.0,
@@ -103,12 +151,6 @@ class Mesh2SDFLightningModule(pl.LightningModule):
             )
 
             surface = val_batch_to_log["surface"]
-
-            # save_sdf_to_ply(self.val_batch_to_log["geo_points"][0], filename="debug_points/sdf_hole.ply")
-            mins = surface[:, :, :3].min(dim=1).values.detach().cpu().numpy()
-            maxs = surface[:, :, :3].max(dim=1).values.detach().cpu().numpy()
-            box_size = maxs - mins
-            padding = box_size * 0.2
 
             if hasattr(self.model, "decoder_head"):
                 decoder = self.model.decoder_head
@@ -120,33 +162,85 @@ class Mesh2SDFLightningModule(pl.LightningModule):
             sample_dir = f"{self.current_log_dir}/val_points/epoch_{self.current_epoch}"
             os.makedirs(sample_dir, exist_ok=True)
 
+            recon_step_latent_sets = {}
+            if recon_details:
+                for key, value in recon_details.items():
+                    if key.startswith("recon_step_latents_") and isinstance(value, torch.Tensor):
+                        recon_step_latent_sets[key.replace("recon_step_latents_", "step_")] = value
+
+            def mesh_from_latents(latent_batch, sample_idx, bounds):
+                mesh_method = str(getattr(self.cfg, "mesh_method", "old")).lower()
+                if mesh_method in {"old", "latent2mesh", "latents2mesh", "hunyuan"}:
+                    mesh_outputs = decoder.latents2mesh(
+                        latent_batch[sample_idx : sample_idx + 1],
+                        output_type="trimesh",
+                        bounds=bounds,
+                        mc_level=float(getattr(self.cfg, "mesh_mc_level", 0.4)),
+                        num_chunks=int(getattr(self.cfg, "mesh_num_chunks", 40000)),
+                        octree_resolution=int(getattr(self.cfg, "mesh_octree_resolution", 512)),
+                        mc_algo=str(getattr(self.cfg, "mesh_mc_algo", "mc")),
+                        enable_pbar=bool(getattr(self.cfg, "mesh_enable_pbar", True)),
+                    )
+                    meshes = export_to_trimesh(mesh_outputs)
+                    return meshes[0] if isinstance(meshes, list) and meshes else meshes
+
+                if mesh_method in {"udf", "mesh_udf", "new"}:
+                    MC = int(getattr(self.cfg, "mesh_mc", 192))
+                    smooth_borders = bool(getattr(self.cfg, "smooth_borders", False))
+                    fourier = bool(getattr(self.cfg, "mesh_fourier", False))
+                    with torch.inference_mode(False), torch.enable_grad():
+                        latent_target = latent_batch[sample_idx : sample_idx + 1].float().detach().clone()
+                        udf_decoder = UDFGeoDecoderAdapter(decoder.geo_decoder, latent_target, bounds)
+                        _, _, mesh = get_mesh_udf_fast(
+                            udf_decoder,
+                            None,
+                            N_MC=MC,
+                            gradient=False,
+                            smooth_borders=smooth_borders,
+                            fourier=fourier,
+                        )
+                        if mesh is not None:
+                            mesh = udf_decoder.mesh_to_world(mesh)
+                    return mesh
+
+                raise ValueError(f"Unknown mesh_method '{mesh_method}'. Use 'udf' or 'latents2mesh'.")
+
             meshes_to_render = []
             for sample_idx in range(latents.shape[0]):
+                sample_surface = surface[sample_idx, :, :3]
+                sample_min = sample_surface.min(dim=0).values.detach().cpu().numpy()
+                sample_max = sample_surface.max(dim=0).values.detach().cpu().numpy()
+                sample_padding = (sample_max - sample_min) * 0.1
                 bounds = np.concatenate(
-                    [mins[sample_idx] - padding[sample_idx], maxs[sample_idx] + padding[sample_idx]],
+                    [sample_min - sample_padding, sample_max + sample_padding],
                     axis=0,
                 )
-                # bbox_size = bounds[3:6] - bounds[0:3]
-                # voxel_size = np.max(bbox_size) / 512
-                # mc_level = 128 * voxel_size * 0.5
 
-                mesh = decoder.latents2mesh(
-                    latents[sample_idx : sample_idx + 1],
-                    output_type="trimesh",
-                    bounds=bounds,
-                    mc_level=0.4,
-                    num_chunks=20000,
-                    octree_resolution=512,
-                    mc_algo="mc",
-                    enable_pbar=True,
-                )
-                mesh = export_to_trimesh(mesh)[0]
-                if mesh is not None:
-                    mesh_dir = os.path.join(sample_dir, f"{val_batch_to_log["seq_name"][sample_idx]}_{sample_idx:03d}")
+                mesh_dir = os.path.join(sample_dir, f"{val_batch_to_log["seq_name"][sample_idx]}_{val_batch_to_log["subseq_ids"][sample_idx][0]}")
+                os.makedirs(mesh_dir, exist_ok=True)
+                try:
+                    mesh = mesh_from_latents(latents, sample_idx, bounds)
+                except RuntimeError as exc:
+                    if "No surface found at the given iso value" not in str(exc):
+                        raise
+                    self.print(f"Skipping validation mesh for sample {sample_idx}: no surface found.")
+                    mesh = None
+                if mesh is not None and len(mesh.vertices) > 0 and len(mesh.faces) > 0:
                     glb_path = os.path.join(mesh_dir, "val_mesh.ply")
-                    os.makedirs(mesh_dir, exist_ok=True)
                     mesh.export(glb_path)
                     meshes_to_render.append((glb_path, mesh_dir))
+
+                for step_name, step_latents in recon_step_latent_sets.items():
+                    try:
+                        step_mesh = mesh_from_latents(step_latents, sample_idx, bounds)
+                    except RuntimeError as exc:
+                        if "No surface found at the given iso value" not in str(exc):
+                            raise
+                        self.print(f"Skipping {step_name} mesh for sample {sample_idx}: no surface found.")
+                        continue
+                    if step_mesh is not None and len(step_mesh.vertices) > 0 and len(step_mesh.faces) > 0:
+                        step_path = os.path.join(mesh_dir, f"recon_{step_name}.ply")
+                        step_mesh.export(step_path)
 
         for glb_path, mesh_dir in meshes_to_render:
             render_360_video(glb_path, mesh_dir)
@@ -190,13 +284,16 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, self.parameters()), lr=self.learning_rate, weight_decay=self.cfg.weight_decay)
         cosine = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.trainer.max_epochs)
         exponential = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=1)
+        power_cosine = PowerCosineAnnealingLR(
+            optimizer,
+            T_max=self.trainer.max_epochs,
+            eta_min=1e-7,
+            power=2.0,
+        )
 
         if self.cfg.warmup_epochs > 0:
             warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=self.cfg.warmup_epochs)
-
-            scheduler = torch.optim.lr_scheduler.SequentialLR(
-                optimizer, schedulers=[warmup_scheduler, exponential], milestones=[self.cfg.warmup_epochs]
-            )
+            scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, exponential], milestones=[self.cfg.warmup_epochs])
         else:
             scheduler = exponential
         plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=100)

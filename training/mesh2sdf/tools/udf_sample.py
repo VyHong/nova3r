@@ -82,6 +82,39 @@ def normalize_to_centroid_sphere(V):
     return V_normalized, scale, centroid
 
 
+def normalize_to_median(V, mode="median"):
+    if mode == "median":
+        target_median = 1.0
+    else:
+        target_median = float(mode.split("_")[-1])
+    if target_median == 0.0:
+        raise ValueError("Median normalization target must be non-zero.")
+
+    translation = np.array([0,0,1.6]) 
+    V = V - translation
+
+    distances = np.linalg.norm(V, axis=1)
+    norm_factor = np.median(distances) if distances.size > 0 else 1.0
+    norm_factor = np.clip(norm_factor, 0.01, 100.0)
+
+    V_normalized = V / norm_factor * target_median
+    V_normalized = np.clip(V_normalized, -1000.0, 1000.0)
+
+    scale = norm_factor / target_median
+    centroid = np.zeros(3, dtype=V.dtype)
+
+    return V_normalized, scale, centroid
+
+
+def normalize_vertices(V, mode="centroid_sphere"):
+    if mode in ("centroid_sphere", "sphere"):
+        return normalize_to_centroid_sphere(V)
+    if "median" in mode:
+        return normalize_to_median(V, mode=mode)
+
+    raise ValueError(f"Unknown normalize mode: {mode}")
+
+
 def load_vertices_and_faces(input_file):
     input_path = Path(input_file)
 
@@ -106,11 +139,29 @@ def load_vertices_and_faces(input_file):
     return V, F
 
 
+def padded_mesh_bounds(mesh, padding_ratio=0.2, min_padding=0.1):
+    bounds = np.array(mesh.bounds, dtype=np.float64, copy=True)
+    if bounds.shape != (2, 3) or not np.isfinite(bounds).all():
+        raise ValueError(f"Invalid mesh bounds: {bounds}")
+
+    extent = bounds[1] - bounds[0]
+    padding = max(float(extent.max()) * padding_ratio, min_padding)
+    bounds[0] -= padding
+    bounds[1] += padding
+    return bounds
+
+
+def sample_volume_points(bounds, num_points):
+    bounds = np.asarray(bounds, dtype=np.float64)
+    low, high = bounds[0], bounds[1]
+    return np.random.rand(num_points, 3) * (high - low) + low
+
+
 def sample_udf(mesh, random_surface, sharp_surface):
     n_volume_points = sharp_surface.shape[0] * 2
 
-    # Since mesh is normalized to roughly fit inside [-1, 1]^3
-    vol_points = (np.random.rand(n_volume_points, 3) - 0.5) * 2.0 * 1.05
+    volume_bounds = padded_mesh_bounds(mesh)
+    vol_points = sample_volume_points(volume_bounds, n_volume_points)
 
     # Near-surface random samples
     a, b = -0.25, 0.25
@@ -145,21 +196,11 @@ def sample_udf(mesh, random_surface, sharp_surface):
 
     sharp_near_points = np.concatenate(
         [
-            sharp_surface[:unit_num]
-            + np.random.normal(scale=0.001, size=(unit_num, 3)),
-
-            sharp_surface[unit_num : unit_num * 2]
-            + np.random.normal(scale=0.003, size=(unit_num, 3)),
-
-            sharp_surface[unit_num * 2 : unit_num * 3]
-            + np.random.normal(scale=0.006, size=(unit_num, 3)),
-
-            sharp_surface[unit_num * 3 : unit_num * 4]
-            + np.random.normal(scale=0.01, size=(unit_num, 3)),
-
-            sharp_surface[unit_num * 4 : unit_num * 5]
-            + np.random.normal(scale=0.02, size=(unit_num, 3)),
-
+            sharp_surface[:unit_num] + np.random.normal(scale=0.001, size=(unit_num, 3)),
+            sharp_surface[unit_num : unit_num * 2] + np.random.normal(scale=0.003, size=(unit_num, 3)),
+            sharp_surface[unit_num * 2 : unit_num * 3] + np.random.normal(scale=0.006, size=(unit_num, 3)),
+            sharp_surface[unit_num * 3 : unit_num * 4] + np.random.normal(scale=0.01, size=(unit_num, 3)),
+            sharp_surface[unit_num * 4 : unit_num * 5] + np.random.normal(scale=0.02, size=(unit_num, 3)),
             sharp_surface[unit_num * 5 :]
             + np.random.normal(
                 scale=0.04,
@@ -197,12 +238,11 @@ def sample_udf(mesh, random_surface, sharp_surface):
     data = {
         "vol_points": vol_points.astype(np.float16),
         "vol_label": vol_udf.astype(np.float16),
-
         "random_near_points": random_near_points.astype(np.float16),
         "random_near_label": random_near_udf.astype(np.float16),
-
         "sharp_near_points": sharp_near_points.astype(np.float16),
         "sharp_near_label": sharp_near_udf.astype(np.float16),
+        "bounds": np.concatenate((volume_bounds[0], volume_bounds[1])).astype(np.float32),
     }
 
     return data
@@ -214,6 +254,9 @@ def sample_mesh_udf(V, F, scale, centroid):
     print(f"Watertight: {mesh.is_watertight}")
     print(f"Bounds min: {mesh.vertices.min(axis=0)}")
     print(f"Bounds max: {mesh.vertices.max(axis=0)}")
+    volume_bounds = padded_mesh_bounds(mesh)
+    print(f"Volume sample bounds min: {volume_bounds[0]}")
+    print(f"Volume sample bounds max: {volume_bounds[1]}")
 
     sample_num = (1048576 * 2) // 4
 
@@ -225,6 +268,7 @@ def sample_mesh_udf(V, F, scale, centroid):
         "sharp_surface": np.concatenate((sharp_surface, sharp_normal), axis=1).astype(np.float16),
         "scale": np.float16(scale),
         "centroid": centroid.astype(np.float16),
+        "bounds": np.concatenate((volume_bounds[0], volume_bounds[1])).astype(np.float32),
     }
 
     udf_data = sample_udf(mesh, random_surface, sharp_surface)
@@ -236,9 +280,7 @@ def sample_mesh_udf(V, F, scale, centroid):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Sample UDF data from a mesh without adding a bounding box."
-    )
+    parser = argparse.ArgumentParser(description="Sample UDF data from a mesh without adding a bounding box.")
 
     parser.add_argument(
         "--input_obj",
@@ -253,14 +295,21 @@ if __name__ == "__main__":
         required=True,
         help="Base path for output file, e.g. output/room_001.",
     )
+    parser.add_argument(
+        "--normalize_mode",
+        type=str,
+        default="median",
+        help="Normalization mode: centroid_sphere, sphere, median, or median_<target>.",
+    )
 
     args = parser.parse_args()
 
     V, F = load_vertices_and_faces(args.input_obj)
 
     # Important: no bounding box is added here.
-    V, scale, centroid = normalize_to_centroid_sphere(V)
+    V, scale, centroid = normalize_vertices(V, mode=args.normalize_mode)
 
+    print(f"Normalize mode: {args.normalize_mode}")
     print(f"Scale: {scale}")
     print(f"Centroid: {centroid}")
 

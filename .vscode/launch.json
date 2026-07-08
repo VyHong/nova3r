@@ -12,7 +12,8 @@
             "python": "/opt/conda/envs/nova3r/bin/python",
             "args": "${command:pickArgs}",
             "env": {
-                "PYTHONPATH": "${workspaceFolder}"
+                "PYTHONPATH": "${workspaceFolder}",
+                "NOVA3R_RECON_DIRECT_FROM_FIXED_NOISE": "1"
             },
             "justMyCode": false
         }

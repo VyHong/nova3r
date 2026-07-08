@@ -1,6 +1,7 @@
 import os
 import time
 from collections import defaultdict
+from contextlib import contextmanager
 
 import tqdm
 import torch
@@ -21,6 +22,7 @@ from nova3r.utils.sampling import sampling_train_gen_target
 from einops import rearrange
 
 from nova3r.heads.hunyuan_model.surface_loaders_cuda import SharpEdgeSurfaceLoader
+from training.nova3r.benchmark import timed_section
 
 path = AffineProbPath(scheduler=CosineScheduler())
 hunyuan_loader = SharpEdgeSurfaceLoader(
@@ -301,7 +303,20 @@ def loss_of_one_batch_train(
 ):
     """Compute predictions and training loss for one batch."""
 
-    images = torch.stack(batch["images"], dim=1)
+    timings = defaultdict(float)
+    profiling_enabled = bool(getattr(args, "benchmark_inner", False))
+    timer = timed_section if profiling_enabled else None
+
+    @contextmanager
+    def maybe_timed(name):
+        if timer is None:
+            yield
+        else:
+            with timer(timings, name, device=device):
+                yield
+
+    with maybe_timed("stack_images"):
+        images = torch.stack(batch["images"], dim=1)
     # images = torch.zeros_like(images) # Replace with black images
 
     token_mask = None
@@ -326,13 +341,16 @@ def loss_of_one_batch_train(
     else:
         norm_mode = "none"
 
-    pts3d_src, valid_src = get_all_pts3d(batch, mode=query_src, down_resolution=down_resolution)
-    pts3d_trg, valid_trg = get_all_pts3d(batch, mode=target_src, down_resolution=down_resolution)
-    if "hunyuan" in query_src:
-        pts3d_src_norm, normals_src = pts3d_src[..., :3], pts3d_src[..., 3:]
-        pts3d_trg_norm, normals_trg = pts3d_trg[..., :3], pts3d_trg[..., 3:]
-    else:
-        pts3d_src_norm, pts3d_trg_norm = normalize_input(pts3d_src, valid_src, pts3d_trg, valid_trg, mode=norm_mode)
+    with maybe_timed("get_src_pts3d"):
+        pts3d_src, valid_src = get_all_pts3d(batch, mode=query_src, down_resolution=down_resolution)
+    with maybe_timed("get_trg_pts3d"):
+        pts3d_trg, valid_trg = get_all_pts3d(batch, mode=target_src, down_resolution=down_resolution)
+    with maybe_timed("normalize_input"):
+        if "hunyuan" in query_src:
+            pts3d_src_norm, normals_src = pts3d_src[..., :3], pts3d_src[..., 3:]
+            pts3d_trg_norm, normals_trg = pts3d_trg[..., :3], pts3d_trg[..., 3:]
+        else:
+            pts3d_src_norm, pts3d_trg_norm = normalize_input(pts3d_src, valid_src, pts3d_trg, valid_trg, mode=norm_mode)
 
     B = images.shape[0]
     # save_points_ply(pts3d_trg_norm[0], f"debug_points/points_trg.ply")
@@ -340,29 +358,31 @@ def loss_of_one_batch_train(
     # save_batch_images(images, f"debug_points/{batch['seq_name'][0]}_images.png")
 
     # Use uniform noise [-1, 1]^3 to match inference.py prior instead of Gaussian
-    x_0 = torch.rand_like(pts3d_trg_norm, device=device) * 2 - 1
-    t = torch.rand(B, device=device)
+    with maybe_timed("flow_path_sample"):
+        x_0 = torch.rand_like(pts3d_trg_norm, device=device) * 2 - 1
+        t = torch.rand(B, device=device)
 
-    fm_path = path
-    path_sample = fm_path.sample(x_0=x_0, x_1=pts3d_trg_norm, t=t)
-    x_t = path_sample.x_t
-    dx_t = path_sample.dx_t
+        fm_path = path
+        path_sample = fm_path.sample(x_0=x_0, x_1=pts3d_trg_norm, t=t)
+        x_t = path_sample.x_t
+        dx_t = path_sample.dx_t
 
     t_query = t[:, None].expand(B, x_t.shape[1])
     cfg_scale = args.cfg_scale if "cfg_scale" in args else 1.0
 
     if "hunyuan" in query_src:
         pts3d_src_norm = torch.cat([pts3d_src_norm, normals_src], dim=-1)
-    v_pred = _predict_vector_field(
-        model=model,
-        batch=batch,
-        images=images,
-        query_points=x_t,
-        timestep=t_query,
-        token_mask=token_mask,
-        pointmaps=pts3d_src_norm,
-        cfg_scale=cfg_scale,
-    )
+    with maybe_timed("model_encode"):
+        encoder_data = model._encode(images=images, batch=batch, pointmaps=pts3d_src_norm, test=False, cfg_scale=cfg_scale)
+    with maybe_timed("model_decode"):
+        out = model._decode(
+            tokens=encoder_data["tokens"],
+            images=images,
+            token_mask=token_mask,
+            query_points=x_t,
+            timestep=t_query,
+        )
+        v_pred = out["pts3d_xyz"]
     # visualize_dx_t_v_pred_distribution(dx_t, v_pred, t, save_path=f"debug_points/value_distribution.png")
 
     gt_list = {
@@ -375,6 +395,12 @@ def loss_of_one_batch_train(
         "x_t": x_t,
         "t": t,
     }
-    loss, details = criterion(gt_list=gt_list, pred_dict=pred_dict)
+    with maybe_timed("criterion"):
+        loss, details = criterion(gt_list=gt_list, pred_dict=pred_dict)
+
+    if profiling_enabled:
+        details = dict(details)
+        for name, value in timings.items():
+            details[f"benchmark_inner/{name}"] = value
 
     return loss, details

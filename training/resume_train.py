@@ -1,4 +1,9 @@
 import os
+import sys
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import pytorch_lightning as pl
@@ -18,7 +23,7 @@ def parse_args():
     parser.add_argument("--ckpt", default="checkpoints/da3_base/checkpoint-last.pth", help="Path to model checkpoint")
     parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
     parser.add_argument("--aggregator_ckpt", default="./checkpoints/da3_base/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
-    parser.add_argument("--vae_ckpt", default="./checkpoints/da3/shape_vae.ckpt", help="VAE checkpoint path")
+    parser.add_argument("--vae_ckpt", default="./checkpoints/hunyuan_mini/last_median.ckpt", help="VAE checkpoint path")
     parser.add_argument("--wandb", default=False, action="store_true", help="Use Weights and Biases logger")
     parser.add_argument("--wandb_project", default="nova3r", help="WandB project name")
     args = parser.parse_args()
@@ -38,6 +43,7 @@ def load_data_config(ckpt_path):
 def main():
     # torch.cuda.memory._record_memory_history()
     torch.set_float32_matmul_precision("medium")
+    pl.seed_everything(42, workers=True)
     args = parse_args()
 
     model, cfg = load_model(args.ckpt, args.device, aggregator_ckpt=args.aggregator_ckpt, vae_ckpt=args.vae_ckpt, strict=False)
@@ -88,7 +94,7 @@ def main():
     trainer.fit(
         module,
         datamodule=datamodule,
-        ckpt_path="exp_output/da3_img_cond_shape_vae/checkpoints/last.ckpt",
+        ckpt_path="exp_output/da3_img_cond_udf/checkpoints/last-v1_1024.ckpt",
         weights_only=False,
     )
 

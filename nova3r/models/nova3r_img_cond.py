@@ -1,4 +1,7 @@
 # Copyright (c) 2026 Weirong Chen
+import json
+import os
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 
@@ -27,6 +30,8 @@ from nova3r.flow_matching.path import AffineProbPath
 
 from nova3r.flow_matching.solver import ODESolver
 from nova3r.models.model_wrapper import BatchModelWrapper
+
+from nova3r.heads.pts3d_decoder.latent_flowm_decoder import SiT
 
 
 def _load_checkpoint_state_dict(path):
@@ -71,9 +76,10 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
             self.da3_aggregator = DepthAnything3(cfg=self.cfg)
         elif self.cfg.aggregator.name == "AggregatorPts3D":
             self.vggt_aggregator = AggregatorPts3D(**self.cfg.aggregator.params)
+        elif self.cfg.aggregator.name == "Depth_Predicted":
+            pass
 
         token_dim = self.cfg.aggregator.params.token_dim
-
         self.detach_vit_token = self.cfg.aggregator.params.detach_vit_token if "detach_vit_token" in self.cfg.aggregator.params else False
         self.detach_vggt_token = self.cfg.aggregator.params.detach_vggt_token if "detach_vggt_token" in self.cfg.aggregator.params else False
 
@@ -97,6 +103,24 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
         self.token_noise_prob = self.cfg.aggregator.params.get("token_noise_prob", 0.0)
         self.token_noise_sigma = self.cfg.aggregator.params.get("token_noise_sigma", 0.0)
         self.sample_posterior = getattr(self.cfg, "sample_posterior", True)
+        self.debug_lightning_batch_dir = os.environ.get(
+            "NOVA3R_LIGHTNING_DEBUG_BATCH_DIR",
+            "debug_points/lightning_forward_batch",
+        )
+        self.debug_lightning_batch_once = os.environ.get("NOVA3R_LIGHTNING_DEBUG_BATCH_ONCE", "1") != "0"
+        self.debug_lightning_batch_max_samples = int(os.environ.get("NOVA3R_LIGHTNING_DEBUG_BATCH_MAX_SAMPLES", "2"))
+        self.freeze_target_latents = self._env_flag(
+            "NOVA3R_FREEZE_TARGET_LATENTS",
+            getattr(self.cfg, "freeze_target_latents", False),
+        )
+        self.freeze_target_latents_sample_posterior = self._env_flag(
+            "NOVA3R_FREEZE_TARGET_LATENTS_SAMPLE_POSTERIOR",
+            getattr(self.cfg, "freeze_target_latents_sample_posterior", False),
+        )
+        self.recon_latent_steps = int(os.environ.get("NOVA3R_RECON_LATENT_STEPS", getattr(self.cfg, "recon_latent_steps", 50)))
+        self.recon_latent_step_interval = int(os.environ.get("NOVA3R_RECON_LATENT_STEP_INTERVAL", getattr(self.cfg, "recon_latent_step_interval", 0)))
+        self._target_latent_cache = {}
+        self._debug_lightning_batch_exported = False
 
         if self.use_token_ln:
             self.token_norm = nn.LayerNorm(self.cfg.aggregator.params.token_dim)
@@ -279,6 +303,13 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
 
         return aggregated_tokens_3d_list, pts3d, pts3d_conf
 
+    def forward_first_stage(self, batch: dict):
+
+        with torch.no_grad():
+            points = batch["aggregator_points"]
+            latents = self.first_stage.encode(points, sample_posterior=False)
+        return latents
+
     def _encode(self, images, test=False, **kwargs):
         """Project visual tokens to 3D token space with optional learned token initialization."""
 
@@ -286,6 +317,11 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
             aggregated_tokens_list, pts3d, pts3d_conf = self.forward_da3(images, batch=kwargs.get("batch"), ref_view_strategy="first")
         elif self.cfg.aggregator.name == "AggregatorPts3D":
             aggregated_tokens_list, pts3d, pts3d_conf = self.forward_vggt(images)
+        elif self.cfg.aggregator.name == "Depth_Predicted":
+            scene_tokens = kwargs.get("batch")["aggregator_latents"]
+            if scene_tokens.dim() == 4:
+                scene_tokens = scene_tokens.flatten(1, 2)
+            aggregated_tokens_list = [scene_tokens]
 
         scene_tokens = aggregated_tokens_list[-1]  # [B, S, K, C]
         B, K, C = scene_tokens.shape
@@ -372,7 +408,7 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
 
         return {"pointmaps": None, "tokens": tokens}
 
-    def _decode(self, tokens, images, token_mask=None, query_points=None, timestep=None):
+    def _decode(self, tokens, images, token_mask=None, query_points=None, timestep=None, **kwargs):
         """Decode 3D tokens into point cloud coordinates using flow matching ODE solver."""
         B, S = images.shape[:2]
 
@@ -393,6 +429,8 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
                 query_points=query_points,
                 timestep=timestep,
                 num_views=num_views,
+                conditioning_latents=kwargs.get("conditioning_latents", None),
+                aggregator_latents=kwargs.get("aggregator_latents", None),
             )
 
             predictions["pts3d_xyz"] = pts3d_xyz
@@ -435,50 +473,241 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
         Returns:
             dict: Predictions including 'pts3d_xyz', 'images', and 'S'.
         """
-        encode_data = self._encode(images)
+        encode_data = self._encode(images, **kwargs)
 
         tokens = encode_data["tokens"]
 
-        predictions = self._decode(tokens, images, token_mask=token_mask, query_points=query_points, timestep=timestep)
+        predictions = self._decode(tokens, images, token_mask=token_mask, query_points=query_points, timestep=timestep, **kwargs)
 
         return predictions
 
-    def lightning_forward_sdf_based(self, batch: dict, criterion, kl_weight=0.0):
+    # def lightning_forward_sdf_based(self, batch: dict, criterion, kl_weight=0.0):
 
-        images = torch.stack(batch["images"], dim=1)
-        encoder_data = self._encode(images, batch=batch)
-        tokens = encoder_data["tokens"]
-        tokens = self._apply_cfg_dropout(tokens)
-        predictions = self._decode(tokens, images)
-        latents = predictions["latents"]
+    #     images = torch.stack(batch["images"], dim=1)
+    #     encoder_data = self._encode(images, batch=batch)
+    #     tokens = encoder_data["tokens"]
+    #     tokens = self._apply_cfg_dropout(tokens)
+    #     predictions = self._decode(tokens, images)
+    #     latents = predictions["latents"]
 
-        geo_points = batch["geo_points"]
-        geo_points_coords = geo_points[:, :, :3]
-        geo_points_label = geo_points[:, :, 3:4]
+    #     geo_points = batch["geo_points"]
+    #     geo_points_coords = geo_points[:, :, :3]
+    #     geo_points_label = geo_points[:, :, 3:4]
 
-        geo_points_label = geo_points_label * 128
-        geo_points_label = geo_points_label.clamp(-1.0, 1.0)
+    #     geo_points_label = geo_points_label * 128
+    #     geo_points_label = geo_points_label.clamp(-1.0, 1.0)
 
-        logits = self.first_stage.geo_decoder(queries=geo_points_coords, latents=latents)
-        posterior = predictions["posterior"]
-        kl_loss = posterior.kl(dims=(0, 1, 2))
+    #     logits = self.first_stage.geo_decoder(queries=geo_points_coords, latents=latents)
+    #     posterior = predictions["posterior"]
+    #     kl_loss = posterior.kl(dims=(0, 1, 2))
 
-        gt_list = {"sdf_target": geo_points_label}
-        pred_list = {"sdf_pred": logits}
+    #     gt_list = {"sdf_target": geo_points_label}
+    #     pred_list = {"sdf_pred": logits}
 
-        loss, details = criterion(gt_list, pred_list)
+    #     loss, details = criterion(gt_list, pred_list)
 
-        loss += kl_loss * kl_weight
-        details["kl_loss"] = kl_loss.item()
-        return loss, details, latents
+    #     loss += kl_loss * kl_weight
+    #     details["kl_loss"] = kl_loss.item()
+    #     return loss, details, latents
+
+    @staticmethod
+    def _rank_zero():
+        try:
+            return int(os.environ.get("RANK", "0")) == 0
+        except ValueError:
+            return True
+
+    @staticmethod
+    def _env_flag(name, default=False):
+        value = os.environ.get(name)
+        if value is None:
+            return bool(default)
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    @staticmethod
+    def _tensor_summary(value):
+        if isinstance(value, torch.Tensor):
+            summary = {
+                "shape": list(value.shape),
+                "dtype": str(value.dtype),
+                "device": str(value.device),
+            }
+            if value.numel() > 0 and value.is_floating_point():
+                detached = value.detach().float()
+                summary.update(
+                    {
+                        "mean": float(detached.mean().cpu()),
+                        "variance": float(detached.var(unbiased=False).cpu()),
+                        "min": float(detached.min().cpu()),
+                        "max": float(detached.max().cpu()),
+                    }
+                )
+            return summary
+        if isinstance(value, list):
+            return {
+                "type": "list",
+                "length": len(value),
+                "first": Nova3rImgCond._tensor_summary(value[0]) if value else None,
+            }
+        return {"type": type(value).__name__, "value": str(value)}
+
+    @staticmethod
+    def _batch_value_at(value, index):
+        if isinstance(value, torch.Tensor):
+            return value[index]
+        if isinstance(value, (list, tuple)):
+            if value and isinstance(value[0], torch.Tensor):
+                return [Nova3rImgCond._batch_value_at(item, index) for item in value]
+            if index < len(value):
+                return value[index]
+        return value
+
+    @staticmethod
+    def _debug_name(value):
+        return "".join(char if char.isalnum() or char in "._-" else "_" for char in str(value))
+
+    @staticmethod
+    def _to_python_key_part(value):
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu()
+            if value.ndim == 0:
+                return value.item()
+            return tuple(value.reshape(-1).tolist())
+        if isinstance(value, np.ndarray):
+            if value.ndim == 0:
+                return value.item()
+            return tuple(value.reshape(-1).tolist())
+        if isinstance(value, (list, tuple)):
+            return tuple(Nova3rImgCond._to_python_key_part(item) for item in value)
+        return value
+
+    def _target_latent_key(self, batch, sample_idx):
+        seq_name = self._to_python_key_part(self._batch_value_at(batch.get("seq_name", "sample"), sample_idx))
+        sample_id = self._to_python_key_part(self._batch_value_at(batch.get("id", sample_idx), sample_idx))
+        view_ids = self._to_python_key_part(self._batch_value_at(batch.get("subseq_ids", ()), sample_idx))
+        return str(seq_name), str(sample_id), str(view_ids)
+
+    def _get_target_latents(self, batch):
+        surface = batch["surface"]
+        if not self.freeze_target_latents:
+            with torch.no_grad():
+                return self.first_stage.encode(surface, sample_posterior=self.sample_posterior)
+
+        uncached_indices = []
+        cached_latents = []
+        keys = [self._target_latent_key(batch, sample_idx) for sample_idx in range(surface.shape[0])]
+        for sample_idx, key in enumerate(keys):
+            cached = self._target_latent_cache.get(key)
+            if cached is None:
+                uncached_indices.append(sample_idx)
+                cached_latents.append(None)
+            else:
+                cached_latents.append(cached)
+
+        if uncached_indices:
+            with torch.no_grad():
+                encoded = self.first_stage.encode(
+                    surface[uncached_indices],
+                    sample_posterior=self.freeze_target_latents_sample_posterior,
+                )
+            for local_idx, sample_idx in enumerate(uncached_indices):
+                cached = encoded[local_idx].detach().cpu().clone()
+                self._target_latent_cache[keys[sample_idx]] = cached
+                cached_latents[sample_idx] = cached
+
+        return torch.stack(
+            [latent.to(device=surface.device, dtype=surface.dtype) for latent in cached_latents],
+            dim=0,
+        )
+
+    def _export_lightning_batch_debug(self, batch, images, gt_latents):
+        if not self._rank_zero() or not self.debug_lightning_batch_dir:
+            return
+        if self.debug_lightning_batch_once and self._debug_lightning_batch_exported:
+            return
+
+        output_dir = Path(self.debug_lightning_batch_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        batch_size = images.shape[0]
+        samples_to_export = batch_size
+        if self.debug_lightning_batch_max_samples >= 0:
+            samples_to_export = min(batch_size, self.debug_lightning_batch_max_samples)
+
+        for sample_idx in range(samples_to_export):
+            seq_name = self._batch_value_at(batch.get("seq_name", "sample"), sample_idx)
+            sample_id = self._batch_value_at(batch.get("id", "00000"), sample_idx)
+            stem = self._debug_name(f"{sample_idx:03d}_{seq_name}_{sample_id}")
+
+            surface = batch["surface"][sample_idx].detach().cpu()
+            geo_points = batch.get("geo_points")
+            geo_points = geo_points[sample_idx].detach().cpu() if isinstance(geo_points, torch.Tensor) else None
+            gt_latent = gt_latents[sample_idx].detach().float().cpu()
+
+            np.save(output_dir / f"{stem}_gt_latents.npy", gt_latent.numpy())
+            if geo_points is not None:
+                np.savez_compressed(
+                    output_dir / f"{stem}_batch_points.npz",
+                    surface=surface.numpy(),
+                    geo_points=geo_points.numpy(),
+                )
+
+            camera_data = {
+                "extrinsics": batch["extrinsics"][sample_idx].detach().cpu().numpy().tolist(),
+                "intrinsics": batch["intrinsics"][sample_idx].detach().cpu().numpy().tolist(),
+            }
+            with open(output_dir / f"{stem}_cameras.json", "w", encoding="utf-8") as f:
+                json.dump(camera_data, f, indent=2)
+
+            summary = {key: self._tensor_summary(self._batch_value_at(value, sample_idx)) for key, value in batch.items()}
+            summary["gt_latents"] = self._tensor_summary(gt_latent)
+            with open(output_dir / f"{stem}_summary.json", "w", encoding="utf-8") as f:
+                json.dump(summary, f, indent=2)
+
+            try:
+                import open3d as o3d
+
+                points = surface[:, :3].numpy().astype(np.float64)
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = o3d.utility.Vector3dVector(np.ascontiguousarray(points))
+                if surface.shape[1] >= 6:
+                    normals = surface[:, 3:6].numpy().astype(np.float64)
+                    pcd.normals = o3d.utility.Vector3dVector(np.ascontiguousarray(normals))
+                if surface.shape[1] >= 7:
+                    labels = surface[:, -1].numpy() > 0.5
+                    colors = np.zeros((len(points), 3), dtype=np.float64)
+                    colors[~labels] = [0.2, 0.55, 1.0]
+                    colors[labels] = [1.0, 0.25, 0.1]
+                    pcd.colors = o3d.utility.Vector3dVector(colors)
+                o3d.io.write_point_cloud(str(output_dir / f"{stem}_surface.ply"), pcd)
+            except Exception as exc:
+                print(f"Skipping lightning batch point cloud export for sample {sample_idx}: {exc}")
+
+            try:
+                import cv2
+
+                image_tiles = []
+                for image in images[sample_idx].detach().cpu():
+                    image_np = image.permute(1, 2, 0).numpy()
+                    image_np = np.clip(image_np * 255.0, 0, 255).astype(np.uint8)
+                    image_tiles.append(image_np)
+                if image_tiles:
+                    image_grid = np.concatenate(image_tiles, axis=1)
+                    cv2.imwrite(
+                        str(output_dir / f"{stem}_images.png"),
+                        cv2.cvtColor(image_grid, cv2.COLOR_RGB2BGR),
+                    )
+            except Exception as exc:
+                print(f"Skipping lightning batch image export for sample {sample_idx}: {exc}")
+
+        self._debug_lightning_batch_exported = True
+        print(f"Saved lightning batch debug export: {output_dir} ({samples_to_export}/{batch_size} samples)")
 
     def lightning_forward(self, batch: dict, criterion, kl_weight=0.0, recon_latents=False):
-        with torch.no_grad():
-            surface = batch["surface"]
-            gt_latents = self.first_stage.encode(surface, sample_posterior=self.sample_posterior)
-            # print(f"gt_latents variance={gt_latents.float().var(unbiased=False).item():.6f}")
+        gt_latents = self._get_target_latents(batch)
 
         images = torch.stack(batch["images"], dim=1)
+        # self._export_lightning_batch_debug(batch, images, gt_latents)
         encoder_data = self._encode(images, batch=batch)
         tokens = encoder_data["tokens"]
 
@@ -497,17 +726,22 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
         dx_t = path_sample.dx_t
         t_query = t[:, None].expand(B, x_t.shape[1])
 
-        v_pred = self.pts3d_head(decout=[tokens], noised_latents=x_t, timestep=t_query)
+        if self.cfg.aggregator.name == "Depth_Predicted":
+            conditioning_latents = self.forward_first_stage(batch=batch)
+            v_pred = self.pts3d_head(decout=[tokens], noised_latents=x_t, timestep=t_query, conditioning_latents=conditioning_latents)
+        else:
+            conditioning_latents = None
+            v_pred = self.pts3d_head(decout=[tokens], noised_latents=x_t, timestep=t_query)
         loss = F.mse_loss(v_pred, dx_t)
 
         if recon_latents == True:
             with torch.no_grad():
-                step_size = 0.02
+                step_size = 0.01
                 method = "euler"
                 token_mask = None
                 pts3d_src = None
 
-                num_steps = int(1 // step_size)
+                num_steps = int(round(1.0 / step_size)) + 1
 
                 wrapped_vf = BatchModelWrapper(model=self)
 
@@ -515,10 +749,8 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
                 self.eval()
 
                 x_init = torch.rand_like(gt_latents)
-
                 T = torch.linspace(0, 1, num_steps).to(device)
                 solver = ODESolver(velocity_model=wrapped_vf)
-
                 sol = solver.sample(
                     time_grid=T,
                     x_init=x_init,
@@ -529,12 +761,108 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
                     token_mask=token_mask,
                     encoder_data=encoder_data,
                     pointmaps=pts3d_src,
+                    conditioning_latents=conditioning_latents,
                 )
+            # sampler_kwargs = {}
+            # if conditioning_latents is not None:
+            #     sampler_kwargs["conditioning_latents"] = conditioning_latents
+            # sol_stack = euler_flowmatch_sample(
+            #     self.pts3d_head,
+            #     tokens,
+            #     gt_latents.shape,
+            #     steps=self.recon_latent_steps,
+            #     device=device,
+            #     return_stack=True,
+            #     **sampler_kwargs,
+            # )
+            # sol = sol_stack[-1]
 
-                latents = self.first_stage.decode(sol)
+            latents = self.first_stage.decode(sol)
         else:
             latents = None
 
-        details = None
+        details = {}
+        # if recon_latents == True and self.recon_latent_step_interval > 0:
+        #     step_indices = list(range(self.recon_latent_step_interval, sol_stack.shape[0], self.recon_latent_step_interval))
+        #     final_idx = sol_stack.shape[0] - 1
+        #     if final_idx not in step_indices:
+        #         step_indices.append(final_idx)
+        #     with torch.no_grad():
+        #         for step_idx in step_indices:
+        #             details[f"recon_step_latents_{step_idx:04d}"] = self.first_stage.decode(sol_stack[step_idx])
 
         return loss, details, latents
+
+
+@torch.no_grad()
+def euler_flowmatch_sample(
+    model,
+    cond,
+    latent_shape,
+    steps=50,
+    device="cuda",
+    start_t=0.0,
+    end_t=1.0,
+    x0=None,
+    return_stack=True,
+    **model_kwargs,
+):
+    """
+    Euler sampler for a flow matching model.
+
+    Assumes training convention:
+        x_t = (1 - t) * x0 + t * x1
+        target velocity u_t = x1 - x0
+
+    Therefore sampling goes from t=0 noise -> t=1 data latent.
+
+    Args:
+        model: flow matching model. Expected call: model(x, t, cond)
+        cond: conditioning input, e.g. image tokens / DA3 latents / scene condition
+        latent_shape: shape of latent to sample, e.g. (B, C, H, W) or (B, N, D)
+        steps: number of Euler steps
+        device: torch device
+        start_t: usually 0.0
+        end_t: usually 1.0
+        x0: optional starting noise latent. If None, sampled from U(0, 1) to match training.
+        return_stack: if True returns tensor of shape (steps+1, ...), else list
+
+    Returns:
+        latents: intermediate latents from x_start to x_end
+    """
+
+    was_training = model.training
+    model.eval()
+
+    if x0 is None:
+        x = torch.rand(latent_shape, device=device)
+    else:
+        x = x0.to(device)
+
+    ts = torch.linspace(start_t, end_t, steps + 1, device=device)
+
+    latents = [x.detach().clone()]
+
+    for i in range(steps):
+        t = ts[i]
+        t_next = ts[i + 1]
+        dt = t_next - t
+
+        # Match training shape: [B, num_latents].
+        t_batch = torch.full((x.shape[0],), t, device=device, dtype=x.dtype)
+        t_query = t_batch[:, None].expand(x.shape[0], x.shape[1])
+
+        # predicted velocity
+        # v = model(x, t_batch, cond)
+        v = model(decout=[cond], noised_latents=x, timestep=t_query, **model_kwargs)
+        # Euler update
+        x = x + dt * v
+
+        latents.append(x.detach().clone())
+
+    model.train(was_training)
+
+    if return_stack:
+        return torch.stack(latents, dim=0)
+
+    return latents

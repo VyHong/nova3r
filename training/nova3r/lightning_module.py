@@ -1,5 +1,6 @@
 import pytorch_lightning as pl
 import torch
+from collections import defaultdict
 from training.nova3r.training_utils import get_all_pts3d, loss_of_one_batch_train, normalize_input, save_points_ply
 from training.nova3r.validation_utils import (
     generate_example,
@@ -42,6 +43,8 @@ class Nova3RLightningModule(pl.LightningModule):
             alignment="none",
             use_cd_align=True,
         ).to(self.device)
+        self._benchmark_inner_totals = defaultdict(float)
+        self._benchmark_inner_counts = defaultdict(int)
 
     def forward(self, batch, criterion):
         loss, details = loss_of_one_batch_train(
@@ -56,7 +59,42 @@ class Nova3RLightningModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         loss, details = self.forward(batch, self.train_criterion)
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        self._log_benchmark_details(details)
         return loss
+
+    def _log_benchmark_details(self, details):
+        if not bool(getattr(self.cfg, "benchmark_inner", False)):
+            return
+
+        every_n_steps = max(1, int(getattr(self.cfg, "benchmark_every_n_steps", 10)))
+        for name, value in details.items():
+            if not str(name).startswith("benchmark_inner/"):
+                continue
+            value = float(value)
+            self._benchmark_inner_totals[name] += value
+            self._benchmark_inner_counts[name] += 1
+            self.log(name, value, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
+
+        if (self.global_step + 1) % every_n_steps != 0:
+            return
+        if getattr(self.trainer, "global_rank", 0) != 0:
+            return
+
+        averages = []
+        total = 0.0
+        for name in sorted(self._benchmark_inner_totals):
+            avg = self._benchmark_inner_totals[name] / max(1, self._benchmark_inner_counts[name])
+            total += avg
+            averages.append((name, avg))
+
+        if not averages:
+            return
+
+        parts = []
+        for name, avg in averages:
+            pct = f" ({avg / total * 100:.1f}%)" if total > 0 else ""
+            parts.append(f"{name.replace('benchmark_inner/', '')}={avg * 1000:.1f}ms{pct}")
+        print(f"[benchmark-inner] step={self.global_step + 1} " + ", ".join(parts), flush=True)
 
     def validation_step(self, batch, batch_idx):
         pts3d_src_norm, valid_src, pts3d_trg_norm, valid_trg, normals_src, normals_trg = normalize_pointclouds(self.cfg, batch)

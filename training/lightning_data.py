@@ -8,7 +8,7 @@ from training.nova3r.data.datasets.front3d_dataset import Front3DDataset
 from training.nova3r.data.datasets.replica_dataset import ReplicaPanoDataset
 from training.mesh2sdf.data.front3d_dataset import Front3DSDFDataset
 from training.mesh2sdf.data.replica_dataset import ReplicaPanoSDFDataset
-
+from training.mesh2sdf.data.latent_replica_dataset import LatentReplicaPanoSDFDataset
 
 class Nova3RDataModule(pl.LightningDataModule):
     def __init__(self, data_cfg):
@@ -18,12 +18,15 @@ class Nova3RDataModule(pl.LightningDataModule):
         self.batch_size = data_cfg.batch_size
         self.test_batch_size = data_cfg.test_batch_size
         self.num_workers = data_cfg.num_workers
+        self.persistent_workers = self.num_workers > 0 and getattr(data_cfg, "persistent_workers", True)
+        self.prefetch_factor = getattr(data_cfg, "prefetch_factor", None)
 
         self.dataset_registry = {
             "Front3DDataset": Front3DDataset,
             "Front3DSDFDataset": Front3DSDFDataset,
             "ReplicaPanoDataset": ReplicaPanoDataset,
             "ReplicaPanoSDFDataset": ReplicaPanoSDFDataset,
+            "LatentReplicaPanoSDFDataset": LatentReplicaPanoSDFDataset
         }
 
         self.train_collate_fn = None
@@ -40,6 +43,7 @@ class Nova3RDataModule(pl.LightningDataModule):
             self.test_dataset, self.test_collate_fn = self._build_concat_dataset("test_datasets", split="test")
 
     def train_dataloader(self):
+        loader_kwargs = self._loader_worker_kwargs()
         return DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
@@ -47,7 +51,16 @@ class Nova3RDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             collate_fn=self.train_collate_fn,
+            **loader_kwargs,
         )
+
+    def _loader_worker_kwargs(self):
+        kwargs = {}
+        if self.num_workers > 0:
+            kwargs["persistent_workers"] = self.persistent_workers
+            if self.prefetch_factor is not None:
+                kwargs["prefetch_factor"] = self.prefetch_factor
+        return kwargs
 
     def _build_dataset(self, dataset_cfg, split):
         dataset_name = dataset_cfg.name
@@ -80,6 +93,7 @@ class Nova3RDataModule(pl.LightningDataModule):
         return ConcatDataset(datasets), collate_fn
 
     def val_dataloader(self):
+        loader_kwargs = self._loader_worker_kwargs()
         return DataLoader(
             self.val_dataset,
             batch_size=self.test_batch_size,
@@ -87,9 +101,11 @@ class Nova3RDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             collate_fn=self.val_collate_fn,
+            **loader_kwargs,
         )
 
     def test_dataloader(self):
+        loader_kwargs = self._loader_worker_kwargs()
         return DataLoader(
             self.test_dataset,
             batch_size=self.test_batch_size,
@@ -97,4 +113,5 @@ class Nova3RDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             collate_fn=self.test_collate_fn,
+            **loader_kwargs,
         )

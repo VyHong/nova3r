@@ -69,8 +69,7 @@ class ReplicaPanoDataset(BaseDataset):
         else:
             with open(samples_list_path, "r") as f:
                 self.samples_list = json.load(f)
-            for scene in self.samples_list:
-                self.sequence_list.append(f"{scene.split(' ')[0]}")
+            self.sequence_list = list(dict.fromkeys(scene.split(" ")[0] for scene in self.samples_list))
 
         self.data_store = {}
         self._load_metadata()
@@ -139,6 +138,23 @@ class ReplicaPanoDataset(BaseDataset):
         """
         return cv2.resize(image, (self.img_size, self.img_size), interpolation=interpolation)
 
+    @staticmethod
+    def _intrinsics_to_resized_pixels(intrinsics, orig_size_hw, new_size_hw):
+        intrinsics = intrinsics.copy()
+        uses_normalized_intrinsics = (
+            abs(intrinsics[0, 0]) <= 2.0
+            and abs(intrinsics[1, 1]) <= 2.0
+            and abs(intrinsics[0, 2]) <= 2.0
+            and abs(intrinsics[1, 2]) <= 2.0
+        )
+        if uses_normalized_intrinsics:
+            intrinsics[0, :] *= float(orig_size_hw[1])
+            intrinsics[1, :] *= float(orig_size_hw[0])
+
+        intrinsics[0, :] *= new_size_hw[1] / float(orig_size_hw[1])
+        intrinsics[1, :] *= new_size_hw[0] / float(orig_size_hw[0])
+        return intrinsics
+
     def get_data(
         self,
         seq_name: str = None,
@@ -189,8 +205,11 @@ class ReplicaPanoDataset(BaseDataset):
                 original_size = np.array(image.shape[1:])
 
                 subseq_intrinsics = np.array(camera_data[f"{subseq_id:04d}"]["intrinsics"], dtype=np.float32)
-                subseq_intrinsics[0, :] *= new_size_hw[1] / float(orig_size_hw[1])
-                subseq_intrinsics[1, :] *= new_size_hw[0] / float(orig_size_hw[0])
+                subseq_intrinsics = self._intrinsics_to_resized_pixels(
+                    subseq_intrinsics,
+                    orig_size_hw=orig_size_hw,
+                    new_size_hw=new_size_hw,
+                )
 
                 subseq_w2c = np.array(camera_data[f"{subseq_id:04d}"]["extrinsics"])
                 T_to_colmap = np.array([[1, 0, 0, 0], [0, 0, -1, 0], [0, 1, 0, 0], [0, 0, 0, 1]])

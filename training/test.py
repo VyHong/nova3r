@@ -1,8 +1,14 @@
+import os
+import sys
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
 import argparse
-import os
 from omegaconf import OmegaConf
 import torch
 from training.nova3r.lightning_module import Nova3RLightningModule
@@ -13,7 +19,7 @@ from demo_nova3r import load_model
 
 def parse_args():
     parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
-    parser.add_argument("--ckpt", default="checkpoints/da3_base/da3_udf_frozen.ckpt", help="Path to model checkpoint")
+    parser.add_argument("--ckpt", default="checkpoints/hunyuan_mini/udf_median.ckpt", help="Path to model checkpoint")
     parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
     parser.add_argument("--aggregator_ckpt", default="./checkpoints/da3_giant/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
     args = parser.parse_args()
@@ -32,6 +38,7 @@ def load_data_config(ckpt_path):
 
 def main():
     args = parse_args()
+    pl.seed_everything(42, workers=True)
 
     model, cfg = load_model(args.ckpt, args.device, aggregator_ckpt=args.aggregator_ckpt, stage="test")
     data_cfg = load_data_config(args.ckpt)
