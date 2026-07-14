@@ -21,6 +21,9 @@ class Front3DSDFDataset(BaseDataset):
         samples_list_path=None,
         sdf_data_root=None,
         augment_translation=False,
+        augment_rotation=False,
+        augment_horizontal_rotation=False,
+        distance_suffix="udf",
     ):
         super().__init__(common_conf)
 
@@ -28,6 +31,11 @@ class Front3DSDFDataset(BaseDataset):
         self.sdf_data_root = Path(sdf_data_root) if sdf_data_root else self.data_root
         self.split = split
         self.augment_translation = augment_translation
+        self.augment_rotation = augment_rotation or augment_horizontal_rotation
+        self.augment_horizontal_rotation = augment_horizontal_rotation
+        self.distance_suffix = str(distance_suffix).lower()
+        if self.distance_suffix not in {"sdf", "udf"}:
+            raise ValueError("distance_suffix must be 'sdf' or 'udf'.")
 
         if samples_list_path is None:
             self.samples_list = self._discover_samples()
@@ -56,6 +64,25 @@ class Front3DSDFDataset(BaseDataset):
         ).to(dtype=surface.dtype)
         surface[:, :3] += translation
         geo_points[:, :3] += translation
+
+    def _augment_with_rotation(self, rng, surface, geo_points):
+        q = rng.normal(size=4)
+        q = q / np.linalg.norm(q)
+        w, x, y, z = q
+        rotation = torch.tensor(
+            [
+                [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+                [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+                [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+            ],
+            dtype=surface.dtype,
+            device=surface.device,
+        )
+
+        surface[:, :3] = (rotation @ surface[:, :3].T).T
+        if surface.shape[1] >= 6:
+            surface[:, 3:6] = (rotation @ surface[:, 3:6].T).T
+        geo_points[:, :3] = (rotation @ geo_points[:, :3].T).T
 
     @staticmethod
     def save_debug_surface(
@@ -121,7 +148,7 @@ class Front3DSDFDataset(BaseDataset):
             output_prefix = self.sdf_data_root / f"{scene}_full"
             self.data_store[scene] = {
                 "surface": Path(f"{output_prefix}_surface.npz"),
-                "geo_points": Path(f"{output_prefix}_sdf.npz"),
+                "geo_points": Path(f"{output_prefix}_{self.distance_suffix}.npz"),
             }
 
     def load_surface_points(self, rng, random_surface, sharpedge_surface):
@@ -255,11 +282,13 @@ class Front3DSDFDataset(BaseDataset):
         surface[:, 3:6] = (total_transform[:3, :3] @ surface[:, 3:6].T).T
         geo_points[:, :3] = (total_transform[:3, :3] @ geo_points[:, :3].T).T + total_transform[:3, 3]
 
-        # self.save_debug_surface(surface, filename=f"debug_surface.ply")
 
+        if self.augment_rotation:
+            self._augment_with_rotation(rng, surface, geo_points)
         if self.augment_translation:
             self._augment_with_translation(rng, surface, geo_points)
 
+        #self.save_debug_surface(surface, filename=f"debug_surface.ply")
         frame_count = 6
         images = [
             torch.zeros((3, self.img_size, self.img_size), dtype=torch.float32)
@@ -270,6 +299,8 @@ class Front3DSDFDataset(BaseDataset):
 
         return {
             "seq_name": f"3DFront_{seq_name}",
+            "id": seq_name,
+            "subseq_ids": torch.arange(frame_count, dtype=torch.long),
             "images": images,
             "extrinsics": extrinsics,
             "intrinsics": intrinsics,

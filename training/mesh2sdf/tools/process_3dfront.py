@@ -8,7 +8,8 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-PROCESSING_SCRIPT = Path(__file__).with_name("watertight_and_sample.py").resolve()
+WATERTIGHT_PROCESSING_SCRIPT = Path(__file__).with_name("watertight_and_sample.py").resolve()
+UDF_PROCESSING_SCRIPT = Path(__file__).with_name("udf_sample.py").resolve()
 
 
 def output_prefix_for(mesh_path, data_root, output_root):
@@ -59,17 +60,18 @@ def find_selected_meshes(data_root, room_ids):
     return mesh_paths, missing_rooms, missing_meshes
 
 
-def process_mesh(mesh_path, output_prefix, overwrite):
+def process_mesh(mesh_path, output_prefix, overwrite, udf_only):
     expected_surface = Path(f"{output_prefix}_surface.npz")
-    expected_sdf = Path(f"{output_prefix}_sdf.npz")
+    expected_distance = Path(f"{output_prefix}_{'udf' if udf_only else 'sdf'}.npz")
 
-    if not overwrite and expected_surface.exists() and expected_sdf.exists():
+    if not overwrite and expected_surface.exists() and expected_distance.exists():
         return "skipped"
 
+    processing_script = UDF_PROCESSING_SCRIPT if udf_only else WATERTIGHT_PROCESSING_SCRIPT
     output_prefix.parent.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable,
-        str(PROCESSING_SCRIPT),
+        str(processing_script),
         "--input_obj",
         str(mesh_path),
         "--output_prefix",
@@ -98,6 +100,7 @@ def main(
     dry_run,
     limit,
     room_id_json,
+    udf_only,
 ):
     data_root = data_root.resolve()
     output_root = output_root.resolve()
@@ -144,7 +147,8 @@ def main(
 
     if dry_run:
         for mesh_path, output_prefix in jobs:
-            print(f"{mesh_path} -> {output_prefix}_{{surface,sdf}}.npz")
+            output_suffixes = "surface,udf" if udf_only else "surface,sdf"
+            print(f"{mesh_path} -> {output_prefix}_{{{output_suffixes}}}.npz")
         return
 
     output_root.mkdir(parents=True, exist_ok=True)
@@ -152,7 +156,10 @@ def main(
 
     print(f"Processing with {workers} concurrent worker(s)...")
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(process_mesh, mesh_path, output_prefix, overwrite): mesh_path for mesh_path, output_prefix in jobs}
+        futures = {
+            executor.submit(process_mesh, mesh_path, output_prefix, overwrite, udf_only): mesh_path
+            for mesh_path, output_prefix in jobs
+        }
 
         progress = tqdm(
             as_completed(futures),
@@ -182,7 +189,7 @@ def main(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run watertight_and_sample.py on selected 3D-FRONT room meshes.")
+    parser = argparse.ArgumentParser(description="Run SDF or UDF sampling on selected 3D-FRONT room meshes.")
     parser.add_argument(
         "--data_root",
         type=Path,
@@ -224,6 +231,11 @@ if __name__ == "__main__":
         default=None,
         help="Process only the first N selected meshes, useful for a small test run.",
     )
+    parser.add_argument(
+        "--udf-only",
+        action="store_true",
+        help="Sample unsigned distance data with udf_sample.py instead of running watertight_and_sample.py.",
+    )
 
     args = parser.parse_args()
 
@@ -235,4 +247,5 @@ if __name__ == "__main__":
         dry_run=args.dry_run,
         limit=args.limit,
         room_id_json=args.room_id_json,
+        udf_only=args.udf_only,
     )

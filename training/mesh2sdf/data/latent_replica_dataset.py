@@ -79,7 +79,7 @@ class LatentReplicaPanoSDFDataset(ReplicaPanoSDFDataset):
                 image_extrinsics = subseq_w2c @ colmap_scene_w2c
 
                 if i == 0:
-                    rng = np.random.default_rng()
+                    rng = self._pointcloud_rng(seq_name, id, subseq_ids[0])
                     surface = np.load(anno["surface"], allow_pickle=True)
                     geo_points = np.load(anno["geo_points"], allow_pickle=True)
                     aggregator_points = np.load(anno["aggregator_points"], allow_pickle=True)

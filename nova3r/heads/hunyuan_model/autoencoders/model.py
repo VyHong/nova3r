@@ -204,6 +204,7 @@ class ShapeVAE(VectsetVAE):
         label_type: str = "binary",
         drop_path_rate: float = 0.0,
         scale_factor: float = 1.0,
+        sdf_label_scale: float = 64.0,
         use_ln_post: bool = True,
         ckpt_path=None,
         cfg=None,
@@ -254,6 +255,7 @@ class ShapeVAE(VectsetVAE):
             )
 
         self.scale_factor = scale_factor
+        self.sdf_label_scale = sdf_label_scale
         self.latent_shape = (num_latents, embed_dim)
 
         if ckpt_path is not None:
@@ -353,7 +355,7 @@ class ShapeVAE(VectsetVAE):
         geo_points_coords = geo_points[:, :, :3]
         geo_points_label = geo_points[:, :, 3:4]
 
-        geo_points_label = geo_points_label * 128
+        geo_points_label = geo_points_label * self.sdf_label_scale
         geo_points_label = geo_points_label.clamp(0, 1.0)
 
         logits = self.geo_decoder(queries=geo_points_coords, latents=latents)

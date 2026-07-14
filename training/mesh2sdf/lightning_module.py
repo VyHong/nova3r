@@ -108,7 +108,61 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         self.val_criterion = SDFReconstructionLoss(MSE)
         self.test_criterion = None
 
+    @staticmethod
+    def _median_normalization_target(mode):
+        if mode == "median":
+            return 1.0
+        return float(mode.split("_")[-1])
+
+    def _resolve_mesh_mc_level(self, bounds, octree_resolution):
+        cfg_value = getattr(self.cfg, "mesh_mc_level", "auto")
+        if not (isinstance(cfg_value, str) and cfg_value.lower() == "auto"):
+            return float(cfg_value)
+
+        bounds = np.asarray(bounds, dtype=np.float64)
+        extent = np.max(bounds[3:] - bounds[:3])
+        voxel_world_size = extent / max(int(octree_resolution) - 1, 1)
+        return float(np.clip(voxel_world_size * 128.0 , 1e-4, 1.0))
+
+    def normalize_surface_and_geo_points(self, batch, mode=None):
+        if mode is None:
+            mode = str(getattr(self.cfg, "surface_geo_normalize_mode", "none"))
+        if mode in ("none", "raw", "skip"):
+            return batch
+
+        target_median = self._median_normalization_target(mode)
+
+        surface = batch["surface"]
+        geo_points = batch["geo_points"]
+
+        distances = torch.linalg.norm(surface[..., :3], dim=-1)
+        norm_factor = torch.median(distances, dim=1).values 
+        norm_factor = torch.clamp(norm_factor, min=0.01, max=100.0)
+        coord_scale = (surface.new_tensor(float(target_median)) / norm_factor).view(-1, 1, 1)
+
+        normalized_surface = surface.clone()
+        normalized_surface[..., :3] = torch.clamp(
+            normalized_surface[..., :3] * coord_scale,
+            min=-1000.0,
+            max=1000.0,
+        )
+
+        normalized_geo_points = geo_points.clone()
+        normalized_geo_points[..., :3] = torch.clamp(
+            normalized_geo_points[..., :3] * coord_scale,
+            min=-1000.0,
+            max=1000.0,
+        )
+        normalized_geo_points[..., 3:4] = normalized_geo_points[..., 3:4] * coord_scale
+
+        normalized_batch = dict(batch)
+        normalized_batch["surface"] = normalized_surface
+        normalized_batch["geo_points"] = normalized_geo_points
+        normalized_batch["surface_geo_norm_factor"] = norm_factor
+        return normalized_batch
+
     def training_step(self, batch, batch_idx):
+        batch = self.normalize_surface_and_geo_points(batch)
         loss, details, _ = self.model.lightning_forward(
             batch,
             self.train_criterion,
@@ -118,6 +172,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
+        batch = self.normalize_surface_and_geo_points(batch)
         if not hasattr(self, "val_batch_to_log") or self.val_batch_to_log is None:
             self.val_batch_to_log = batch  # Store the first batch for logging at epoch end
         reconstruction_loss, _, _ = self.model.lightning_forward(
@@ -162,22 +217,24 @@ class Mesh2SDFLightningModule(pl.LightningModule):
             sample_dir = f"{self.current_log_dir}/val_points/epoch_{self.current_epoch}"
             os.makedirs(sample_dir, exist_ok=True)
 
-            recon_step_latent_sets = {}
-            if recon_details:
-                for key, value in recon_details.items():
-                    if key.startswith("recon_step_latents_") and isinstance(value, torch.Tensor):
-                        recon_step_latent_sets[key.replace("recon_step_latents_", "step_")] = value
-
             def mesh_from_latents(latent_batch, sample_idx, bounds):
                 mesh_method = str(getattr(self.cfg, "mesh_method", "old")).lower()
                 if mesh_method in {"old", "latent2mesh", "latents2mesh", "hunyuan"}:
+                    octree_resolution = int(getattr(self.cfg, "mesh_octree_resolution", 512))
+                    mc_level = self._resolve_mesh_mc_level(bounds, octree_resolution)
+                    if isinstance(getattr(self.cfg, "mesh_mc_level", "auto"), str):
+                        self.print(
+                            f"Auto mesh_mc_level={mc_level:.6g} "
+                            f"for bounds extent={float(np.max(bounds[3:] - bounds[:3])):.6g}, "
+                            f"octree_resolution={octree_resolution}"
+                        )
                     mesh_outputs = decoder.latents2mesh(
                         latent_batch[sample_idx : sample_idx + 1],
                         output_type="trimesh",
                         bounds=bounds,
-                        mc_level=float(getattr(self.cfg, "mesh_mc_level", 0.4)),
+                        mc_level=mc_level,
                         num_chunks=int(getattr(self.cfg, "mesh_num_chunks", 40000)),
-                        octree_resolution=int(getattr(self.cfg, "mesh_octree_resolution", 512)),
+                        octree_resolution=octree_resolution,
                         mc_algo=str(getattr(self.cfg, "mesh_mc_algo", "mc")),
                         enable_pbar=bool(getattr(self.cfg, "mesh_enable_pbar", True)),
                     )
@@ -225,22 +282,11 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                         raise
                     self.print(f"Skipping validation mesh for sample {sample_idx}: no surface found.")
                     mesh = None
+
                 if mesh is not None and len(mesh.vertices) > 0 and len(mesh.faces) > 0:
                     glb_path = os.path.join(mesh_dir, "val_mesh.ply")
                     mesh.export(glb_path)
                     meshes_to_render.append((glb_path, mesh_dir))
-
-                for step_name, step_latents in recon_step_latent_sets.items():
-                    try:
-                        step_mesh = mesh_from_latents(step_latents, sample_idx, bounds)
-                    except RuntimeError as exc:
-                        if "No surface found at the given iso value" not in str(exc):
-                            raise
-                        self.print(f"Skipping {step_name} mesh for sample {sample_idx}: no surface found.")
-                        continue
-                    if step_mesh is not None and len(step_mesh.vertices) > 0 and len(step_mesh.faces) > 0:
-                        step_path = os.path.join(mesh_dir, f"recon_{step_name}.ply")
-                        step_mesh.export(step_path)
 
         for glb_path, mesh_dir in meshes_to_render:
             render_360_video(glb_path, mesh_dir)
@@ -282,20 +328,47 @@ class Mesh2SDFLightningModule(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, self.parameters()), lr=self.learning_rate, weight_decay=self.cfg.weight_decay)
-        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.trainer.max_epochs)
-        exponential = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=1)
-        power_cosine = PowerCosineAnnealingLR(
-            optimizer,
-            T_max=self.trainer.max_epochs,
-            eta_min=1e-7,
-            power=2.0,
-        )
 
-        if self.cfg.warmup_epochs > 0:
-            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=self.cfg.warmup_epochs)
-            scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, exponential], milestones=[self.cfg.warmup_epochs])
+        scheduler_name = str(getattr(self.cfg, "lr_scheduler", "exponential")).lower().replace("-", "_")
+        warmup_epochs = max(0, int(getattr(self.cfg, "warmup_epochs", 0)))
+        scheduler_epochs = max(1, int(self.trainer.max_epochs) - warmup_epochs)
+        eta_min = float(getattr(self.cfg, "lr_scheduler_eta_min", 1e-6))
+        eta_min_factor = min(1.0, max(1e-12, eta_min / max(float(self.learning_rate), 1e-12)))
+
+        if scheduler_name == "constant":
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=1.0)
+        elif scheduler_name == "cosine":
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=scheduler_epochs,
+                eta_min=eta_min,
+            )
+        elif scheduler_name == "linear":
+            scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=1.0,
+                end_factor=eta_min_factor,
+                total_iters=scheduler_epochs,
+            )
+        elif scheduler_name == "exponential":
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                optimizer,
+                gamma=eta_min_factor ** (1.0 / scheduler_epochs),
+            )
+        elif scheduler_name in {"power_cosine", "powercosine"}:
+            scheduler = PowerCosineAnnealingLR(
+                optimizer,
+                T_max=scheduler_epochs,
+                eta_min=eta_min,
+                power=float(getattr(self.cfg, "lr_scheduler_power", 2.0)),
+            )
         else:
-            scheduler = exponential
+            raise ValueError("lr_scheduler must be one of: constant, cosine, linear, exponential, power_cosine")
+
+        if warmup_epochs > 0:
+            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=warmup_epochs)
+            scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, scheduler], milestones=[warmup_epochs])
+
         plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=100)
 
         return [optimizer], [

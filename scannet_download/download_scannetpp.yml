@@ -81,8 +81,8 @@ download_splits: [nvs_sem_train, nvs_sem_val, nvs_test, sem_test, nvs_test_iphon
 
 # uncomment this and comment the other asset options to specify individual assets
 # the full list of assets is under `scene_assets`
-download_assets: [
-            pano_rgb_dir, pano_anon_mask_dir, pano_depth_dir, pano_azim_dir, pano_elev_dir, pano_resized_rgb_dir, pano_resized_depth_dir, pano_resized_mask_dir, pano_resized_azim_dir, pano_resized_elev_dir
+download_assets: [scan_transformed_poses_path
+           
 ]
 
 # uncomment this and comment the other asset options to specify options based on device or task

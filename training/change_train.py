@@ -20,7 +20,7 @@ from demo_nova3r import load_model
 
 def parse_args():
     parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
-    parser.add_argument("--ckpt", default="checkpoints/da3_base/last-v1.ckpt", help="Path to model checkpoint")
+    parser.add_argument("--ckpt", default="checkpoints/da3_large/last-reorder_1.ckpt", help="Path to model checkpoint")
     parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
     parser.add_argument("--aggregator_ckpt", default="./checkpoints/da3_giant/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
     args = parser.parse_args()
@@ -38,8 +38,9 @@ def load_data_config(ckpt_path):
 
 
 def main():
+    torch.set_float32_matmul_precision("medium")
     args = parse_args()
-    pl.seed_everything(41, workers=True)
+    pl.seed_everything(40, workers=True)
 
     model, cfg = load_model(args.ckpt, args.device, aggregator_ckpt=args.aggregator_ckpt, stage="test")
     data_cfg = load_data_config(args.ckpt)

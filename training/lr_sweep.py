@@ -12,11 +12,11 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run a simple NOVA3R learning-rate sweep.")
-    parser.add_argument("--lrs", type=float, nargs="+", default=[3e-4], help="Learning rates to try.")
-    parser.add_argument("--ckpt", default="checkpoints/da3_base/last-v1.ckpt", help="Path to model checkpoint.")
+    parser.add_argument("--lrs", type=float, nargs="+", default=[1e-4,3e-4,3e-5,1e-5], help="Learning rates to try.")
+    parser.add_argument("--ckpt", default="checkpoints/da3_base/checkpoint-last.pth", help="Path to model checkpoint.")
     parser.add_argument("--device", default="cuda", help="Trainer accelerator/device type.")
     parser.add_argument("--aggregator_ckpt", default="./checkpoints/da3_base/model.safetensors", help="DA3 aggregator checkpoint.")
-    parser.add_argument("--vae_ckpt", default="./checkpoints/hunyuan_mini/last-udf.ckpt", help="ShapeVAE checkpoint.")
+    parser.add_argument("--vae_ckpt", default="./checkpoints/hunyuan_mini/last_no_norm.ckpt", help="ShapeVAE checkpoint.")
     parser.add_argument("--output_root", default="exp_output/lr_sweep", help="Root directory for sweep outputs.")
     parser.add_argument("--tag", default="da3_base", help="Tag added to logger names and output folders.")
     parser.add_argument("--epochs", type=int, default=None, help="Override cfg.epochs for each run.")
@@ -77,7 +77,7 @@ def run_one_lr(args, base_data_cfg, lr):
     run_name = f"{args.tag}_{lr_name(lr)}"
     pl.seed_everything(args.seed, workers=True)
 
-    model, cfg = load_model(args.ckpt, args.device, aggregator_ckpt=args.aggregator_ckpt, vae_ckpt=args.vae_ckpt, strict=False, stage="test")
+    model, cfg = load_model(args.ckpt, args.device, aggregator_ckpt=args.aggregator_ckpt, vae_ckpt=args.vae_ckpt, strict=False)#, stage="test")
     cfg.lr = lr
     if args.epochs is not None:
         cfg.epochs = args.epochs

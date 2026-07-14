@@ -52,12 +52,12 @@ RUN bash -c "
   echo 'Mounting dataset using FUSE...'
   bash bulk_mount_mount_zip.sh /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano /tmp/datasets/replica_pano -o notrim
   echo 'Mounting 3D-FRONT dataset using Mount Zip...'
-  bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/3dfront/3D-FRONT-TEST-SCENE-SDF.zip /tmp/datasets/3dfront
+  bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/3dfront/3D-FRONT-TEST-SCENE-UDF.zip /tmp/datasets/3dfront
   export PYTHONUNBUFFERED=1
   export PYTHONPATH=\${PYTHONPATH}:/mnt/home/vyhong/projects/nova3r
   
   echo 'Running training...'
-  python -u training/train.py
+  python -u training/change_train.py
 "
 
 # Stop and remove the container

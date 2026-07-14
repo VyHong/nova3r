@@ -36,7 +36,11 @@ bash bulk_mount_mount_zip.sh /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPa
 bash bulk_mount.sh /mnt/datasets/3dfront/3D-FRONT-TEST-SCENE.zip  /tmp/datasets/3dfront
 bash bulk_mount.sh /mnt/datasets/3dfront/3D-FRONT-SCENE.zip  /tmp/datasets/3dfront
 
-bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/3dfront/3D-FRONT-TEST-SCENE-SDF.zip /tmp/datasets/3dfront
+bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/3dfront/3D-FRONT-TEST-SCENE-UDF.zip /tmp/datasets/3dfront
+
+## mount scannetpp
+
+bash bulk_mount.sh /mnt/projects/theses/vyhong/scannetpp/cubemap_data.zip  /tmp/datasets/scannetpp
 
 ## run demo with 6 views
 python demo_nova3r.py --images /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0000.jpg /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0001.jpg /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0002.jpg /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0003.jpg /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0004.jpg /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0005.jpg --ckpt checkpoints/scene_n2/checkpoint-last.pth --num_queries 200000

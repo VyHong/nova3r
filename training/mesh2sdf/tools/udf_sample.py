@@ -11,11 +11,7 @@ from scipy.stats import truncnorm
 def random_sample_pointcloud(mesh, num=30000):
     points, face_idx = mesh.sample(num, return_index=True)
     normals = mesh.face_normals[face_idx]
-
-    rng = np.random.default_rng()
-    index = rng.choice(num, num, replace=False)
-
-    return points[index], normals[index]
+    return points, normals
 
 
 def sharp_sample_pointcloud(mesh, num=16384):
@@ -90,9 +86,6 @@ def normalize_to_median(V, mode="median"):
     if target_median == 0.0:
         raise ValueError("Median normalization target must be non-zero.")
 
-    translation = np.array([0,0,1.6]) 
-    V = V - translation
-
     distances = np.linalg.norm(V, axis=1)
     norm_factor = np.median(distances) if distances.size > 0 else 1.0
     norm_factor = np.clip(norm_factor, 0.01, 100.0)
@@ -106,11 +99,31 @@ def normalize_to_median(V, mode="median"):
     return V_normalized, scale, centroid
 
 
+def mesh_radius_scale(V):
+    centroid = V.mean(axis=0)
+    centered = V - centroid
+    distances = np.linalg.norm(centered, axis=1)
+    if distances.size == 0:
+        return 1.0
+    return max(float(distances.max()) * 1.01, 1e-6)
+
+
+def skip_normalization(V):
+    scale = 1.0
+    centroid = np.zeros(3, dtype=V.dtype)
+    sampling_scale = mesh_radius_scale(V)
+    return V, scale, centroid, sampling_scale
+
+
 def normalize_vertices(V, mode="centroid_sphere"):
+    if mode in ("none", "raw", "skip"):
+        return skip_normalization(V)
     if mode in ("centroid_sphere", "sphere"):
-        return normalize_to_centroid_sphere(V)
-    if "median" in mode:
-        return normalize_to_median(V, mode=mode)
+        V_normalized, scale, centroid = normalize_to_centroid_sphere(V)
+        return V_normalized, scale, centroid, 1.0
+    if mode.startswith("median"):
+        V_normalized, scale, centroid = normalize_to_median(V, mode=mode)
+        return V_normalized, scale, centroid, 1.0
 
     raise ValueError(f"Unknown normalize mode: {mode}")
 
@@ -139,13 +152,13 @@ def load_vertices_and_faces(input_file):
     return V, F
 
 
-def padded_mesh_bounds(mesh, padding_ratio=0.2, min_padding=0.1):
+def padded_mesh_bounds(mesh, padding_ratio=0.2, min_padding=0.1, sampling_scale=1.0):
     bounds = np.array(mesh.bounds, dtype=np.float64, copy=True)
     if bounds.shape != (2, 3) or not np.isfinite(bounds).all():
         raise ValueError(f"Invalid mesh bounds: {bounds}")
 
     extent = bounds[1] - bounds[0]
-    padding = max(float(extent.max()) * padding_ratio, min_padding)
+    padding = max(float(extent.max()) * padding_ratio, min_padding * sampling_scale)
     bounds[0] -= padding
     bounds[1] += padding
     return bounds
@@ -157,29 +170,29 @@ def sample_volume_points(bounds, num_points):
     return np.random.rand(num_points, 3) * (high - low) + low
 
 
-def sample_udf(mesh, random_surface, sharp_surface):
+def sample_udf(mesh, random_surface, sharp_surface, sampling_scale=1.0):
     n_volume_points = sharp_surface.shape[0] * 2
 
-    volume_bounds = padded_mesh_bounds(mesh)
+    volume_bounds = padded_mesh_bounds(mesh, sampling_scale=sampling_scale)
     vol_points = sample_volume_points(volume_bounds, n_volume_points)
 
     # Near-surface random samples
-    a, b = -0.25, 0.25
+    a, b = -0.25 * sampling_scale, 0.25 * sampling_scale
     mu = 0.0
 
     offset1 = truncnorm.rvs(
-        (a - mu) / 0.005,
-        (b - mu) / 0.005,
+        (a - mu) / (0.005 * sampling_scale),
+        (b - mu) / (0.005 * sampling_scale),
         loc=mu,
-        scale=0.005,
+        scale=0.005 * sampling_scale,
         size=(len(random_surface), 3),
     )
 
     offset2 = truncnorm.rvs(
-        (a - mu) / 0.05,
-        (b - mu) / 0.05,
+        (a - mu) / (0.05 * sampling_scale),
+        (b - mu) / (0.05 * sampling_scale),
         loc=mu,
-        scale=0.05,
+        scale=0.05 * sampling_scale,
         size=(len(random_surface), 3),
     )
 
@@ -196,14 +209,14 @@ def sample_udf(mesh, random_surface, sharp_surface):
 
     sharp_near_points = np.concatenate(
         [
-            sharp_surface[:unit_num] + np.random.normal(scale=0.001, size=(unit_num, 3)),
-            sharp_surface[unit_num : unit_num * 2] + np.random.normal(scale=0.003, size=(unit_num, 3)),
-            sharp_surface[unit_num * 2 : unit_num * 3] + np.random.normal(scale=0.006, size=(unit_num, 3)),
-            sharp_surface[unit_num * 3 : unit_num * 4] + np.random.normal(scale=0.01, size=(unit_num, 3)),
-            sharp_surface[unit_num * 4 : unit_num * 5] + np.random.normal(scale=0.02, size=(unit_num, 3)),
+            sharp_surface[:unit_num] + np.random.normal(scale=0.001 * sampling_scale, size=(unit_num, 3)),
+            sharp_surface[unit_num : unit_num * 2] + np.random.normal(scale=0.003 * sampling_scale, size=(unit_num, 3)),
+            sharp_surface[unit_num * 2 : unit_num * 3] + np.random.normal(scale=0.006 * sampling_scale, size=(unit_num, 3)),
+            sharp_surface[unit_num * 3 : unit_num * 4] + np.random.normal(scale=0.01 * sampling_scale, size=(unit_num, 3)),
+            sharp_surface[unit_num * 4 : unit_num * 5] + np.random.normal(scale=0.02 * sampling_scale, size=(unit_num, 3)),
             sharp_surface[unit_num * 5 :]
             + np.random.normal(
-                scale=0.04,
+                scale=0.04 * sampling_scale,
                 size=(len(sharp_surface) - 5 * unit_num, 3),
             ),
         ],
@@ -243,18 +256,20 @@ def sample_udf(mesh, random_surface, sharp_surface):
         "sharp_near_points": sharp_near_points.astype(np.float16),
         "sharp_near_label": sharp_near_udf.astype(np.float16),
         "bounds": np.concatenate((volume_bounds[0], volume_bounds[1])).astype(np.float32),
+        "sampling_scale": np.float32(sampling_scale),
     }
 
     return data
 
 
-def sample_mesh_udf(V, F, scale, centroid):
+def sample_mesh_udf(V, F, scale, centroid, sampling_scale=1.0):
     mesh = trimesh.Trimesh(vertices=V, faces=F, process=False)
 
     print(f"Watertight: {mesh.is_watertight}")
     print(f"Bounds min: {mesh.vertices.min(axis=0)}")
     print(f"Bounds max: {mesh.vertices.max(axis=0)}")
-    volume_bounds = padded_mesh_bounds(mesh)
+    print(f"Sampling scale: {sampling_scale}")
+    volume_bounds = padded_mesh_bounds(mesh, sampling_scale=sampling_scale)
     print(f"Volume sample bounds min: {volume_bounds[0]}")
     print(f"Volume sample bounds max: {volume_bounds[1]}")
 
@@ -269,12 +284,14 @@ def sample_mesh_udf(V, F, scale, centroid):
         "scale": np.float16(scale),
         "centroid": centroid.astype(np.float16),
         "bounds": np.concatenate((volume_bounds[0], volume_bounds[1])).astype(np.float32),
+        "sampling_scale": np.float32(sampling_scale),
     }
 
-    udf_data = sample_udf(mesh, random_surface, sharp_surface)
+    udf_data = sample_udf(mesh, random_surface, sharp_surface, sampling_scale=sampling_scale)
 
     udf_data["scale"] = np.float16(scale)
     udf_data["centroid"] = centroid.astype(np.float16)
+    udf_data["sampling_scale"] = np.float32(sampling_scale)
 
     return surface_data, udf_data
 
@@ -298,22 +315,26 @@ if __name__ == "__main__":
     parser.add_argument(
         "--normalize_mode",
         type=str,
-        default="median",
-        help="Normalization mode: centroid_sphere, sphere, median, or median_<target>.",
+        default="none",
+        help="Normalization mode: none, centroid_sphere, sphere, median, or median_<target>.",
+    )
+    parser.add_argument(
+        "--save_normalized_obj",
+        action="store_true",
+        help="Optionally save a debug OBJ of the normalized mesh.",
     )
 
     args = parser.parse_args()
 
     V, F = load_vertices_and_faces(args.input_obj)
 
-    # Important: no bounding box is added here.
-    V, scale, centroid = normalize_vertices(V, mode=args.normalize_mode)
+    V, scale, centroid, sampling_scale = normalize_vertices(V, mode=args.normalize_mode)
 
     print(f"Normalize mode: {args.normalize_mode}")
     print(f"Scale: {scale}")
     print(f"Centroid: {centroid}")
 
-    surface_data, udf_data = sample_mesh_udf(V, F, scale, centroid)
+    surface_data, udf_data = sample_mesh_udf(V, F, scale, centroid, sampling_scale=sampling_scale)
 
     parent_folder = os.path.dirname(args.output_prefix)
     if parent_folder:
@@ -328,5 +349,5 @@ if __name__ == "__main__":
     print(f"Saved surface samples to: {export_surface}")
     print(f"Saved UDF samples to: {export_udf}")
 
-    # Optional debug export of normalized mesh
-    igl.writeOBJ(f"{args.output_prefix}_normalized.obj", V, F)
+    if args.save_normalized_obj:
+        igl.writeOBJ(f"{args.output_prefix}_normalized.obj", V, F)

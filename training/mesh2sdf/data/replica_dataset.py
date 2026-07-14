@@ -53,7 +53,7 @@ class ReplicaPanoSDFDataset(BaseDataset):
         self.allow_duplicate_img = common_conf.allow_duplicate_img
 
         self.data_root = Path(data_root)
-        self.sdf_data_root = "/mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/median_pad_0.2_udf"
+        self.sdf_data_root = "/mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/udf_no_norm"
         self.split = split
         self.format = format
 
@@ -81,6 +81,7 @@ class ReplicaPanoSDFDataset(BaseDataset):
 
         self.pc_size = common_conf.pc_size
         self.pc_sharpedge_size = common_conf.pc_sharpedge_size
+        self.pointcloud_sample = getattr(common_conf, "pointcloud_sample", True)
         self.return_normal = common_conf.return_normal
         self.sharpedge_label = common_conf.sharpedge_label
 
@@ -89,6 +90,13 @@ class ReplicaPanoSDFDataset(BaseDataset):
         self.sdf_sharpedge_size = common_conf.sdf_sharpedge_size
         self.sdf_label = common_conf.sdf_label
         self.debug_vis_dir = "debug_points/replica_udf_vis"
+
+    def _pointcloud_rng(self, seq_name, id, first_subseq_id):
+        if self.pointcloud_sample:
+            return np.random.default_rng()
+
+        seed = abs(hash(f"{seq_name}_{id}_{int(first_subseq_id)}")) % (2**32)
+        return np.random.default_rng(seed)
 
     def __len__(self):
         return len(self.samples_list)
@@ -292,18 +300,11 @@ class ReplicaPanoSDFDataset(BaseDataset):
 
                 if i == 0:
 
-                    rng = np.random.default_rng()
+                    rng = self._pointcloud_rng(seq_name, id, subseq_ids[0])
                     surface = np.load(anno["surface"], allow_pickle=True)
                     geo_points = np.load(anno["geo_points"], allow_pickle=True)
 
-                    # the normalized-mesh centroid offset.
                     total_transform = image_extrinsics @ T_to_colmap
-                    scale = surface["scale"]
-                    centroid = surface["centroid"]
-
-                    transformed_centroid = total_transform[:3, :3] @ centroid
-                    total_transform[:3, 3] += transformed_centroid
-                    total_transform[:3, 3] /= scale
                     # testing
                     # total_transform[:3, 3] = 0.0
 
@@ -323,7 +324,7 @@ class ReplicaPanoSDFDataset(BaseDataset):
                     surface[:, 3:6] = (total_transform[:3, :3] @ surface[:, 3:6].T).T
                     geo_points[:, :3] = (total_transform[:3, :3] @ geo_points[:, :3].T).T + total_transform[:3, 3]
 
-                    camera_translation_scale = float(scale)
+                    camera_translation_scale = 1
 
                 images.append(image)
                 original_sizes.append(original_size)

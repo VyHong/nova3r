@@ -23,10 +23,10 @@ from demo_nova3r import load_model
 
 def parse_args():
     parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
-    parser.add_argument("--ckpt", default="checkpoints/da3_base/checkpoint-last.pth", help="Path to model checkpoint")
+    parser.add_argument("--ckpt", default="checkpoints/da3_large/checkpoint-last.pth", help="Path to model checkpoint")
     parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
-    parser.add_argument("--aggregator_ckpt", default="./checkpoints/da3_base/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
-    parser.add_argument("--vae_ckpt", default="./checkpoints/hunyuan_mini/last_median.ckpt", help="VAE checkpoint path")
+    parser.add_argument("--aggregator_ckpt", default="./checkpoints/da3_large/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
+    parser.add_argument("--vae_ckpt", default="./checkpoints/hunyuan_mini/last_3d_front.ckpt", help="VAE checkpoint path")
     parser.add_argument("--wandb", default=False, action="store_true", help="Use Weights and Biases logger")
     parser.add_argument("--wandb_project", default="nova3r", help="WandB project name")
     parser.add_argument("--benchmark", default=False, action="store_true", help="Print CUDA-synchronized training timing summaries")
@@ -156,7 +156,7 @@ def main():
         check_val_every_n_epoch=cfg.eval_freq,
         max_steps=args.benchmark_steps if args.benchmark_steps > 0 else -1,
         profiler=profiler,
-        # num_sanity_val_steps=0,
+        num_sanity_val_steps=0,
     )
 
     trainer.fit(module, datamodule=datamodule)

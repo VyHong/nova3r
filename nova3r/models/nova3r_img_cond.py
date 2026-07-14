@@ -221,7 +221,8 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
 
         if kw.pop("stage", None) != "test" and self.cfg.aggregator.name == "AggregatorPts3D":
             new_ckpt = self.prep_ckpt_for_3d_token(new_ckpt)
-
+        #temp
+        # new_ckpt.pop("da3_aggregator.model.backbone.pretrained.pts3d_token")
         missing_keys, unexpected_keys = super().load_state_dict(new_ckpt, strict=False)
         print(f"Loaded Nova3RImgCond weights with {len(missing_keys)} missing keys and {len(unexpected_keys)} unexpected keys.")
 
@@ -417,7 +418,6 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
         # [B], assuming each image in the sequence is a different view
         num_views = torch.ones(B, device=images.device) * S
         # with torch.cuda.amp.autocast(enabled=False):
-        # tokens = tokens.float()
 
         if self.pts3d_head is not None:
             aggregated_tokens_3d_list = [tokens]
@@ -441,13 +441,13 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
             predictions["query_points"] = query_points
             predictions["timestep"] = timestep
 
-        if self.first_stage is not None:
-            moments = self.token_to_moments(tokens)
-            posterior = DiagonalGaussianDistribution(moments, feat_dim=-1)
-            latents = posterior.sample()
-            latents = self.first_stage.decode(latents)
-            predictions["latents"] = latents
-            predictions["posterior"] = posterior
+        # if self.first_stage is not None:
+        #     moments = self.token_to_moments(tokens)
+        #     posterior = DiagonalGaussianDistribution(moments, feat_dim=-1)
+        #     latents = posterior.sample()
+        #     latents = self.first_stage.decode(latents)
+        #     predictions["latents"] = latents
+        #     predictions["posterior"] = posterior
 
         predictions["images"] = images
         predictions["S"] = S
@@ -715,7 +715,7 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
         B, _, _ = tokens.shape
         gt_latents = gt_latents.to(device=device, dtype=tokens.dtype).contiguous()
 
-        x_0 = torch.rand_like(gt_latents)
+        x_0 = torch.randn_like(gt_latents)
         t = torch.rand(B, device=device)
 
         path = AffineProbPath(scheduler=LinearScheduler())
@@ -748,7 +748,10 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
                 wrapped_vf.eval()
                 self.eval()
 
-                x_init = torch.rand_like(gt_latents)
+                noise_generator = torch.Generator(device=gt_latents.device)
+                noise_generator.manual_seed(42)
+
+                x_init = torch.randn_like(gt_latents, generator=noise_generator)
                 T = torch.linspace(0, 1, num_steps).to(device)
                 solver = ODESolver(velocity_model=wrapped_vf)
                 sol = solver.sample(
@@ -763,106 +766,11 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
                     pointmaps=pts3d_src,
                     conditioning_latents=conditioning_latents,
                 )
-            # sampler_kwargs = {}
-            # if conditioning_latents is not None:
-            #     sampler_kwargs["conditioning_latents"] = conditioning_latents
-            # sol_stack = euler_flowmatch_sample(
-            #     self.pts3d_head,
-            #     tokens,
-            #     gt_latents.shape,
-            #     steps=self.recon_latent_steps,
-            #     device=device,
-            #     return_stack=True,
-            #     **sampler_kwargs,
-            # )
-            # sol = sol_stack[-1]
 
             latents = self.first_stage.decode(sol)
         else:
             latents = None
 
         details = {}
-        # if recon_latents == True and self.recon_latent_step_interval > 0:
-        #     step_indices = list(range(self.recon_latent_step_interval, sol_stack.shape[0], self.recon_latent_step_interval))
-        #     final_idx = sol_stack.shape[0] - 1
-        #     if final_idx not in step_indices:
-        #         step_indices.append(final_idx)
-        #     with torch.no_grad():
-        #         for step_idx in step_indices:
-        #             details[f"recon_step_latents_{step_idx:04d}"] = self.first_stage.decode(sol_stack[step_idx])
-
         return loss, details, latents
 
-
-@torch.no_grad()
-def euler_flowmatch_sample(
-    model,
-    cond,
-    latent_shape,
-    steps=50,
-    device="cuda",
-    start_t=0.0,
-    end_t=1.0,
-    x0=None,
-    return_stack=True,
-    **model_kwargs,
-):
-    """
-    Euler sampler for a flow matching model.
-
-    Assumes training convention:
-        x_t = (1 - t) * x0 + t * x1
-        target velocity u_t = x1 - x0
-
-    Therefore sampling goes from t=0 noise -> t=1 data latent.
-
-    Args:
-        model: flow matching model. Expected call: model(x, t, cond)
-        cond: conditioning input, e.g. image tokens / DA3 latents / scene condition
-        latent_shape: shape of latent to sample, e.g. (B, C, H, W) or (B, N, D)
-        steps: number of Euler steps
-        device: torch device
-        start_t: usually 0.0
-        end_t: usually 1.0
-        x0: optional starting noise latent. If None, sampled from U(0, 1) to match training.
-        return_stack: if True returns tensor of shape (steps+1, ...), else list
-
-    Returns:
-        latents: intermediate latents from x_start to x_end
-    """
-
-    was_training = model.training
-    model.eval()
-
-    if x0 is None:
-        x = torch.rand(latent_shape, device=device)
-    else:
-        x = x0.to(device)
-
-    ts = torch.linspace(start_t, end_t, steps + 1, device=device)
-
-    latents = [x.detach().clone()]
-
-    for i in range(steps):
-        t = ts[i]
-        t_next = ts[i + 1]
-        dt = t_next - t
-
-        # Match training shape: [B, num_latents].
-        t_batch = torch.full((x.shape[0],), t, device=device, dtype=x.dtype)
-        t_query = t_batch[:, None].expand(x.shape[0], x.shape[1])
-
-        # predicted velocity
-        # v = model(x, t_batch, cond)
-        v = model(decout=[cond], noised_latents=x, timestep=t_query, **model_kwargs)
-        # Euler update
-        x = x + dt * v
-
-        latents.append(x.detach().clone())
-
-    model.train(was_training)
-
-    if return_stack:
-        return torch.stack(latents, dim=0)
-
-    return latents
