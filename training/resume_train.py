@@ -5,50 +5,41 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
-from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
-import argparse
-from omegaconf import OmegaConf
-import torch
-from training.nova3r.lightning_module import Nova3RLightningModule
-from training.mesh2sdf.lightning_module import Mesh2SDFLightningModule
-from lightning_data import Nova3RDataModule
 from demo_nova3r import load_model
+from lightning_data import Nova3RDataModule
+from training.mesh2sdf.lightning_module import Mesh2SDFLightningModule
+from training.nova3r.lightning_module import Nova3RLightningModule
+import torch
+import argparse
+from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+import pytorch_lightning as pl
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
-    parser.add_argument("--ckpt", default="checkpoints/da3_base/checkpoint-last.pth", help="Path to model checkpoint")
+    parser.add_argument("--config", default="checkpoints/hunyuan/.hydra/config.yaml", help="Model and training config")
     parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
-    parser.add_argument("--aggregator_ckpt", default="./checkpoints/da3_base/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
-    parser.add_argument("--vae_ckpt", default="./checkpoints/hunyuan_mini/last_median.ckpt", help="VAE checkpoint path")
-    parser.add_argument("--wandb", default=False, action="store_true", help="Use Weights and Biases logger")
-    parser.add_argument("--wandb_project", default="nova3r", help="WandB project name")
+    parser.add_argument("--devices", type=int, default=None, help="Number of devices; defaults to experiment.gpus")
     args = parser.parse_args()
 
     return args
 
 
-def load_data_config(ckpt_path):
-    config_dir = os.path.join(os.path.dirname(ckpt_path), ".hydra")
-    if os.path.exists(os.path.join(config_dir, "config.yaml")):
-        cfg = OmegaConf.load(os.path.join(config_dir, "config.yaml"))
-        return cfg.data
-    else:
-        raise FileNotFoundError(f"No .hydra/config.yaml found at {config_dir}. " f"Please ensure the checkpoint directory contains the Hydra config.")
-
-
 def main():
     # torch.cuda.memory._record_memory_history()
     torch.set_float32_matmul_precision("medium")
-    pl.seed_everything(42, workers=True)
+    pl.seed_everything(43, workers=True)
     args = parse_args()
 
-    model, cfg = load_model(args.ckpt, args.device, aggregator_ckpt=args.aggregator_ckpt, vae_ckpt=args.vae_ckpt, strict=False)
-    data_cfg = load_data_config(args.ckpt)
-    cfg.data = data_cfg
+    model, cfg = load_model(
+        device=args.device,
+        config_path=args.config,
+        strict=False,
+    )
+    data_cfg = cfg.data
 
     datamodule = Nova3RDataModule(
         data_cfg,
@@ -56,10 +47,7 @@ def main():
     module = eval(cfg.lightning_module)(cfg, model)
 
     os.makedirs(cfg.output_dir, exist_ok=True)
-    if args.wandb:
-        logger = WandbLogger(project=args.wandb_project, name="nova3r_training", save_dir=cfg.output_dir)
-    else:
-        logger = TensorBoardLogger(save_dir=cfg.output_dir, name="nova3r_training")
+    logger = TensorBoardLogger(save_dir=cfg.output_dir, name="nova3r_training")
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=os.path.join(cfg.output_dir, "checkpoints"),
@@ -77,10 +65,12 @@ def main():
     )
     lr_monitor = LearningRateMonitor(logging_interval="step")
 
+    devices = args.devices if args.devices is not None else int(cfg.gpus)
     trainer = pl.Trainer(
         max_epochs=cfg.epochs,
         accelerator=args.device,
-        devices=cfg.gpus,
+        devices=devices,
+        strategy="ddp" if devices > 1 else "auto",
         logger=logger,
         callbacks=[checkpoint_callback, last_checkpoint, lr_monitor],
         precision=cfg.amp_dtype,
@@ -94,7 +84,7 @@ def main():
     trainer.fit(
         module,
         datamodule=datamodule,
-        ckpt_path="exp_output/da3_img_cond_udf/checkpoints/last-v1_1024.ckpt",
+        ckpt_path=cfg.get("resume_checkpoint"),
         weights_only=False,
     )
 

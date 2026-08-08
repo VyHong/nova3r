@@ -20,6 +20,7 @@ import cv2
 import os
 import torch
 from torch.utils.data._utils.collate import default_collate
+from nova3r.utils.batch_debug import save_batch_debug
 
 
 class Front3DDataset(BaseDataset):
@@ -120,7 +121,6 @@ class Front3DDataset(BaseDataset):
 
         scene_pcd.transform(T)
         cam_points = np.asarray(scene_pcd.points)
-        # self.save_debug_points(cam_points, filename=f"3d_front_cam_points.ply")
         point_masks = np.ones(cam_points.shape[0], dtype=bool)  # Assuming all points are valid for now
 
         intrinsics = torch.eye(3).repeat(6, 1, 1)  # Placeholder intrinsics (identity matrix)
@@ -145,31 +145,8 @@ class Front3DDataset(BaseDataset):
             "point_masks": point_masks,
             "original_sizes": original_sizes,
         }
-
+        # save_batch_debug(batch, "debug_points/front3d", batched=False)
         return batch
-
-    @staticmethod
-    def save_debug_points(points, output_dir="debug_points", filename="points.ply"):
-        """Saves points array to a PLY file for debugging"""
-        import os
-        import numpy as np
-
-        os.makedirs(output_dir, exist_ok=True)
-        if not isinstance(points, np.ndarray):
-            pts_np = np.asarray(points.points)
-        else:
-            pts_np = points
-        pts_np = pts_np.reshape(-1, 3)
-
-        ply_path = os.path.join(output_dir, filename)
-        header = f"ply\nformat ascii 1.0\nelement vertex {len(pts_np)}\nproperty float x\nproperty float y\nproperty float z\nend_header\n"
-
-        with open(ply_path, "w") as f:
-            f.write(header)
-            for p in pts_np:
-                f.write(f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")
-
-        print(f"Saved {ply_path}")
 
     def dynamic_pad_collate_fn(self, batch):
         """

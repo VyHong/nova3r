@@ -207,8 +207,9 @@ def get_udf_normals_grid_fast(decoder, latent_vec, samples, indices, N=56, max_b
     return df_values, vecs, samples
 
 
-def get_mesh_udf_fast(decoder, latent_vec, samples=None, indices=None, N_MC=128, fourier=False, 
-                        gradient=True, eps=0.1, border_gradients=False, smooth_borders=False):
+def get_mesh_udf_fast(decoder, latent_vec, samples=None, indices=None, N_MC=128, fourier=False,
+                        gradient=True, eps=0.1, border_gradients=False, smooth_borders=False,
+                        vertex_max_batch=int(2 ** 16), surface_threshold=None):
     """
     Computes a triangulated mesh from a distance field network conditioned on the latent vector
     Inputs: 
@@ -224,6 +225,8 @@ def get_mesh_udf_fast(decoder, latent_vec, samples=None, indices=None, N_MC=128,
         eps: length of the normal vectors used to derive gradients
         border_gradients: add a special case for border gradients?
         smooth_borders: do we smooth borders with a Laplacian?
+        vertex_max_batch: maximum number of marching-cubes vertices to evaluate at once
+        surface_threshold: maximum predicted UDF at every face vertex; defaults to voxel_size / 6
     Returns:
         verts: vertices of the mesh
         faces: faces of the mesh
@@ -243,16 +246,31 @@ def get_mesh_udf_fast(decoder, latent_vec, samples=None, indices=None, N_MC=128,
                                         spacing=[voxel_size] * 3)
     verts = verts - 1 # since voxel_origin = [-1, -1, -1]
     ### 3: evaluate vertices DF, and remove the ones that are too far
-    verts_torch = torch.from_numpy(verts).float().cuda()
+    if vertex_max_batch < 1:
+        raise ValueError("vertex_max_batch must be at least 1")
+
+    pred_df_chunks = []
     with torch.no_grad():
-        if fourier:
-            xyz = ws.fourier_transform(verts_torch)
-        else:
-            xyz = verts_torch
-        pred_df_verts = decoder(_make_decoder_input(latent_vec, xyz))
-    pred_df_verts = pred_df_verts.cpu().numpy()
-    # Remove faces that have vertices far from the surface
-    filtered_faces = faces[np.max(pred_df_verts[faces], axis=1)[:,0] < voxel_size / 6]
+        for start in range(0, len(verts), vertex_max_batch):
+            verts_torch = torch.from_numpy(
+                verts[start : start + vertex_max_batch]
+            ).float().cuda()
+            if fourier:
+                xyz = ws.fourier_transform(verts_torch)
+            else:
+                xyz = verts_torch
+            pred_df_chunks.append(
+                decoder(_make_decoder_input(latent_vec, xyz)).detach().cpu()
+            )
+    pred_df_verts = torch.cat(pred_df_chunks, dim=0).numpy()
+    # An absolute override avoids an overly strict voxel-relative filter at high resolutions.
+    if surface_threshold is None:
+        surface_threshold = voxel_size / 6
+    elif surface_threshold < 0:
+        raise ValueError("surface_threshold must be non-negative")
+    filtered_faces = faces[
+        np.max(pred_df_verts[faces], axis=1)[:, 0] < surface_threshold
+    ]
     filtered_mesh = trimesh.Trimesh(verts, filtered_faces)
     ### 4: clean the mesh a bit
     # Remove NaNs, flat triangles, duplicate faces

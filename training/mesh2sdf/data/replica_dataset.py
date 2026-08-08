@@ -10,20 +10,18 @@ import cv2
 import numpy as np
 from collections import OrderedDict  # For LRU Cache implementation
 from pathlib import Path
-import open3d as o3d
 from torchvision import transforms
-from depth_anything_3.utils.geometry import affine_inverse
 from training.nova3r.data.dataset_utils import read_image_cv2
 from training.nova3r.data.datasets.replica_utils.igibson_utils import ReplicaPanoScene
-from training.nova3r.data.base_dataset import BaseDataset
 import torch
-from torch.utils.data._utils.collate import default_collate
 import trimesh
 
 from nova3r.heads.hunyuan_model.surface_loaders import SharpEdgeSurfaceLoader
+from training.mesh2sdf.data.sdf_dataset_mixin import SDFDatasetMixin
+from nova3r.utils.batch_debug import save_batch_debug
 
 
-class ReplicaPanoSDFDataset(BaseDataset):
+class ReplicaPanoSDFDataset(SDFDatasetMixin):
     """
     ReplicaPano Dataset implementation for loading 360-degree panoramic scenes.
 
@@ -37,17 +35,23 @@ class ReplicaPanoSDFDataset(BaseDataset):
         data_root,
         split="train",
         samples_list_path=None,
-        format="pointcloud",
+        format="mesh",
+        load_conditioning_latent=False,
+        conditioning_latent_root=None,
+        subseq_ids=None,
     ):
         """
         Initialize the ReplicaPano dataset.
 
         Args:
-            common_conf: Common configuration from BaseDataset
+            common_conf: Common configuration shared by the SDF datasets
             data_root: Root directory containing pickle files or scene data
             split: Dataset split ('train', 'val', 'test'). Default: 'train'
             sample_list_path: Path to a file containing a list of specific samples to load. If None, load all samples.
-            use_lru_cache: If True, caches cam_points dynamically to avoid redundant computations.
+            load_conditioning_latent: Load a precomputed VAE conditioning latent
+                for each panorama.
+            conditioning_latent_root: Root containing
+                ``<scene>/<sequence>.pt`` latent files.
         """
         super().__init__(common_conf)
         self.allow_duplicate_img = common_conf.allow_duplicate_img
@@ -56,6 +60,10 @@ class ReplicaPanoSDFDataset(BaseDataset):
         self.sdf_data_root = "/mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano/udf_no_norm"
         self.split = split
         self.format = format
+        self.configure_subseq_ids(subseq_ids)
+        self.configure_conditioning_latents(
+            load_conditioning_latent, conditioning_latent_root
+        )
 
         self.sequence_list = []
         if samples_list_path is None:
@@ -92,11 +100,12 @@ class ReplicaPanoSDFDataset(BaseDataset):
         self.debug_vis_dir = "debug_points/replica_udf_vis"
 
     def _pointcloud_rng(self, seq_name, id, first_subseq_id):
+        if self.split != "train":
+            return self.deterministic_rng(type(self).__name__, self.split, seq_name, id, int(first_subseq_id))
         if self.pointcloud_sample:
             return np.random.default_rng()
 
-        seed = abs(hash(f"{seq_name}_{id}_{int(first_subseq_id)}")) % (2**32)
-        return np.random.default_rng(seed)
+        return self.deterministic_rng(type(self).__name__, self.split, seq_name, id, int(first_subseq_id))
 
     def __len__(self):
         return len(self.samples_list)
@@ -169,98 +178,22 @@ class ReplicaPanoSDFDataset(BaseDataset):
         intrinsics[1, :] *= new_size_hw[0] / float(orig_size_hw[0])
         return intrinsics
 
-    def load_surface_points(self, rng, random_surface, sharpedge_surface):
-        surface_normal = []
-        if self.pc_size > 0:
-            ind = rng.choice(random_surface.shape[0], self.pc_size, replace=False)
-            random_surface = random_surface[ind]
-            if self.sharpedge_label:
-                sharpedge_label = np.zeros((self.pc_size, 1))
-                random_surface = np.concatenate((random_surface, sharpedge_label), axis=1)
-            surface_normal.append(random_surface)
-
-        if self.pc_sharpedge_size > 0:
-            ind_sharpedge = rng.choice(sharpedge_surface.shape[0], self.pc_sharpedge_size, replace=False)
-            sharpedge_surface = sharpedge_surface[ind_sharpedge]
-            if self.sharpedge_label:
-                sharpedge_label = np.ones((self.pc_sharpedge_size, 1))
-                sharpedge_surface = np.concatenate((sharpedge_surface, sharpedge_label), axis=1)
-            surface_normal.append(sharpedge_surface)
-
-        surface_normal = np.concatenate(surface_normal, axis=0)
-        surface_normal = torch.FloatTensor(surface_normal)
-        surface = surface_normal[:, 0:3]
-        normal = surface_normal[:, 3:6]
-        assert surface.shape[0] == self.pc_size + self.pc_sharpedge_size
-
-        normal = torch.nn.functional.normalize(normal, p=2, dim=1)
-        if self.return_normal:
-            surface = torch.cat([surface, normal], dim=-1)
-        if self.sharpedge_label:
-            surface = torch.cat([surface, surface_normal[:, -1:]], dim=-1)
-        return surface
-
-    def load_sdf_points(
-        self,
-        rng,
-        vol_points,
-        vol_label,
-        near_points,
-        near_label,
-        sharpedge_points,
-        sharpedge_label,
-    ):
-        sdf_points = []
-        if self.sdf_size > 0:
-            ind = rng.choice(vol_points.shape[0], self.sdf_size, replace=False)
-            vol_sdf_points = np.concatenate((vol_points[ind], vol_label[ind][:, None]), axis=1)
-            if self.sdf_label:
-                sdf_label = np.zeros((self.sdf_size, 1))
-                vol_sdf_points = np.concatenate((vol_sdf_points, sdf_label), axis=1)
-            sdf_points.append(vol_sdf_points)
-
-        if self.sdf_near_size > 0:
-            ind_near = rng.choice(near_points.shape[0], self.sdf_near_size, replace=False)
-            near_sdf_points = np.concatenate((near_points[ind_near], near_label[ind_near][:, None]), axis=1)
-            if self.sdf_label:
-                sdf_label = np.ones((self.sdf_near_size, 1))
-                near_sdf_points = np.concatenate((near_sdf_points, sdf_label), axis=1)
-            sdf_points.append(near_sdf_points)
-
-        if self.sdf_sharpedge_size > 0:
-            ind_sharpedge = rng.choice(sharpedge_points.shape[0], self.sdf_sharpedge_size, replace=False)
-            sharpedge_sdf_points = np.concatenate((sharpedge_points[ind_sharpedge], sharpedge_label[ind_sharpedge][:, None]), axis=1)
-            if self.sdf_label:
-                sdf_label = np.ones((self.sdf_sharpedge_size, 1)) * 2
-                sharpedge_sdf_points = np.concatenate((sharpedge_sdf_points, sdf_label), axis=1)
-            sdf_points.append(sharpedge_sdf_points)
-
-        sdf_points = np.concatenate(sdf_points, axis=0)
-        sdf_points = torch.FloatTensor(sdf_points)
-        return sdf_points
-
     def get_data(
         self,
         seq_name: str = None,
         id: int = None,
         seq_index: int = None,
         img_per_seq: int = 1,
-        subseq_ids: list = None,  # [0, 4, 5, 1, 3, 2],
+        subseq_ids=None,
         aspect_ratio: float = 1.0,
     ) -> dict:
         if seq_name is None:
             seq_name = self.sequence_list[seq_index]
-        if subseq_ids is None:
-            subseq_ids = np.arange(6)
-            if self.split == "train":
-                subseq_ids = np.random.choice(subseq_ids, len(subseq_ids), replace=self.allow_duplicate_img)
+        subseq_ids = self.select_subseq_ids(subseq_ids)
 
         metadata = self.data_store[seq_name]
 
-        if id is None:
-            ids = np.random.choice(len(metadata), img_per_seq, replace=self.allow_duplicate_img)
-        if isinstance(id, str):
-            ids = [id]
+        ids = [f"{int(id):05d}"]
 
         annos = [metadata[i] for i in ids]
 
@@ -273,7 +206,7 @@ class ReplicaPanoSDFDataset(BaseDataset):
             with open(anno["camera_data"], "r") as f:
                 camera_data = json.load(f)
 
-            for i, subseq_id in enumerate(subseq_ids):
+            for subseq_order, subseq_id in enumerate(subseq_ids):
                 filepath = anno["subsequence_images"][subseq_id]
                 image_path = os.path.join(self.data_root, filepath)
                 image = read_image_cv2(image_path)
@@ -298,15 +231,13 @@ class ReplicaPanoSDFDataset(BaseDataset):
                 colmap_scene_w2c = T_to_colmap @ scene_w2c @ T_to_colmap.T
                 image_extrinsics = subseq_w2c @ colmap_scene_w2c
 
-                if i == 0:
+                if subseq_order == 0:
 
                     rng = self._pointcloud_rng(seq_name, id, subseq_ids[0])
                     surface = np.load(anno["surface"], allow_pickle=True)
                     geo_points = np.load(anno["geo_points"], allow_pickle=True)
 
                     total_transform = image_extrinsics @ T_to_colmap
-                    # testing
-                    # total_transform[:3, 3] = 0.0
 
                     total_transform = torch.from_numpy(total_transform).float()
 
@@ -337,8 +268,6 @@ class ReplicaPanoSDFDataset(BaseDataset):
             translation_scale=camera_translation_scale,
         ).squeeze(0)
 
-        # self._export_debug_visualization(seq_name, ids, surface, normalized_extrinsics, images)
-
         del replica_scene
         intrinsics = torch.from_numpy(np.array(intrinsics))
         set_name = "replica_pano"
@@ -353,84 +282,14 @@ class ReplicaPanoSDFDataset(BaseDataset):
             "surface": surface,
             "geo_points": geo_points,
         }
-
+        if self.load_conditioning_latent:
+            batch["conditioning_latents"] = self._load_conditioning_latent(seq_name, ids)
+        # save_batch_debug(batch, self.debug_vis_dir, batched=False)
         return batch
-
-    def _export_debug_visualization(self, seq_name, ids, surface, extrinsics, images):
-        if not self.debug_vis_dir:
-            return
-
-        output_dir = Path(self.debug_vis_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        id_part = "_".join(str(item) for item in ids)
-        stem = f"{seq_name}_{id_part}"
-
-        points = surface[:, :3].detach().cpu().numpy().astype(np.float64)
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(np.ascontiguousarray(points))
-
-        if surface.shape[1] >= 6:
-            normals = surface[:, 3:6].detach().cpu().numpy().astype(np.float64)
-            pcd.normals = o3d.utility.Vector3dVector(np.ascontiguousarray(normals))
-
-        if self.sharpedge_label and surface.shape[1] >= 7:
-            labels = surface[:, -1].detach().cpu().numpy() > 0.5
-            colors = np.zeros((len(points), 3), dtype=np.float64)
-            colors[~labels] = [0.2, 0.55, 1.0]
-            colors[labels] = [1.0, 0.25, 0.1]
-            pcd.colors = o3d.utility.Vector3dVector(colors)
-
-        ply_path = output_dir / f"{stem}_surface.ply"
-        extrinsics_path = output_dir / f"{stem}_normalized_extrinsics.json"
-        images_path = output_dir / f"{stem}_images.png"
-
-        o3d.io.write_point_cloud(str(ply_path), pcd)
-        with open(extrinsics_path, "w", encoding="utf-8") as f:
-            json.dump(extrinsics.detach().cpu().numpy().tolist(), f, indent=2)
-        image_tiles = []
-        for image in images:
-            image_np = image.detach().cpu().permute(1, 2, 0).numpy()
-            image_np = np.clip(image_np * 255.0, 0, 255).astype(np.uint8)
-            image_tiles.append(image_np)
-        if image_tiles:
-            image_grid = np.concatenate(image_tiles, axis=1)
-            cv2.imwrite(str(images_path), cv2.cvtColor(image_grid, cv2.COLOR_RGB2BGR))
-
-        print(f"Saved debug point cloud: {ply_path}")
-        print(f"Saved debug extrinsics: {extrinsics_path}")
-        print(f"Saved debug images: {images_path}")
 
     def __getitem__(self, index):
         seq_name, id = self.samples_list[index].split(" ")
         return self.get_data(seq_name=seq_name, id=id)
-
-    def _normalize_extrinsics(
-        self,
-        ex_t: torch.Tensor | None,
-        translation_scale: torch.Tensor | float | None = None,
-    ) -> torch.Tensor | None:
-        if ex_t is None:
-            return None
-        transform = affine_inverse(ex_t[:, :1])
-        ex_t_norm = ex_t @ transform
-        if translation_scale is None:
-            c2ws = affine_inverse(ex_t_norm)
-            translations = c2ws[..., :3, 3]
-            dists = translations.norm(dim=-1)
-            translation_scale = torch.median(dists).clamp(min=1e-1)
-        else:
-            translation_scale = torch.as_tensor(
-                translation_scale,
-                dtype=ex_t_norm.dtype,
-                device=ex_t_norm.device,
-            ).clamp(min=1e-6)
-
-        ex_t_norm[..., :3, 3] = ex_t_norm[..., :3, 3] / translation_scale
-        return ex_t_norm
-
-    def dynamic_pad_collate_fn(self, batch):
-        return default_collate(batch)
 
 
 if __name__ == "__main__":

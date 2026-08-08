@@ -41,18 +41,34 @@ def parse_args():
     return args
 
 
-def load_model(ckpt_path, device, **kw):
-    """Load model from checkpoint with its Hydra config."""
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+def load_model(ckpt_path=None, device="cuda", config_path=None, **kw):
+    """Load a model from an explicit config and its configured checkpoint.
 
-    config_dir = os.path.join(os.path.dirname(ckpt_path), ".hydra")
-    if os.path.exists(os.path.join(config_dir, "config.yaml")):
-        cfg = OmegaConf.load(os.path.join(config_dir, "config.yaml"))
-        # Resolve absolute interpolations before nested model configs are copied
-        OmegaConf.resolve(cfg)
-        cfg = cfg.experiment
-    else:
-        raise FileNotFoundError(f"No .hydra/config.yaml found at {config_dir}. " "Please ensure the checkpoint directory contains the Hydra config.")
+    ``ckpt_path`` remains an optional override. For backward compatibility, when
+    ``config_path`` is omitted the config is discovered next to ``ckpt_path``.
+    """
+    if config_path is None:
+        if ckpt_path is None:
+            raise ValueError("Either config_path or ckpt_path must be provided")
+        config_path = os.path.join(os.path.dirname(ckpt_path), ".hydra", "config.yaml")
+    if not os.path.isfile(config_path):
+        raise FileNotFoundError(f"Model config not found: {config_path}")
+
+    root_cfg = OmegaConf.load(config_path)
+    OmegaConf.resolve(root_cfg)
+    cfg = root_cfg.experiment
+    if "data" in root_cfg:
+        cfg.data = root_cfg.data
+
+    ckpt_path = ckpt_path or cfg.get("checkpoint")
+    if not ckpt_path:
+        raise ValueError(f"No checkpoint configured in {config_path}; set experiment.checkpoint or pass --ckpt")
+
+    for key in ("aggregator_ckpt", "vae_ckpt"):
+        if kw.get(key) is None and cfg.get(key):
+            kw[key] = cfg.get(key)
+
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
 
     model_config = cfg.model
     model = eval(model_config["name"])(**model_config["params"])

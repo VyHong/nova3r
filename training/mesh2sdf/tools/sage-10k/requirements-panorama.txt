@@ -1,0 +1,14 @@
+#   conda run -n nova3r python -m pip install -r requirements-panorama.txt
+bpy>=4.2,<6
+numpy>=1.26
+scipy>=1.11
+trimesh>=4.0
+manifold3d>=3.0
+rtree>=1.2
+pillow>=10
+tqdm>=4.66
+imageio>=2.34
+open3d>=0.18
+xatlas>=0.0.9
+plyfile>=1.0
+pygltflib>=1.16

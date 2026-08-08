@@ -8,8 +8,8 @@ from training.nova3r.data.datasets.front3d_dataset import Front3DDataset
 from training.nova3r.data.datasets.replica_dataset import ReplicaPanoDataset
 from training.mesh2sdf.data.front3d_dataset import Front3DSDFDataset
 from training.mesh2sdf.data.replica_dataset import ReplicaPanoSDFDataset
-from training.mesh2sdf.data.latent_replica_dataset import LatentReplicaPanoSDFDataset
 from training.mesh2sdf.data.scannetpp_dataset import ScanNetPPSDFDataset
+from training.mesh2sdf.data.sage10k_dataset import SAGE10KSDFDataset
 
 class Nova3RDataModule(pl.LightningDataModule):
     def __init__(self, data_cfg):
@@ -27,8 +27,9 @@ class Nova3RDataModule(pl.LightningDataModule):
             "Front3DSDFDataset": Front3DSDFDataset,
             "ReplicaPanoDataset": ReplicaPanoDataset,
             "ReplicaPanoSDFDataset": ReplicaPanoSDFDataset,
-            "LatentReplicaPanoSDFDataset": LatentReplicaPanoSDFDataset,
             "ScanNetPPSDFDataset": ScanNetPPSDFDataset,
+            "SAGE10KDataset": SAGE10KSDFDataset,
+            "SAGE10KSDFDataset": SAGE10KSDFDataset,
         }
 
         self.train_collate_fn = None

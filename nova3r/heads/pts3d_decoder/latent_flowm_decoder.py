@@ -11,7 +11,8 @@ import torch.nn as nn
 import numpy as np
 import math
 
-# from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
+from nova3r.layers.attention import Attention
+from nova3r.layers.mlp import Mlp
 
 
 def modulate(x, shift, scale):
@@ -100,8 +101,10 @@ class LabelEmbedder(nn.Module):
 
 class SiTBlock(nn.Module):
     """
-    A SiT block with adaptive layer norm zero (adaLN-Zero) timestep
-    conditioning and cross-attention over condition tokens.
+    A standard DiT adaLN-Zero block with one additional cross-attention layer.
+
+    The latent sequence replaces DiT's image-patch sequence. Conditioning
+    tokens are consumed only by cross-attention; the timestep drives adaLN.
     """
 
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
@@ -109,18 +112,25 @@ class SiTBlock(nn.Module):
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
         self.norm_cross = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.norm_cond = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.norm_cond = nn.LayerNorm(hidden_size, elementwise_affine=True, eps=1e-6)
         self.cross_attn = nn.MultiheadAttention(hidden_size, num_heads=num_heads, batch_first=True)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
         self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
-        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 7 * hidden_size, bias=True))
+        # The first six vectors are exactly DiT's adaLN-Zero parameters.  The
+        # seventh is a zero-initialized residual gate for cross-attention.
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(), nn.Linear(hidden_size, 7 * hidden_size, bias=True)
+        )
 
     def forward(self, x, c, cond):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp, gate_cross = self.adaLN_modulation(c).chunk(7, dim=1)
         x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
-        cross, _ = self.cross_attn(self.norm_cross(x), self.norm_cond(cond), self.norm_cond(cond), need_weights=False)
+        cond = self.norm_cond(cond)
+        cross, _ = self.cross_attn(
+            self.norm_cross(x), cond, cond, need_weights=False
+        )
         x = x + gate_cross.unsqueeze(1) * cross
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
@@ -144,9 +154,13 @@ class FinalLayer(nn.Module):
         return x
 
 
-class SiT(nn.Module):
+class DiT(nn.Module):
     """
-    Diffusion model with a Transformer backbone.
+    DiT-style flow model over latent tokens instead of image patches.
+
+    Relative to standard DiT, ``x_embedder`` is a Linear layer over each
+    latent vector and every block has cross-attention over condition tokens.
+    There is deliberately no patchify/unpatchify path.
     """
 
     def __init__(
@@ -162,22 +176,22 @@ class SiT(nn.Module):
         mlp_ratio=4.0,
         class_dropout_prob=0.1,
         num_classes=1000,
-        learn_sigma=True,
+        learn_sigma=False,
         latent_cond_dim=64,
     ):
         super().__init__()
 
-        in_channels = input_size
-
         self.learn_sigma = learn_sigma
-        self.in_channels = in_channels
-        self.out_channels = in_channels * 2 if learn_sigma else in_channels
+        self.in_channels = input_size
+        self.out_channels = input_size * 2 if learn_sigma else input_size
+        # Retained only so older configs continue to load. Latent tokens are
+        # never spatially patched.
         self.patch_size = patch_size
         self.num_heads = num_heads
         self.num_latents = num_latents
 
-        self.x_embedder = nn.Linear(input_size, hidden_size)  # PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
-        self.latent_mlp = nn.Sequential(
+        self.x_embedder = nn.Linear(input_size, hidden_size)
+        self.latent_cond_embedder = nn.Sequential(
             nn.LayerNorm(latent_cond_dim),
             nn.Linear(latent_cond_dim, hidden_size),
             nn.SiLU(),
@@ -185,7 +199,7 @@ class SiT(nn.Module):
         )
 
         self.t_embedder = TimestepEmbedder(hidden_size)
-        self.y_embedder = nn.Linear(cond_dim, hidden_size)  # Projects image-condition tokens.
+        self.y_embedder = nn.Linear(cond_dim, hidden_size)
         # Fixed 1D sin-cos embedding over latent-token index.
         self.pos_embed = nn.Parameter(torch.zeros(1, num_latents, hidden_size), requires_grad=False)
 
@@ -230,37 +244,30 @@ class SiT(nn.Module):
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
-        nn.init.constant_(self.latent_mlp[-1].weight, 0)
-        nn.init.constant_(self.latent_mlp[-1].bias, 0)
+    def _condition_tokens(self, image_tokens, conditioning_latents, x):
+        image_tokens = image_tokens.to(device=x.device, dtype=x.dtype)
+        if image_tokens.dim() == 4:
+            image_tokens = image_tokens.flatten(1, 2)
+        elif image_tokens.dim() == 2:
+            image_tokens = image_tokens[:, None, :]
+        if image_tokens.dim() != 3:
+            raise ValueError("condition tokens must have shape [B, M, C]")
+        cond = self.y_embedder(image_tokens)
+        if conditioning_latents is None:
+            return cond
 
-    def _latent_residual(self, latent, x):
-        if latent is None:
-            return None
-
-        latent = latent.to(device=x.device, dtype=x.dtype)
+        latent = conditioning_latents.to(device=x.device, dtype=x.dtype)
         if latent.dim() == 4:
             latent = latent.flatten(1, 2)
-        if latent.dim() == 2:
-            latent = latent[:, None]
-
-        latent = self.latent_mlp(latent)
-        if latent.shape[1] == x.shape[1]:
-            return latent
-
-    def unpatchify(self, x):
-        """
-        x: (N, T, patch_size**2 * C)
-        imgs: (N, H, W, C)
-        """
-        c = self.out_channels
-        p = self.x_embedder.patch_size[0]
-        h = w = int(x.shape[1] ** 0.5)
-        assert h * w == x.shape[1]
-
-        x = x.reshape(shape=(x.shape[0], h, w, p, p, c))
-        x = torch.einsum("nhwpqc->nchpwq", x)
-        imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
-        return imgs
+        elif latent.dim() == 2:
+            latent = latent[:, None, :]
+        if latent.dim() != 3:
+            raise ValueError(
+                "conditioning_latents must have shape [B, N, C] (or a "
+                "flattenable 4D equivalent)"
+            )
+        latent = self.latent_cond_embedder(latent)
+        return torch.cat((cond, latent), dim=1)
 
     def forward(self, decout, noised_latents=None, timestep=None, query_points=None, **kwargs):
         """
@@ -271,6 +278,10 @@ class SiT(nn.Module):
         """
         if noised_latents is None:
             noised_latents = query_points
+        if noised_latents is None:
+            raise ValueError("SiT requires noised_latents.")
+        if timestep is None:
+            raise ValueError("SiT requires timestep.")
 
         x = noised_latents
         t = timestep
@@ -284,43 +295,24 @@ class SiT(nn.Module):
         if x.shape[1] != self.pos_embed.shape[1]:
             raise ValueError(f"SiT expected {self.pos_embed.shape[1]} latent tokens, got {x.shape[1]}.")
 
-        x = self.x_embedder(x) + self.pos_embed  # (B, N, D)
-
-        latent = kwargs.get("conditioning_latents", None)
-        latent_residual = self._latent_residual(latent, x)
-        if latent_residual is not None:
-            x = x + latent_residual
+        x = self.x_embedder(x) + self.pos_embed.to(dtype=x.dtype)  # (B, N, D)
 
         t = self.t_embedder(t)  # (B, D)
-        cond = self.y_embedder(y)  # (B, M, D)
-        c = t + cond.mean(dim=1)  # (B, D)
+        cond = self._condition_tokens(
+            y, kwargs.get("conditioning_latents", None), x
+        )
+        # As in DiT, adaLN is driven by the global conditioning vector. Here
+        # that vector is time-only because token conditioning has its own
+        # cross-attention path.
+        c = t
 
         for block in self.blocks:
             x = block(x, c, cond)  # (B, N, D)
-        x = self.final_layer(x, c)  # (N, T, patch_size ** 2 * out_channels)
+        x = self.final_layer(x, c)  # (B, N, out_channels)
 
-        # x = self.unpatchify(x)                   # (N, out_channels, H, W)
         if self.learn_sigma:
             x, _ = x.chunk(2, dim=-1)
         return x
-
-    def forward_with_cfg(self, x, t, y, cfg_scale):
-        """
-        Forward pass of SiT, but also batches the unconSiTional forward pass for classifier-free guidance.
-        """
-        # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
-        half = x[: len(x) // 2]
-        combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, y)
-        # For exact reproducibility reasons, we apply classifier-free guidance on only
-        # three channels by default. The standard approach to cfg applies it to all channels.
-        # This can be done by uncommenting the following line and commenting-out the line following that.
-        # eps, rest = model_out[:, :self.in_channels], model_out[:, self.in_channels:]
-        eps, rest = model_out[:, :3], model_out[:, 3:]
-        cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
-        half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
-        eps = torch.cat([half_eps, half_eps], dim=0)
-        return torch.cat([eps, rest], dim=1)
 
 
 #################################################################################
@@ -389,51 +381,51 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 
 
 def SiT_XL_2(**kwargs):
-    return SiT(depth=28, hidden_size=1152, patch_size=2, num_heads=16, **kwargs)
+    return DiT(depth=28, hidden_size=1152, patch_size=2, num_heads=16, **kwargs)
 
 
 def SiT_XL_4(**kwargs):
-    return SiT(depth=28, hidden_size=1152, patch_size=4, num_heads=16, **kwargs)
+    return DiT(depth=28, hidden_size=1152, patch_size=4, num_heads=16, **kwargs)
 
 
 def SiT_XL_8(**kwargs):
-    return SiT(depth=28, hidden_size=1152, patch_size=8, num_heads=16, **kwargs)
+    return DiT(depth=28, hidden_size=1152, patch_size=8, num_heads=16, **kwargs)
 
 
 def SiT_L_2(**kwargs):
-    return SiT(depth=24, hidden_size=1024, patch_size=2, num_heads=16, **kwargs)
+    return DiT(depth=24, hidden_size=1024, patch_size=2, num_heads=16, **kwargs)
 
 
 def SiT_L_4(**kwargs):
-    return SiT(depth=24, hidden_size=1024, patch_size=4, num_heads=16, **kwargs)
+    return DiT(depth=24, hidden_size=1024, patch_size=4, num_heads=16, **kwargs)
 
 
 def SiT_L_8(**kwargs):
-    return SiT(depth=24, hidden_size=1024, patch_size=8, num_heads=16, **kwargs)
+    return DiT(depth=24, hidden_size=1024, patch_size=8, num_heads=16, **kwargs)
 
 
 def SiT_B_2(**kwargs):
-    return SiT(depth=12, hidden_size=768, patch_size=2, num_heads=12, **kwargs)
+    return DiT(depth=12, hidden_size=768, patch_size=2, num_heads=12, **kwargs)
 
 
 def SiT_B_4(**kwargs):
-    return SiT(depth=12, hidden_size=768, patch_size=4, num_heads=12, **kwargs)
+    return DiT(depth=12, hidden_size=768, patch_size=4, num_heads=12, **kwargs)
 
 
 def SiT_B_8(**kwargs):
-    return SiT(depth=12, hidden_size=768, patch_size=8, num_heads=12, **kwargs)
+    return DiT(depth=12, hidden_size=768, patch_size=8, num_heads=12, **kwargs)
 
 
 def SiT_S_2(**kwargs):
-    return SiT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
+    return DiT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
 
 
 def SiT_S_4(**kwargs):
-    return SiT(depth=12, hidden_size=384, patch_size=4, num_heads=6, **kwargs)
+    return DiT(depth=12, hidden_size=384, patch_size=4, num_heads=6, **kwargs)
 
 
 def SiT_S_8(**kwargs):
-    return SiT(depth=12, hidden_size=384, patch_size=8, num_heads=6, **kwargs)
+    return DiT(depth=12, hidden_size=384, patch_size=8, num_heads=6, **kwargs)
 
 
 SiT_models = {

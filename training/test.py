@@ -9,42 +9,32 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
 import argparse
-from omegaconf import OmegaConf
 import torch
 from training.nova3r.lightning_module import Nova3RLightningModule
 from training.mesh2sdf.lightning_module import Mesh2SDFLightningModule
 from lightning_data import Nova3RDataModule
 from demo_nova3r import load_model
 
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
-    parser.add_argument("--ckpt", default="checkpoints/da3_base/last_noise_fix.ckpt", help="Path to model checkpoint")
+    parser.add_argument("--config", default="checkpoints/hunyuan/.hydra/config.yaml", help="Model and evaluation config")
     parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
-    parser.add_argument("--aggregator_ckpt", default="./checkpoints/da3_giant/model.safetensors", help="Aggregator type (default: DepthAnything3Net)")
     args = parser.parse_args()
 
     return args
 
 
-def load_data_config(ckpt_path):
-    config_dir = os.path.join(os.path.dirname(ckpt_path), ".hydra")
-    if os.path.exists(os.path.join(config_dir, "config.yaml")):
-        cfg = OmegaConf.load(os.path.join(config_dir, "config.yaml"))
-        return cfg.data
-    else:
-        raise FileNotFoundError(f"No .hydra/config.yaml found at {config_dir}. " f"Please ensure the checkpoint directory contains the Hydra config.")
-
-
 def main():
 
-    torch.set_float32_matmul_precision('medium')
+    torch.set_float32_matmul_precision("medium")
     args = parse_args()
     pl.seed_everything(42, workers=True)
 
-    model, cfg = load_model(args.ckpt, args.device, aggregator_ckpt=args.aggregator_ckpt, stage="test")
-    data_cfg = load_data_config(args.ckpt)
-    cfg.data = data_cfg
+    model, cfg = load_model(device=args.device, config_path=args.config, stage="test")
+    data_cfg = cfg.data
 
     datamodule = Nova3RDataModule(
         data_cfg,

@@ -1,6 +1,12 @@
 ## load image
 podman load -i ~/projects/demo/nova3r_image.tar
 
+## run demo with 6 views
+python demo_nova3r.py --images /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0000.jpg /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0001.jpg /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0002.jpg /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0003.jpg /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0004.jpg /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0005.jpg --ckpt checkpoints/scene_n2/checkpoint-last.pth --num_queries 200000
+
+## run scannet demo 
+python demo_nova3r.py --images datasets/scannet/116456116b/0_cube_95/0000.jpg datasets/scannet/116456116b/0_cube_95/0001.jpg datasets/scannet/116456116b/0_cube_95/0002.jpg datasets/scannet/116456116b/0_cube_95/0003.jpg datasets/scannet/116456116b/0_cube_95/0004.jpg datasets/scannet/116456116b/0_cube_95/0005.jpg --ckpt checkpoints/first_train/last.ckpt --num_queries 1000000
+
 ## open image
 
 podman run \
@@ -33,20 +39,23 @@ podman save -o ~/projects/demo/nova3r.tar demo:v1
 bash bulk_mount_mount_zip.sh /mnt/home/vyhong/projects/nova3r/datasets/ReplicaPano /tmp/datasets/replica_pano -o notrim
 
 ## mount 3dfront
-bash bulk_mount.sh /mnt/datasets/3dfront/3D-FRONT-TEST-SCENE.zip  /tmp/datasets/3dfront
-bash bulk_mount.sh /mnt/datasets/3dfront/3D-FRONT-SCENE.zip  /tmp/datasets/3dfront
+bash bulk_mount_mount_zip.sh /mnt/datasets/3dfront/3D-FRONT-TEST-SCENE.zip  /tmp/datasets/3dfront
+bash bulk_mount_mount_zip.sh /mnt/datasets/3dfront/3D-FRONT-SCENE.zip  /tmp/datasets/3dfront
 
 bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/3dfront/3D-FRONT-TEST-SCENE-UDF.zip /tmp/datasets/3dfront
+bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/3dfront/3D-FRONT-SCENE-UDF.zip /tmp/datasets/3dfront
 
 ## mount scannetpp
+bash bulk_mount_mount_zip.sh /mnt/datasets/scannetpp/scannetpp_scans.zip  /tmp/datasets/scannetpp
 
-bash bulk_mount.sh /mnt/projects/theses/vyhong/scannetpp/cubemap_data.zip  /tmp/datasets/scannetpp
+bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/scannetpp/cubemap_data.zip  /tmp/datasets/scannetpp
 
-## run demo with 6 views
-python demo_nova3r.py --images /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0000.jpg /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0001.jpg /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0002.jpg /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0003.jpg /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0004.jpg /tmp/datasets/replica_pano/office_0_000/office_0_000/Scene_Info/00000/rgb_cube_95/0005.jpg --ckpt checkpoints/scene_n2/checkpoint-last.pth --num_queries 200000
+## mount sage-10k
+bash bulk_mount_mount_zip.sh /mnt/datasets/sage10k/scenes.zip  /tmp/datasets/sage-10k
+bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/sage-10k/panorama-scenes.zip  /tmp/datasets/sage-10k
 
-## run scannet demo 
-python demo_nova3r.py --images datasets/scannet/116456116b/0_cube_95/0000.jpg datasets/scannet/116456116b/0_cube_95/0001.jpg datasets/scannet/116456116b/0_cube_95/0002.jpg datasets/scannet/116456116b/0_cube_95/0003.jpg datasets/scannet/116456116b/0_cube_95/0004.jpg datasets/scannet/116456116b/0_cube_95/0005.jpg --ckpt checkpoints/first_train/last.ckpt --num_queries 1000000
+bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/sage-10k/udf.zip  /tmp/datasets/sage-10k
+bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/sage-10k/cubemap_data.zip /tmp/datasets/sage-10k -o notrim
 
 ## Python Path
 export PYTHONPATH=$PYTHONPATH:/absolute/path/to/nova3r
@@ -65,3 +74,6 @@ cp /tmp/datasets/replica_pano/large_apartment_0_001/large_apartment_0_001/large_
 
 # Point cloud autoencoding from a SCRREAM scene
 python demo_nova3r_ae.py   --input_ply  nova3r/debug_points/room_2_aligned.ply --ckpt checkpoints/scene_ae/checkpoint-last.pth  --num_queries 50000
+
+## install codex
+curl -fsSL https://chatgpt.com/codex/install.sh | sh

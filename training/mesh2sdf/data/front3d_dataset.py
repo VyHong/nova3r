@@ -7,10 +7,11 @@ import numpy as np
 import torch
 from torch.utils.data._utils.collate import default_collate
 
-from training.nova3r.data.base_dataset import BaseDataset
+from training.mesh2sdf.data.sdf_dataset_mixin import SDFDatasetMixin
+from nova3r.utils.batch_debug import save_batch_debug
 
 
-class Front3DSDFDataset(BaseDataset):
+class Front3DSDFDataset(SDFDatasetMixin):
     """Load precomputed 3D-FRONT surface and signed-distance samples."""
 
     def __init__(
@@ -84,49 +85,6 @@ class Front3DSDFDataset(BaseDataset):
             surface[:, 3:6] = (rotation @ surface[:, 3:6].T).T
         geo_points[:, :3] = (rotation @ geo_points[:, :3].T).T
 
-    @staticmethod
-    def save_debug_surface(
-        surface, output_dir="/mnt/home/vyhong/projects/nova3r/debug_points", filename="surface.ply"
-    ):
-        """Save surface points, normals, and labels to an ASCII PLY file."""
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        if isinstance(surface, torch.Tensor):
-            surface = surface.detach().cpu().numpy()
-        else:
-            surface = np.asarray(surface)
-
-        if surface.ndim != 2 or surface.shape[1] < 3:
-            raise ValueError(f"Expected surface shape (N, >=3), got {surface.shape}")
-
-        has_normals = surface.shape[1] >= 6
-        has_labels = surface.shape[1] >= 7
-        properties = ["property float x", "property float y", "property float z"]
-        if has_normals:
-            properties.extend(
-                ["property float nx", "property float ny", "property float nz"]
-            )
-        if has_labels:
-            properties.append("property uchar sharp")
-
-        output_path = output_dir / filename
-        with output_path.open("w") as file:
-            file.write(
-                "ply\n"
-                "format ascii 1.0\n"
-                f"element vertex {surface.shape[0]}\n"
-                + "\n".join(properties)
-                + "\nend_header\n"
-            )
-            for point in surface:
-                values = [f"{value:.6f}" for value in point[: 6 if has_normals else 3]]
-                if has_labels:
-                    values.append(str(int(point[6])))
-                file.write(" ".join(values) + "\n")
-
-        return output_path
-
     def __len__(self):
         return len(self.samples_list)
 
@@ -151,112 +109,12 @@ class Front3DSDFDataset(BaseDataset):
                 "geo_points": Path(f"{output_prefix}_{self.distance_suffix}.npz"),
             }
 
-    def load_surface_points(self, rng, random_surface, sharpedge_surface):
-        surface_normal = []
-        if self.pc_size > 0:
-            indices = rng.choice(
-                random_surface.shape[0], self.pc_size, replace=False
-            )
-            sampled_surface = random_surface[indices]
-            if self.sharpedge_label:
-                labels = np.zeros((self.pc_size, 1))
-                sampled_surface = np.concatenate(
-                    (sampled_surface, labels), axis=1
-                )
-            surface_normal.append(sampled_surface)
-
-        if self.pc_sharpedge_size > 0:
-            indices = rng.choice(
-                sharpedge_surface.shape[0],
-                self.pc_sharpedge_size,
-                replace=False,
-            )
-            sampled_sharpedge = sharpedge_surface[indices]
-            if self.sharpedge_label:
-                labels = np.ones((self.pc_sharpedge_size, 1))
-                sampled_sharpedge = np.concatenate(
-                    (sampled_sharpedge, labels), axis=1
-                )
-            surface_normal.append(sampled_sharpedge)
-
-        if not surface_normal:
-            raise ValueError("At least one surface sample count must be positive.")
-
-        surface_normal = torch.from_numpy(
-            np.concatenate(surface_normal, axis=0)
-        ).float()
-        surface = surface_normal[:, :3]
-        normal = torch.nn.functional.normalize(
-            surface_normal[:, 3:6], p=2, dim=1
-        )
-
-        if self.return_normal:
-            surface = torch.cat((surface, normal), dim=-1)
-        if self.sharpedge_label:
-            surface = torch.cat((surface, surface_normal[:, -1:]), dim=-1)
-        return surface
-
-    def load_sdf_points(
-        self,
-        rng,
-        vol_points,
-        vol_label,
-        near_points,
-        near_label,
-        sharpedge_points,
-        sharpedge_label,
-    ):
-        sdf_points = []
-        if self.sdf_size > 0:
-            indices = rng.choice(vol_points.shape[0], self.sdf_size, replace=False)
-            samples = np.concatenate(
-                (vol_points[indices], vol_label[indices, None]), axis=1
-            )
-            if self.sdf_label:
-                samples = np.concatenate(
-                    (samples, np.zeros((self.sdf_size, 1))), axis=1
-                )
-            sdf_points.append(samples)
-
-        if self.sdf_near_size > 0:
-            indices = rng.choice(
-                near_points.shape[0], self.sdf_near_size, replace=False
-            )
-            samples = np.concatenate(
-                (near_points[indices], near_label[indices, None]), axis=1
-            )
-            if self.sdf_label:
-                samples = np.concatenate(
-                    (samples, np.ones((self.sdf_near_size, 1))), axis=1
-                )
-            sdf_points.append(samples)
-
-        if self.sdf_sharpedge_size > 0:
-            indices = rng.choice(
-                sharpedge_points.shape[0],
-                self.sdf_sharpedge_size,
-                replace=False,
-            )
-            samples = np.concatenate(
-                (
-                    sharpedge_points[indices],
-                    sharpedge_label[indices, None],
-                ),
-                axis=1,
-            )
-            if self.sdf_label:
-                labels = np.full((self.sdf_sharpedge_size, 1), 2)
-                samples = np.concatenate((samples, labels), axis=1)
-            sdf_points.append(samples)
-
-        if not sdf_points:
-            raise ValueError("At least one SDF sample count must be positive.")
-
-        return torch.from_numpy(np.concatenate(sdf_points, axis=0)).float()
-
     def get_data(self, seq_name):
         metadata = self.data_store[seq_name]
-        rng = np.random.default_rng()
+        if self.split == "train":
+            rng = np.random.default_rng()
+        else:
+            rng = self.deterministic_rng(type(self).__name__, self.split, seq_name)
 
         with np.load(metadata["surface"], allow_pickle=True) as surface_data:
             surface = self.load_surface_points(
@@ -288,7 +146,7 @@ class Front3DSDFDataset(BaseDataset):
         if self.augment_translation:
             self._augment_with_translation(rng, surface, geo_points)
 
-        #self.save_debug_surface(surface, filename=f"debug_surface.ply")
+        # save_batch_debug({"surface": surface}, "debug_points/front3d", batched=False)
         frame_count = 6
         images = [
             torch.zeros((3, self.img_size, self.img_size), dtype=torch.float32)

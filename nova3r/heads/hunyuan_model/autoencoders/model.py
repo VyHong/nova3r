@@ -204,7 +204,7 @@ class ShapeVAE(VectsetVAE):
         label_type: str = "binary",
         drop_path_rate: float = 0.0,
         scale_factor: float = 1.0,
-        sdf_label_scale: float = 64.0,
+        sdf_label_scale: float = 128.0,
         use_ln_post: bool = True,
         ckpt_path=None,
         cfg=None,
@@ -338,7 +338,7 @@ class ShapeVAE(VectsetVAE):
 
         return predictions
 
-    def lightning_forward(self, batch, criterion, kl_weight=0.0, recon_latents=None):
+    def lightning_forward(self, batch, criterion, kl_weight=0.0, recon_latents=None, **kwargs):
         surface = batch["surface"]
         # np.save("debug_points/surface_sample.npy", surface.cpu().numpy())
         # save_surface_to_ply(surface[0].cpu(), f"debug_points/surface_sample.ply")

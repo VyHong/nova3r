@@ -12,6 +12,7 @@ UDF_PROCESSING_SCRIPT = Path(__file__).with_name("udf_sample.py").resolve()
 DEFAULT_DATA_ROOT = Path("/tmp/datasets/scannetpp/scannetpp_scans/data")
 DEFAULT_OUTPUT_ROOT = Path("/mnt/projects/theses/vyhong/scannetpp/udf")
 MESH_NAME = "mesh_aligned_0.05.ply"
+MASK_NAME = "mesh_aligned_0.05_mask.txt"
 
 
 def find_meshes(data_root):
@@ -23,7 +24,7 @@ def output_prefix_for(mesh_path, data_root, output_root):
     return (output_root / relative_path).with_suffix("")
 
 
-def process_mesh(mesh_path, output_prefix, overwrite, normalize_mode):
+def process_mesh(mesh_path, mask_path, output_prefix, overwrite):
     expected_surface = Path(f"{output_prefix}_surface.npz")
     expected_udf = Path(f"{output_prefix}_udf.npz")
 
@@ -38,9 +39,11 @@ def process_mesh(mesh_path, output_prefix, overwrite, normalize_mode):
         str(mesh_path),
         "--output_prefix",
         str(output_prefix),
-        "--normalize_mode",
-        normalize_mode,
     ]
+    if mask_path.is_file():
+        command.extend(["--exclude_vertex_indices", str(mask_path)])
+    else:
+        tqdm.write(f"[Warning] No anonymization mask found for {mesh_path}: expected {mask_path}")
 
     try:
         with tempfile.TemporaryDirectory(prefix=f".{output_prefix.name}_", dir=output_prefix.parent) as work_dir:
@@ -54,7 +57,7 @@ def process_mesh(mesh_path, output_prefix, overwrite, normalize_mode):
         return "failed"
 
 
-def main(data_root, output_root, workers, overwrite, dry_run, limit, normalize_mode):
+def main(data_root, output_root, workers, overwrite, dry_run, limit):
     data_root = data_root.resolve()
     output_root = output_root.resolve()
 
@@ -73,22 +76,25 @@ def main(data_root, output_root, workers, overwrite, dry_run, limit, normalize_m
     if not mesh_paths:
         return
 
-    jobs = [(mesh_path, output_prefix_for(mesh_path, data_root, output_root)) for mesh_path in mesh_paths]
+    jobs = [
+        (mesh_path, mesh_path.with_name(MASK_NAME), output_prefix_for(mesh_path, data_root, output_root))
+        for mesh_path in mesh_paths
+    ]
 
     if dry_run:
-        for mesh_path, output_prefix in jobs:
-            print(f"{mesh_path} -> {output_prefix}_{{surface,udf}}.npz")
+        for mesh_path, mask_path, output_prefix in jobs:
+            mask_status = str(mask_path) if mask_path.is_file() else f"missing: {mask_path}"
+            print(f"{mesh_path} [{mask_status}] -> {output_prefix}_{{surface,udf}}.npz")
         return
 
     output_root.mkdir(parents=True, exist_ok=True)
     counts = {"processed": 0, "skipped": 0, "failed": 0}
 
     print(f"Processing with {workers} concurrent worker(s)...")
-    print(f"normalize_mode={normalize_mode}")
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(process_mesh, mesh_path, output_prefix, overwrite, normalize_mode): mesh_path
-            for mesh_path, output_prefix in jobs
+            executor.submit(process_mesh, mesh_path, mask_path, output_prefix, overwrite): mesh_path
+            for mesh_path, mask_path, output_prefix in jobs
         }
         progress = tqdm(
             as_completed(futures),
@@ -152,13 +158,6 @@ if __name__ == "__main__":
         default=None,
         help="Process only the first N meshes, useful for a small test run.",
     )
-    parser.add_argument(
-        "--normalize_mode",
-        type=str,
-        default="none",
-        help="Passed to udf_sample.py. Default keeps ScanNet++ points in aligned scan coordinates.",
-    )
-
     args = parser.parse_args()
     main(
         data_root=args.data_root,
@@ -167,5 +166,4 @@ if __name__ == "__main__":
         overwrite=args.overwrite,
         dry_run=args.dry_run,
         limit=args.limit,
-        normalize_mode=args.normalize_mode,
     )

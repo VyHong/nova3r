@@ -29,11 +29,13 @@ def pad_to_2to1(img, mode="constant", return_mask=False):
     pad_top = 0
     pad_bottom = pad_total
 
+    pad_width = ((pad_top, pad_bottom), (0, 0)) + ((0, 0),) * (img.ndim - 2)
+
     if mode == "edge":
-        padded = np.pad(img, ((pad_top, pad_bottom), (0, 0), (0, 0)), mode="edge")
+        padded = np.pad(img, pad_width, mode="edge")
 
     elif mode == "constant":
-        padded = np.pad(img, ((pad_top, pad_bottom), (0, 0), (0, 0)), mode="constant", constant_values=0)
+        padded = np.pad(img, pad_width, mode="constant", constant_values=0)
 
     elif mode == "blur":
         # create blurred top/bottom bands

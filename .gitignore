@@ -11,3 +11,6 @@ archive_experiments
 3D-Front
 3D-FRONT-TEST-SCENE
 archive
+.conda-envs
+sage10k-panorama-logs
+open3d*

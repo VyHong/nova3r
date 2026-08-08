@@ -65,40 +65,6 @@ def sharp_sample_pointcloud(mesh, num=16384):
     return samples, normals
 
 
-def normalize_to_centroid_sphere(V):
-    centroid = V.mean(axis=0)
-    V_centered = V - centroid
-
-    distances = np.linalg.norm(V_centered, axis=1)
-    max_radius = distances.max()
-
-    scale = max_radius * 1.01
-    V_normalized = V_centered / scale
-
-    return V_normalized, scale, centroid
-
-
-def normalize_to_median(V, mode="median"):
-    if mode == "median":
-        target_median = 1.0
-    else:
-        target_median = float(mode.split("_")[-1])
-    if target_median == 0.0:
-        raise ValueError("Median normalization target must be non-zero.")
-
-    distances = np.linalg.norm(V, axis=1)
-    norm_factor = np.median(distances) if distances.size > 0 else 1.0
-    norm_factor = np.clip(norm_factor, 0.01, 100.0)
-
-    V_normalized = V / norm_factor * target_median
-    V_normalized = np.clip(V_normalized, -1000.0, 1000.0)
-
-    scale = norm_factor / target_median
-    centroid = np.zeros(3, dtype=V.dtype)
-
-    return V_normalized, scale, centroid
-
-
 def mesh_radius_scale(V):
     centroid = V.mean(axis=0)
     centered = V - centroid
@@ -106,27 +72,6 @@ def mesh_radius_scale(V):
     if distances.size == 0:
         return 1.0
     return max(float(distances.max()) * 1.01, 1e-6)
-
-
-def skip_normalization(V):
-    scale = 1.0
-    centroid = np.zeros(3, dtype=V.dtype)
-    sampling_scale = mesh_radius_scale(V)
-    return V, scale, centroid, sampling_scale
-
-
-def normalize_vertices(V, mode="centroid_sphere"):
-    if mode in ("none", "raw", "skip"):
-        return skip_normalization(V)
-    if mode in ("centroid_sphere", "sphere"):
-        V_normalized, scale, centroid = normalize_to_centroid_sphere(V)
-        return V_normalized, scale, centroid, 1.0
-    if mode.startswith("median"):
-        V_normalized, scale, centroid = normalize_to_median(V, mode=mode)
-        return V_normalized, scale, centroid, 1.0
-
-    raise ValueError(f"Unknown normalize mode: {mode}")
-
 
 def load_vertices_and_faces(input_file):
     input_path = Path(input_file)
@@ -150,6 +95,44 @@ def load_vertices_and_faces(input_file):
         F = np.asarray(F, dtype=np.int64)
 
     return V, F
+
+
+def load_excluded_vertex_indices(mask_file, num_vertices):
+    mask_path = Path(mask_file)
+    try:
+        indices = np.loadtxt(mask_path, dtype=np.int64, ndmin=1)
+    except ValueError as error:
+        raise ValueError(f"Could not parse vertex indices from {mask_path}: {error}") from error
+
+    indices = np.asarray(indices, dtype=np.int64).reshape(-1)
+    if indices.size == 0:
+        return indices
+
+    invalid = indices[(indices < 0) | (indices >= num_vertices)]
+    if invalid.size:
+        preview = ", ".join(str(index) for index in invalid[:10])
+        raise ValueError(
+            f"Vertex mask {mask_path} contains {invalid.size} out-of-range indices "
+            f"for a mesh with {num_vertices} vertices (first: {preview})."
+        )
+    return np.unique(indices)
+
+
+def remove_vertices_and_incident_faces(V, F, excluded_indices):
+    excluded_indices = np.asarray(excluded_indices, dtype=np.int64).reshape(-1)
+    if excluded_indices.size == 0:
+        return V, F
+
+    excluded = np.zeros(len(V), dtype=bool)
+    excluded[excluded_indices] = True
+    kept_faces = F[~excluded[F].any(axis=1)]
+    if kept_faces.size == 0:
+        raise ValueError("Removing masked vertices would leave the mesh with no faces.")
+
+    used_vertices = np.unique(kept_faces)
+    old_to_new = np.full(len(V), -1, dtype=np.int64)
+    old_to_new[used_vertices] = np.arange(len(used_vertices))
+    return V[used_vertices], old_to_new[kept_faces]
 
 
 def padded_mesh_bounds(mesh, padding_ratio=0.2, min_padding=0.1, sampling_scale=1.0):
@@ -262,8 +245,9 @@ def sample_udf(mesh, random_surface, sharp_surface, sampling_scale=1.0):
     return data
 
 
-def sample_mesh_udf(V, F, scale, centroid, sampling_scale=1.0):
+def sample_mesh_udf(V, F):
     mesh = trimesh.Trimesh(vertices=V, faces=F, process=False)
+    sampling_scale = mesh_radius_scale(V)
 
     print(f"Watertight: {mesh.is_watertight}")
     print(f"Bounds min: {mesh.vertices.min(axis=0)}")
@@ -281,17 +265,11 @@ def sample_mesh_udf(V, F, scale, centroid, sampling_scale=1.0):
     surface_data = {
         "random_surface": np.concatenate((random_surface, random_normal), axis=1).astype(np.float16),
         "sharp_surface": np.concatenate((sharp_surface, sharp_normal), axis=1).astype(np.float16),
-        "scale": np.float16(scale),
-        "centroid": centroid.astype(np.float16),
         "bounds": np.concatenate((volume_bounds[0], volume_bounds[1])).astype(np.float32),
         "sampling_scale": np.float32(sampling_scale),
     }
 
     udf_data = sample_udf(mesh, random_surface, sharp_surface, sampling_scale=sampling_scale)
-
-    udf_data["scale"] = np.float16(scale)
-    udf_data["centroid"] = centroid.astype(np.float16)
-    udf_data["sampling_scale"] = np.float32(sampling_scale)
 
     return surface_data, udf_data
 
@@ -313,28 +291,28 @@ if __name__ == "__main__":
         help="Base path for output file, e.g. output/room_001.",
     )
     parser.add_argument(
-        "--normalize_mode",
-        type=str,
-        default="none",
-        help="Normalization mode: none, centroid_sphere, sphere, median, or median_<target>.",
-    )
-    parser.add_argument(
-        "--save_normalized_obj",
-        action="store_true",
-        help="Optionally save a debug OBJ of the normalized mesh.",
+        "--exclude_vertex_indices",
+        type=Path,
+        default=None,
+        help="Text file containing mesh vertex indices to remove, one or more per line.",
     )
 
     args = parser.parse_args()
 
     V, F = load_vertices_and_faces(args.input_obj)
 
-    V, scale, centroid, sampling_scale = normalize_vertices(V, mode=args.normalize_mode)
+    if args.exclude_vertex_indices is not None:
+        original_vertex_count = len(V)
+        original_face_count = len(F)
+        excluded_indices = load_excluded_vertex_indices(args.exclude_vertex_indices, original_vertex_count)
+        V, F = remove_vertices_and_incident_faces(V, F, excluded_indices)
+        print(
+            f"Excluded {len(excluded_indices)} masked vertices; mesh reduced from "
+            f"{original_vertex_count} vertices/{original_face_count} faces to "
+            f"{len(V)} vertices/{len(F)} faces."
+        )
 
-    print(f"Normalize mode: {args.normalize_mode}")
-    print(f"Scale: {scale}")
-    print(f"Centroid: {centroid}")
-
-    surface_data, udf_data = sample_mesh_udf(V, F, scale, centroid, sampling_scale=sampling_scale)
+    surface_data, udf_data = sample_mesh_udf(V, F)
 
     parent_folder = os.path.dirname(args.output_prefix)
     if parent_folder:
@@ -348,6 +326,3 @@ if __name__ == "__main__":
 
     print(f"Saved surface samples to: {export_surface}")
     print(f"Saved UDF samples to: {export_udf}")
-
-    if args.save_normalized_obj:
-        igl.writeOBJ(f"{args.output_prefix}_normalized.obj", V, F)

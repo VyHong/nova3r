@@ -70,30 +70,81 @@ def load_pointcloud_npz(input_file):
     return points, normals
 
 
+def load_pointcloud(input_file, normal_k=30, normal_orientation="camera"):
+    """Load XYZ data and estimate normals when the input does not provide them."""
+    suffix = os.path.splitext(input_file)[1].lower()
+    if suffix == ".npz":
+        try:
+            return load_pointcloud_npz(input_file)
+        except ValueError as exc:
+            if "normals" not in str(exc).lower():
+                raise
+            data = np.load(input_file, allow_pickle=True)
+            for key in ["points", "pointcloud", "pts", "xyz", "vertices", "coords", "surface"]:
+                if key in data:
+                    points = np.asarray(data[key], dtype=np.float64)[:, :3]
+                    break
+            else:
+                raise
+    elif suffix in {".glb", ".gltf"}:
+        import trimesh
+
+        loaded = trimesh.load(input_file, process=False)
+        geometries = loaded.geometry.values() if isinstance(loaded, trimesh.Scene) else [loaded]
+        vertices = [np.asarray(geometry.vertices, dtype=np.float64) for geometry in geometries]
+        vertices = [array for array in vertices if len(array)]
+        if not vertices:
+            raise ValueError(f"No point geometry found in {input_file}")
+        points = np.concatenate(vertices, axis=0)
+    else:
+        import open3d as o3d
+
+        cloud = o3d.io.read_point_cloud(input_file)
+        points = np.asarray(cloud.points, dtype=np.float64)
+        if cloud.has_normals():
+            return points, np.asarray(cloud.normals, dtype=np.float64)
+
+    if len(points) < 3:
+        raise ValueError(f"Need at least three points to estimate normals, got {len(points)}")
+
+    import open3d as o3d
+
+    cloud = o3d.geometry.PointCloud()
+    cloud.points = o3d.utility.Vector3dVector(points)
+    cloud.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamKNN(knn=min(normal_k, len(points)))
+    )
+    if normal_orientation == "camera":
+        cloud.orient_normals_towards_camera_location(np.zeros(3))
+    elif normal_orientation == "consistent":
+        cloud.orient_normals_consistent_tangent_plane(min(normal_k, len(points) - 1))
+    normals = np.asarray(cloud.normals, dtype=np.float64)
+    return points, normals
+
+
 def normalize_normals(normals):
     length = np.linalg.norm(normals, axis=1, keepdims=True)
     return np.divide(normals, length, out=np.zeros_like(normals), where=length > 0)
 
 
-def sample_pointcloud(points, normals, num):
-    rng = np.random.default_rng()
+def sample_pointcloud(points, normals, num, rng):
     replace = len(points) < num
     index = rng.choice(len(points), num, replace=replace)
     return points[index], normals[index]
 
 
-def sharp_sample_pointcloud(points, normals, num=16384, k=16, threshold=0.985):
+def sharp_sample_pointcloud(points, normals, rng, num=16384, k=16, threshold=0.985):
     normals = normalize_normals(normals)
     valid_normal = np.linalg.norm(normals, axis=1) > 0
 
     if not np.any(valid_normal):
         print("Warning: no valid normals found. Falling back to random surface samples.")
-        return sample_pointcloud(points, normals, num)
+        return sample_pointcloud(points, normals, num, rng)
 
     query_k = min(k + 1, len(points))
     if query_k < 2:
         print("Warning: not enough points for sharp sampling. Falling back to random surface samples.")
-        return sample_pointcloud(points, normals, num)
+        return sample_pointcloud(points, normals, num, rng)
 
     tree = cKDTree(points)
     try:
@@ -115,7 +166,7 @@ def sharp_sample_pointcloud(points, normals, num=16384, k=16, threshold=0.985):
     sharp_idx = np.flatnonzero(sharp_mask)
     if len(sharp_idx) == 0:
         print("Warning: no sharp points found. Falling back to random surface samples.")
-        return sample_pointcloud(points, normals, num)
+        return sample_pointcloud(points, normals, num, rng)
 
     weights = 1.0 - VN2[sharp_idx]
     weights = np.maximum(weights, 0.0)
@@ -126,24 +177,39 @@ def sharp_sample_pointcloud(points, normals, num=16384, k=16, threshold=0.985):
         weights = None
 
     replace = len(sharp_idx) < num
-    sampled_idx = np.random.choice(sharp_idx, num, replace=replace, p=weights)
+    sampled_idx = rng.choice(sharp_idx, num, replace=replace, p=weights)
 
     return points[sampled_idx], normals[sampled_idx]
 
 
-def sample_surface(points, normals, scale, centroid, sample_num, sharp_k, sharp_threshold):
-    random_surface, random_normal = sample_pointcloud(points, normals, sample_num)
+def sample_surface(points, normals, scale, centroid, sample_num, sharp_k, sharp_threshold, rng):
+    random_surface, random_normal = sample_pointcloud(points, normals, sample_num, rng)
     sharp_surface, sharp_normal = sharp_sample_pointcloud(
         points,
         normals,
+        rng,
         num=sample_num,
         k=sharp_k,
         threshold=sharp_threshold,
     )
 
+    random_surface = np.concatenate(
+        (random_surface, normalize_normals(random_normal)), axis=1
+    ).astype(np.float16)
+    sharp_surface = np.concatenate(
+        (sharp_surface, normalize_normals(sharp_normal)), axis=1
+    ).astype(np.float16)
+    surface = np.concatenate(
+        (
+            np.concatenate((random_surface, np.zeros((sample_num, 1), dtype=np.float16)), axis=1),
+            np.concatenate((sharp_surface, np.ones((sample_num, 1), dtype=np.float16)), axis=1),
+        ),
+        axis=0,
+    )
     surface_data = {
-        "random_surface": np.concatenate((random_surface, normalize_normals(random_normal)), axis=1).astype(np.float16),
-        "sharp_surface": np.concatenate((sharp_surface, normalize_normals(sharp_normal)), axis=1).astype(np.float16),
+        "random_surface": random_surface,
+        "sharp_surface": sharp_surface,
+        "surface": surface,
         "scale": np.float16(scale),
         "centroid": centroid.astype(np.float16),
     }
@@ -153,14 +219,14 @@ def sample_surface(points, normals, scale, centroid, sample_num, sharp_k, sharp_
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Sample random and sharp surface point clouds from an NPZ pointcloud."
+        description="Estimate normals and sample VAE-ready random/sharp surface points."
     )
 
     parser.add_argument(
         "--input_obj",
         type=str,
         required=True,
-        help="Path to an NPZ pointcloud with xyz+normals in one array, or xyz plus a separate normals array.",
+        help="Path to an NPZ, PLY, PCD, XYZ, GLB, or glTF point cloud. Normals are estimated when absent.",
     )
 
     parser.add_argument(
@@ -174,7 +240,17 @@ if __name__ == "__main__":
         "--sample_num",
         type=int,
         default=(1048576 * 2) // 4,
-        help="Number of random and sharp-edge surface samples to store.",
+        help="Number of random and sharp-edge surface samples to store (default: 524288, matching udf_sample.py).",
+    )
+
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--normal_k", type=int, default=30,
+        help="KNN neighborhood size for normal estimation (default: 30).",
+    )
+    parser.add_argument(
+        "--normal_orientation", choices=["camera", "consistent", "none"], default="camera",
+        help="Orient estimated normals toward origin, consistently, or not at all.",
     )
 
     parser.add_argument(
@@ -193,7 +269,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    points, normals = load_pointcloud_npz(args.input_obj)
+    points, normals = load_pointcloud(
+        args.input_obj, args.normal_k, args.normal_orientation
+    )
 
     # Important: no bounding box is added here.
     points, scale, centroid = normalize_to_centroid_sphere(points)
@@ -210,6 +288,7 @@ if __name__ == "__main__":
         args.sample_num,
         args.sharp_k,
         args.sharp_threshold,
+        np.random.default_rng(args.seed),
     )
 
     parent_folder = os.path.dirname(args.output_prefix)
