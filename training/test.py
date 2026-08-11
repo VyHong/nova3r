@@ -20,7 +20,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 def parse_args():
     parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
-    parser.add_argument("--config", default="checkpoints/hunyuan/.hydra/config.yaml", help="Model and evaluation config")
+    parser.add_argument("--config", default="checkpoints/hunyuan_mini/.hydra/config.yaml", help="Model and evaluation config")
     parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
     args = parser.parse_args()
 

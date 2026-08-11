@@ -14,16 +14,99 @@ import torch
 import argparse
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.profilers import SimpleProfiler
 import pytorch_lightning as pl
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 
+class BenchmarkProfiler(SimpleProfiler):
+    """Collect timings without printing Lightning's full profiler table."""
+
+    def describe(self):
+        pass
+
+
+class BenchmarkReporter(pl.Callback):
+    """Print a compact timing summary every few optimizer steps."""
+
+    def __init__(self, every_n_steps: int = 10):
+        self.every_n_steps = every_n_steps
+        self._last_reported_step = 0
+        self._seen_durations = {}
+
+    def _new_durations(self, profiler, predicate):
+        values = []
+        for action, durations in profiler.recorded_durations.items():
+            if not predicate(action):
+                continue
+            start = self._seen_durations.get(action, 0)
+            values.extend(durations[start:])
+            self._seen_durations[action] = len(durations)
+        return values
+
+    @staticmethod
+    def _mean(values):
+        return sum(values) / len(values) if values else 0.0
+
+    @staticmethod
+    def _print_timing(name, duration, total):
+        percentage = 100 * duration / total if total else 0.0
+        print(f"  {name:<20} {duration * 1000:>8.1f} ms  ({percentage:>5.1f}%)")
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        step = trainer.global_step
+        if trainer.is_global_zero and step > 0 and step % self.every_n_steps == 0 and step != self._last_reported_step:
+            profiler = trainer.profiler
+            dataloader = self._mean(
+                self._new_durations(
+                    profiler,
+                    lambda name: name.endswith(".train_dataloader_next"),
+                )
+            )
+            training_step = self._mean(
+                self._new_durations(
+                    profiler,
+                    lambda name: name.endswith(".training_step"),
+                )
+            )
+            backward = self._mean(
+                self._new_durations(
+                    profiler,
+                    lambda name: name.endswith(".backward"),
+                )
+            )
+            compute = self._mean(
+                self._new_durations(
+                    profiler,
+                    lambda name: name.startswith("[LightningModule]") and name.endswith(".optimizer_step"),
+                )
+            )
+            progress = self._mean(self._new_durations(profiler, lambda name: "RichProgressBar.on_train_batch_end" in name))
+            optimizer_and_other = max(0.0, compute - training_step - backward)
+            total = dataloader + compute + progress
+
+            first_step = self._last_reported_step + 1
+            print(f"\nBenchmark steps {first_step}-{step} (mean per step):")
+            self._print_timing("data loading", dataloader, total)
+            self._print_timing("forward + loss", training_step, total)
+            self._print_timing("backward", backward, total)
+            self._print_timing("optimizer + other", optimizer_and_other, total)
+            self._print_timing("progress output", progress, total)
+            print(f"  {'total':<20} {total * 1000:>8.1f} ms")
+            self._last_reported_step = step
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
-    parser.add_argument("--config", default="checkpoints/da3_large_hunyuan/.hydra/config.yaml", help="Model and training config")
+    parser.add_argument("--config", default="checkpoints/da3_large_hunyuan_mini/.hydra/config.yaml", help="Model and training config")
     parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
     parser.add_argument("--devices", type=int, default=None, help="Number of devices; defaults to experiment.gpus")
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="Profile dataloading, training, backward, and optimizer time",
+    )
     args = parser.parse_args()
 
     return args
@@ -83,6 +166,8 @@ def main():
     )
     lr_monitor = LearningRateMonitor(logging_interval="step")
     callbacks = [checkpoint_callback, last_checkpoint, lr_monitor]
+    if args.benchmark:
+        callbacks.append(BenchmarkReporter(every_n_steps=10))
 
     devices = args.devices if args.devices is not None else int(cfg.gpus)
     trainer = pl.Trainer(
@@ -96,9 +181,11 @@ def main():
         gradient_clip_val=getattr(cfg, "grad_clip_norm", None),
         gradient_clip_algorithm="norm",
         accumulate_grad_batches=cfg.accum_iter,
+        profiler=BenchmarkProfiler() if args.benchmark else None,
         log_every_n_steps=1,
         check_val_every_n_epoch=cfg.eval_freq,
-        # num_sanity_val_steps=0,
+        num_sanity_val_steps=0,
+        enable_progress_bar=False,
     )
 
     trainer.fit(module, datamodule=datamodule)

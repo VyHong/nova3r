@@ -412,8 +412,8 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
                 batch["surface"],
                 sample_posterior=sample_posterior,
             )
-
         images = torch.stack(batch["images"], dim=1)
+
         # save_batch_debug({**batch, "images": images, "gt_latents": gt_latents}, "debug_points/lightning_batch", max_samples=2, batched=True)
         encoder_data = self._encode(images, batch=batch)
         tokens = encoder_data["tokens"]
@@ -481,6 +481,7 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
         pred_latents = x_t + (1.0 - t_broadcast) * v_pred
         latent_reconstruction_loss = F.mse_loss(pred_latents, gt_latents)
         latent_reconstruction_loss_weight = float(getattr(self.cfg, "latent_reconstruction_loss_weight", 0.1))
+
         loss = velocity_loss + latent_reconstruction_loss_weight * latent_reconstruction_loss
         details = {
             "velocity_loss": float(velocity_loss.detach()),

@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-MODE="${1:-train}"
+MODE="${1:-resume}"
 case "$MODE" in
     train)
         ENTRYPOINT="training/train.py"

@@ -44,6 +44,8 @@ def parse_args():
 def load_model(ckpt_path=None, device="cuda", config_path=None, **kw):
     """Load a model from an explicit config and its configured checkpoint.
 
+    When ``stage="test"``, ``experiment.resume_checkpoint`` is loaded as-is and
+    component checkpoint substitutions are disabled by the model loader.
     ``ckpt_path`` remains an optional override. For backward compatibility, when
     ``config_path`` is omitted the config is discovered next to ``ckpt_path``.
     """
@@ -60,9 +62,10 @@ def load_model(ckpt_path=None, device="cuda", config_path=None, **kw):
     if "data" in root_cfg:
         cfg.data = root_cfg.data
 
-    ckpt_path = ckpt_path or cfg.get("checkpoint")
+    checkpoint_key = "resume_checkpoint" if kw.get("stage") == "test" else "checkpoint"
+    ckpt_path = ckpt_path or cfg.get(checkpoint_key)
     if not ckpt_path:
-        raise ValueError(f"No checkpoint configured in {config_path}; set experiment.checkpoint or pass --ckpt")
+        raise ValueError(f"No experiment.{checkpoint_key} configured in {config_path}")
 
     for key in ("aggregator_ckpt", "vae_ckpt"):
         if kw.get(key) is None and cfg.get(key):

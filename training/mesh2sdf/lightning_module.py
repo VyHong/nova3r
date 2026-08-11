@@ -86,7 +86,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         self.mesh_mc_algo = str(getattr(cfg, "mesh_mc_algo", "mc")).lower()
         self.mesh_num_chunks = int(getattr(cfg, "mesh_num_chunks", 40000))
 
-        self.mesh_mc = int(getattr(cfg, "mesh_mc", 512))
+        self.mesh_mc = int(getattr(cfg, "mesh_mc", 768))
         self.mesh_smooth_borders = bool(getattr(cfg, "smooth_borders", False))
         self.mesh_fourier = bool(getattr(cfg, "mesh_fourier", False))
         self.mesh_udf_vertex_batch_size = int(getattr(cfg, "mesh_udf_vertex_batch_size", 65536))
@@ -162,14 +162,14 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         if not hasattr(self, "val_batch_to_log") or self.val_batch_to_log is None:
             self.val_batch_to_log = batch  # Store the first batch for logging at epoch end
 
-        reconstruction_loss, details, _ = self.model.lightning_forward(
+        loss, details, _ = self.model.lightning_forward(
             batch,
             self.val_criterion,
             kl_weight=0.0,
             deterministic_seed=42 + batch_idx,
         )
 
-        self.log("val_loss", reconstruction_loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         for name, value in details.items():
             self.log(
                 f"val_{name}",
@@ -178,7 +178,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                 on_epoch=True,
                 prog_bar=False,
             )
-        return reconstruction_loss
+        return loss
 
     def on_validation_epoch_end(self):
 

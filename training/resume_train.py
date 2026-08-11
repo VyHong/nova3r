@@ -79,6 +79,8 @@ def main():
         accumulate_grad_batches=cfg.accum_iter,
         log_every_n_steps=1,
         check_val_every_n_epoch=cfg.eval_freq,
+        num_sanity_val_steps=0,
+        enable_progress_bar=False,
     )
 
     trainer.fit(
