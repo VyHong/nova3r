@@ -14,7 +14,7 @@ from tqdm import tqdm
 UDF_SCRIPT = Path(__file__).with_name("udf_sample.py").resolve()
 
 
-def process_scene(mesh_path, output_prefix, overwrite):
+def process_scene(mesh_path, output_prefix, overwrite, color_max_distance=0.05):
     outputs = (
         Path(f"{output_prefix}_surface.npz"),
         Path(f"{output_prefix}_udf.npz"),
@@ -30,6 +30,8 @@ def process_scene(mesh_path, output_prefix, overwrite):
         str(mesh_path),
         "--output_prefix",
         str(output_prefix),
+        "--color_max_distance",
+        str(color_max_distance),
     ]
     try:
         with tempfile.TemporaryDirectory(
@@ -61,7 +63,13 @@ def main(args):
     counts = {"processed": 0, "skipped": 0, "failed": 0}
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {
-            executor.submit(process_scene, mesh, prefix, args.overwrite): mesh
+            executor.submit(
+                process_scene,
+                mesh,
+                prefix,
+                args.overwrite,
+                args.color_max_distance,
+            ): mesh
             for mesh, prefix in jobs
         }
         for future in tqdm(
@@ -91,10 +99,18 @@ if __name__ == "__main__":
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--color-max-distance",
+        type=float,
+        default=0.05,
+        help="Near-surface RGB band as a fraction of each mesh's sampling scale.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parsed = parser.parse_args()
     if parsed.workers < 1:
         parser.error("--workers must be at least 1")
     if parsed.limit is not None and parsed.limit < 1:
         parser.error("--limit must be at least 1")
+    if parsed.color_max_distance < 0:
+        parser.error("--color-max-distance must be non-negative")
     main(parsed)

@@ -18,10 +18,7 @@ from PIL import Image
 import torch
 
 from nova3r.heads.hunyuan_model.autoencoders.model import ShapeVAE
-from nova3r.models.nova3r_img_cond import (
-    sample_depth_pointmap_for_vae,
-    unproject_depth_to_world,
-)
+from tools.depth_surface import sample_depth_pointmap_for_vae, unproject_depth_to_world
 from training.mesh2sdf.tools.infer_shape_vae import (
     checkpoint_state,
     find_shape_vae_config,
@@ -49,11 +46,11 @@ def parse_args():
     parser.add_argument(
         "--dataset-root",
         type=Path,
-        help="Dataset root; process entries selected by --split-list.",
+        help="Dataset root; Sage10k discovers all cubemaps, other layouts use --split-list.",
     )
     parser.add_argument(
         "--dataset-layout",
-        choices=("replica_pano", "scannetpp"),
+        choices=("replica_pano", "scannetpp", "sage10k"),
         default="replica_pano",
         help="Directory layout used below --dataset-root (default: replica_pano)",
     )
@@ -102,6 +99,16 @@ def parse_args():
     )
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
+        "--cpu-threads",
+        type=int,
+        default=8,
+        help=(
+            "PyTorch intra-op CPU threads per GPU worker (default: 8). DA3 also "
+            "loads images concurrently, so large values cause nested thread "
+            "oversubscription."
+        ),
+    )
+    parser.add_argument(
         "--resolution",
         type=int,
         default=518,
@@ -113,7 +120,8 @@ def parse_args():
         nargs="+",
         default=list(DEFAULT_FACE_ORDER),
     )
-    parser.add_argument("--confidence-percentile", type=float, default=0.0)
+    parser.add_argument("--confidence-percentile", type=float, default=0.0,
+                        help="Discard this percentage of lowest-confidence valid points (0..100).")
     parser.add_argument("--sharp-threshold", type=float, default=0.985)
     parser.add_argument(
         "--normalization",
@@ -121,14 +129,25 @@ def parse_args():
         default="auto",
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--num-shards", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0,
+                        help="Zero-based job shard for independent GPU workers.")
     parser.add_argument(
         "--save-intermediates",
         action="store_true",
         help="Also save depth, confidence, sampled surface, and camera tensors.",
     )
     args = parser.parse_args()
+    if args.num_shards < 1 or not 0 <= args.shard_index < args.num_shards:
+        parser.error("require --num-shards >= 1 and 0 <= --shard-index < --num-shards")
+    if not args.dataset_root and args.num_shards != 1:
+        parser.error("sharding requires --dataset-root")
+    if not 0 <= args.confidence_percentile < 100:
+        parser.error("--confidence-percentile must be in [0, 100)")
     if args.batch_size < 1:
         parser.error("--batch-size must be at least 1")
+    if args.cpu_threads < 1:
+        parser.error("--cpu-threads must be at least 1")
     if sorted(args.face_order) != list(range(6)):
         parser.error("--face-order must be a permutation of 0 1 2 3 4 5")
     if args.dataset_root:
@@ -170,7 +189,7 @@ def load_vae(config_path: Path, checkpoint_path: Path, device: torch.device):
     required_missing = [
         key
         for key in missing
-        if key.startswith(("encoder.", "pre_kl."))
+        if key.startswith(("encoder.", "pre_kl.", "post_kl.", "transformer.", "geo_decoder."))
     ]
     if unexpected or required_missing:
         raise RuntimeError(
@@ -265,17 +284,35 @@ def build_jobs(args):
     if not args.dataset_root:
         return [(args.cubemap_dir, args.output)]
 
-    jobs = list(
-        dataset_jobs(
-            args.dataset_root,
-            args.split_list,
-            args.dataset_layout,
-            args.cubemap_name,
-            args.output_root,
-            args.scene,
+    if args.dataset_layout == "sage10k":
+        jobs = []
+        for scene_dir in sorted((args.dataset_root / "cubemaps").iterdir()):
+            if not scene_dir.is_dir() or args.scene and scene_dir.name != args.scene:
+                continue
+            prefix = f"{scene_dir.name}_panorama_"
+            for cubemap_dir in sorted(scene_dir.glob(f"{prefix}*_cube_95")):
+                if not cubemap_dir.is_dir():
+                    continue
+                frame = cubemap_dir.name.removeprefix(prefix).removesuffix("_cube_95")
+                if not frame.isdigit():
+                    continue
+                jobs.append((cubemap_dir, args.output_root / scene_dir.name / f"{int(frame):05d}.pt"))
+    else:
+        jobs = list(
+            dataset_jobs(
+                args.dataset_root,
+                args.split_list,
+                args.dataset_layout,
+                args.cubemap_name,
+                args.output_root,
+                args.scene,
+            )
         )
-    )
-    return jobs[: args.limit] if args.limit is not None else jobs
+    if args.limit is not None:
+        jobs = jobs[:args.limit]
+    # Shard the complete stable list before checking existing outputs, so
+    # workers never race as files appear during a run or resume.
+    return jobs[args.shard_index::args.num_shards]
 
 
 def predict_depth_batch(da3, loaded_cubemaps, resolution):
@@ -353,7 +390,12 @@ def encode_batch(vae, depth, confidence, intrinsics, extrinsics, args, normaliza
             normalization=normalization,
             seed=args.seed,
         ).to(device=depth.device, dtype=next(vae.parameters()).dtype)
-        latent = vae.encode(surface, sample_posterior=False)
+        # The encoder also randomly subsamples its point queries. A posterior
+        # mode alone does not make this export deterministic.
+        devices = [depth.device] if depth.device.type == "cuda" else []
+        with torch.random.fork_rng(devices=devices):
+            torch.manual_seed(args.seed)
+            latent = vae.encode(surface, sample_posterior=True)
     return latent, pointmap, surface
 
 
@@ -406,6 +448,8 @@ def make_result(
 
 def main():
     args = parse_args()
+    torch.set_num_threads(args.cpu_threads)
+    torch.set_num_interop_threads(1)
     jobs = build_jobs(args)
 
     pending_jobs = [
@@ -481,6 +525,16 @@ def main():
                 normalization,
                 latent,
                 intermediates,
+            )
+            xyz = surface[index, :, :3].float()
+            lower, upper = xyz.amin(0), xyz.amax(0)
+            padding = (upper - lower) * 0.1
+            result.update(
+                bounds=torch.cat((lower - padding, upper + padding)).cpu(),
+                config=str(vae_config),
+                checkpoint=str(args.vae_checkpoint),
+                confidence_percentile=args.confidence_percentile,
+                seed=args.seed,
             )
             output_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(result, output_path)

@@ -11,6 +11,7 @@ from training.nova3r.validation_utils import (
 )
 from nova3r.losses import L21, FMVelocity, Pts3D_Regr3D_CD_V4, ReconstructionLoss
 from eval.mv_recon.metric import SSI3DScore_Scene_Multi
+from training.module_setup import OptimizerOptions, freeze_layers
 
 
 class Nova3RLightningModule(pl.LightningModule):
@@ -20,18 +21,10 @@ class Nova3RLightningModule(pl.LightningModule):
         self.save_hyperparameters(cfg)
         self.cfg = cfg
 
-        self.learning_rate = cfg.lr
+        self.optimizer_options = OptimizerOptions.from_config(cfg)
         self.model = model
 
-        layers_to_freeze = getattr(cfg, "layers_to_freeze", [])
-
-        for name, param in model.named_parameters():
-            if any(layer in name for layer in layers_to_freeze):
-                param.requires_grad = False
-                print(f"Froze: {name}")
-            else:
-                # print(f"Kept active: {name}")
-                pass
+        freeze_layers(model, cfg.get("layers_to_freeze", ()))
 
         self.train_criterion = FMVelocity(L21) + 0.1 * ReconstructionLoss(L21)
         self.val_criterion = Pts3D_Regr3D_CD_V4(L21)
@@ -54,7 +47,7 @@ class Nova3RLightningModule(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         loss, details = self.forward(batch, self.train_criterion)
-        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -82,7 +75,14 @@ class Nova3RLightningModule(pl.LightningModule):
 
         loss, details = run_validation_loss(gt_pts3d=gt_pts3d, gt_valid=gt_valid, pts3d=pts3d, criterion=self.val_criterion, device=self.device)
 
-        self.log("val_loss", details["Pts3D_Regr3D_CD_V4_completeness"], on_step=True, on_epoch=True, prog_bar=True)
+        self.log(
+            "val_loss",
+            details["Pts3D_Regr3D_CD_V4_completeness"],
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
         return loss
 
     @property
@@ -92,6 +92,11 @@ class Nova3RLightningModule(pl.LightningModule):
         return getattr(self.logger, "log_dir", self.logger.save_dir)
 
     def on_validation_epoch_end(self):
+        # Keep example generation on a single GPU when validation uses DDP.
+        if not self.trainer.is_global_zero:
+            self.val_batch_to_log = None
+            return
+
         if hasattr(self, "val_batch_to_log") and self.val_batch_to_log is not None:
             max_elements = 1
             for k, v in self.val_batch_to_log.items():
@@ -158,15 +163,16 @@ class Nova3RLightningModule(pl.LightningModule):
             )
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, self.parameters()), lr=self.learning_rate, weight_decay=self.cfg.weight_decay)
+        options = self.optimizer_options
+        optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, self.parameters()), lr=options.learning_rate, weight_decay=self.cfg.weight_decay)
 
         cosine = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.trainer.max_epochs)
         exponential = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=1)
 
-        if self.cfg.warmup_epochs > 0:
-            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=self.cfg.warmup_epochs)
+        if options.warmup_epochs > 0:
+            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=options.warmup_epochs)
 
-            scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine], milestones=[self.cfg.warmup_epochs])
+            scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine], milestones=[options.warmup_epochs])
         else:
             scheduler = exponential
 

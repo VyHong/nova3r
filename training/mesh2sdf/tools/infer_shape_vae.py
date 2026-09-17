@@ -42,7 +42,7 @@ def parse_args():
     )
     parser.add_argument(
         "--normalization",
-        choices=("auto", "none", "median", "bbox"),
+        choices=("auto", "none", "median", "bbox", "cube"),
         default="auto",
         help="Point-coordinate normalization (default: infer from training config)",
     )
@@ -56,6 +56,7 @@ def find_shape_vae_config(config_path):
     cfg = OmegaConf.load(config_path)
     OmegaConf.resolve(cfg)
     root = cfg.get("experiment", cfg)
+    root = root.get("cfg", root)
     model = root.get("model")
     if model is None:
         raise ValueError(f"No model section found in {config_path}")
@@ -164,14 +165,14 @@ def normalize_points(points, mode):
         target = 1.0 if mode == "median" else float(mode.split("_")[-1])
         scale = target / torch.linalg.vector_norm(points, dim=1).median().clamp(0.01, 100.0)
         return points * scale, torch.zeros(3, device=points.device), scale
-    if mode != "bbox":
+    if mode not in ("bbox", "cube"):
         raise ValueError(f"Unknown normalization mode: {mode}")
     lower, upper = points.amin(0), points.amax(0)
     center = (lower + upper) * 0.5
     extent = (upper - lower).max()
     if extent.item() <= 0:
         raise ValueError("Point cloud has zero spatial extent")
-    scale = 2.0 * 0.98 / extent
+    scale = 2.0 * (1.0 if mode == "cube" else 0.98) / extent
     return (points - center) * scale, center, scale
 
 

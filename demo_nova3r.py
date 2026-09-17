@@ -21,7 +21,30 @@ from dust3r.image_pairs import make_pairs
 from nova3r.models.nova3r_img_cond import Nova3rImgCond
 from nova3r.models.nova3r_pts_cond import Nova3rPtsCond  # noqa: F401 — needed by load_model's eval()
 from nova3r.heads.hunyuan_model.autoencoders.model import ShapeVAE  # noqa: F401 — needed by load_model's eval()
+from nova3r.heads.pts3d_decoder.latent_flowm_decoder import DiT  # noqa: F401 — needed by load_model's eval()
 from nova3r.inference import inference_nova3r
+
+
+def _drop_mismatched_pos_embeds(model, state_dict):
+    """Leave fixed positional embeddings initialized when token counts differ."""
+    model_state = model.state_dict()
+    filtered_state = dict(state_dict)
+    for key, checkpoint_value in state_dict.items():
+        model_value = model_state.get(key)
+        if (
+            key.endswith("pos_embed")
+            and model_value is not None
+            and checkpoint_value.ndim >= 2
+            and model_value.ndim >= 2
+            and checkpoint_value.shape[1] != model_value.shape[1]
+        ):
+            print(
+                f"Skipping {key}: checkpoint has "
+                f"{checkpoint_value.shape[1]} positions, model expects "
+                f"{model_value.shape[1]}."
+            )
+            del filtered_state[key]
+    return filtered_state
 
 
 def parse_args():
@@ -41,13 +64,23 @@ def parse_args():
     return args
 
 
-def load_model(ckpt_path=None, device="cuda", config_path=None, **kw):
+def load_model(
+    ckpt_path=None,
+    device="cuda",
+    config_path=None,
+    dtype=torch.bfloat16,
+    **kw,
+):
     """Load a model from an explicit config and its configured checkpoint.
 
     When ``stage="test"``, ``experiment.resume_checkpoint`` is loaded as-is and
     component checkpoint substitutions are disabled by the model loader.
     ``ckpt_path`` remains an optional override. For backward compatibility, when
     ``config_path`` is omitted the config is discovered next to ``ckpt_path``.
+
+    ``dtype`` defaults to BF16 for inference. Training entry points must request
+    FP32 parameters so Lightning's mixed-precision plugin can retain FP32 master
+    weights and optimizer state while autocasting supported operations.
     """
     if config_path is None:
         if ckpt_path is None:
@@ -62,23 +95,44 @@ def load_model(ckpt_path=None, device="cuda", config_path=None, **kw):
     if "data" in root_cfg:
         cfg.data = root_cfg.data
 
-    checkpoint_key = "resume_checkpoint" if kw.get("stage") == "test" else "checkpoint"
+    stage = kw.get("stage")
+    # A scratch-training config may disable its initialization checkpoint, but
+    # test mode must still load experiment.resume_checkpoint unless explicitly
+    # overridden by the caller.
+    default_load_weights = True if stage == "test" else cfg.get("load_weights", True)
+    load_weights = bool(kw.pop("load_weights", default_load_weights))
+    checkpoint_key = "resume_checkpoint" if stage == "test" else "checkpoint"
     ckpt_path = ckpt_path or cfg.get(checkpoint_key)
-    if not ckpt_path:
+    if load_weights and not ckpt_path:
         raise ValueError(f"No experiment.{checkpoint_key} configured in {config_path}")
+    if load_weights and not os.path.isfile(ckpt_path):
+        raise FileNotFoundError(f"Model checkpoint not found: {ckpt_path}")
 
-    for key in ("aggregator_ckpt", "vae_ckpt"):
-        if kw.get(key) is None and cfg.get(key):
-            kw[key] = cfg.get(key)
-
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    if stage == "test":
+        # A trained checkpoint contains the complete model. Loading component
+        # checkpoints as well would silently replace its fine-tuned weights.
+        kw.pop("aggregator_ckpt", None)
+        kw.pop("vae_ckpt", None)
+        kw.pop("dit_ckpt", None)
+        kw["strict"] = True
+    else:
+        for key in ("aggregator_ckpt", "vae_ckpt", "dit_ckpt"):
+            if kw.get(key) is None and cfg.get(key):
+                kw[key] = cfg.get(key)
 
     model_config = cfg.model
     model = eval(model_config["name"])(**model_config["params"])
-    model.to(device, dtype=torch.bfloat16)
+
+    if not load_weights:
+        model.to(device=device, dtype=dtype)
+        return model, cfg
+
+    # Avoid holding both the initialized model and checkpoint tensors on GPU.
+    # Apply the state exactly once on CPU, then move the completed model.
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
 
     if "model" in ckpt:
-        model.load_state_dict(ckpt["model"], **kw)
+        state_dict = ckpt["model"]
     elif "state_dict" in ckpt:
         state_dict = {}
         for k, v in ckpt["state_dict"].items():
@@ -86,11 +140,14 @@ def load_model(ckpt_path=None, device="cuda", config_path=None, **kw):
                 state_dict[k[6:]] = v
             else:
                 state_dict[k] = v
-        model.load_state_dict(state_dict, **kw)
     else:
-        model.load_state_dict(ckpt, **kw)
+        state_dict = ckpt
+
+    state_dict = _drop_mismatched_pos_embeds(model, state_dict)
+    model.load_state_dict(state_dict, **kw)
 
     del ckpt
+    model.to(device=device, dtype=dtype)
     return model, cfg
 
 
@@ -106,7 +163,17 @@ def save_pointcloud(pts3d, output_dir):
     return ply_path
 
 
-def render_360_video(ply_path, output_dir, flip_axis="y", color_type="plasma", num_frames=180, fps=30, elevation=20, radius=0.003):
+def render_360_video(
+    ply_path,
+    output_dir,
+    flip_axis="y",
+    color_type="plasma",
+    num_frames=180,
+    fps=30,
+    elevation=20,
+    radius=0.003,
+    max_points=1000_000,
+):
     """Render 360 turntable video from a PLY file."""
     from demo.visualization.render_points import (
         load_ply_pointcloud,
@@ -116,7 +183,12 @@ def render_360_video(ply_path, output_dir, flip_axis="y", color_type="plasma", n
     )
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    point_cloud = load_ply_pointcloud(ply_path, device=device, remove_outlier=True)
+    point_cloud = load_ply_pointcloud(
+        ply_path,
+        device=device,
+        remove_outlier=True,
+        max_points=max_points,
+    )
     if flip_axis:
         point_cloud = flip_axis_fn(point_cloud, axis=flip_axis)
     point_cloud = build_colored_pointcloud(point_cloud, device=device, color_type=color_type)

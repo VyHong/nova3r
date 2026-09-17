@@ -52,10 +52,12 @@ bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/scannetpp/cubemap_data.
 
 ## mount sage-10k
 bash bulk_mount_mount_zip.sh /mnt/datasets/sage10k/scenes.zip  /tmp/datasets/sage-10k
-bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/sage-10k/panorama-scenes.zip  /tmp/datasets/sage-10k
+bash bulk_mount_mount_zip.sh /mnt/datasets/sage10k/panorama-scenes.zip  /tmp/datasets/sage-10k
 
 bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/sage-10k/udf.zip  /tmp/datasets/sage-10k
 bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/sage-10k/cubemap_data.zip /tmp/datasets/sage-10k -o notrim
+bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/sage-10k/median_latents_512.zip /tmp/datasets/sage-10k 
+bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/sage-10k/panorama_latents.zip /tmp/datasets/sage-10k 
 
 ## Python Path
 export PYTHONPATH=$PYTHONPATH:/absolute/path/to/nova3r

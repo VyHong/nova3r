@@ -5,6 +5,7 @@
 #SBATCH --error=train_ddp.err
 #SBATCH --gres=gpu:2
 #SBATCH --nodes=1
+#SBATCH --ntasks=1
 
 set -euo pipefail
 
@@ -47,9 +48,9 @@ podman run \
     -w "$PROJECT_DIR" \
     --device=nvidia.com/gpu=all \
     --network=host \
+    --ipc=host \
     -e USER=root \
     -e CUDA_VISIBLE_DEVICES \
-    --shm-size=1000gb \
     --device=/dev/fuse \
     --cap-add=SYS_ADMIN \
     --cap-add=SYS_PTRACE \
@@ -65,6 +66,8 @@ podman exec "$CONTAINER_NAME" nvidia-smi
 podman exec "$CONTAINER_NAME" bash -lc "
     source /opt/conda/etc/profile.d/conda.sh
     conda activate nova3r
+    export CUDA_VISIBLE_DEVICES=0,1
+    export NCCL_P2P_DISABLE=1
     python -c 'import torch; count = torch.cuda.device_count(); assert count == 2, count; print(count)'
 
     bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/sage-10k/udf.zip  /tmp/datasets/sage-10k
@@ -72,5 +75,10 @@ podman exec "$CONTAINER_NAME" bash -lc "
 
     export PYTHONUNBUFFERED=1
     export PYTHONPATH=\"\${PYTHONPATH:-}:$PROJECT_DIR\"
-    python -u \"$ENTRYPOINT\" --config \"$CONFIG_PATH\" --devices 2
+    export NCCL_DEBUG=INFO
+    # The two-GPU smoke test hangs with P2P/CUMEM and passes over SHM. Disable
+    # direct GPU P2P for this node/container while retaining the NCCL backend.
+    export TORCH_DISTRIBUTED_DEBUG=DETAIL
+    export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+    python -u \"$ENTRYPOINT\" --config \"$CONFIG_PATH\" --devices 2 --ddp-timeout-seconds 600
 "

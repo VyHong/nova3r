@@ -440,7 +440,7 @@ class SSI3DScore(nn.Module):
             )
         }
 
-        if not isinstance(self.fs_thres, list):
+        if not isinstance(self.fs_thres, (list, tuple)):
             f_score = self.fscore_from_cd(dist_pred, dist_gt, self.fs_thres)
             details.update(
                 {

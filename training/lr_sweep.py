@@ -7,6 +7,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from training.eval_freq import resolve_eval_freq
+
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 
@@ -77,7 +79,14 @@ def run_one_lr(args, base_data_cfg, lr):
     run_name = f"{args.tag}_{lr_name(lr)}"
     pl.seed_everything(args.seed, workers=True)
 
-    model, cfg = load_model(args.ckpt, args.device, aggregator_ckpt=args.aggregator_ckpt, vae_ckpt=args.vae_ckpt, strict=False)#, stage="test")
+    model, cfg = load_model(
+        args.ckpt,
+        args.device,
+        dtype=torch.float32,
+        aggregator_ckpt=args.aggregator_ckpt,
+        vae_ckpt=args.vae_ckpt,
+        strict=False,
+    )
     cfg.lr = lr
     if args.epochs is not None:
         cfg.epochs = args.epochs
@@ -114,6 +123,7 @@ def run_one_lr(args, base_data_cfg, lr):
         LearningRateMonitor(logging_interval="step"),
     ]
 
+    check_val_every_n_epoch, val_check_interval = resolve_eval_freq(cfg.eval_freq)
     trainer = pl.Trainer(
         max_epochs=cfg.epochs,
         accelerator=args.device,
@@ -125,7 +135,8 @@ def run_one_lr(args, base_data_cfg, lr):
         gradient_clip_algorithm="norm",
         accumulate_grad_batches=cfg.accum_iter,
         log_every_n_steps=1,
-        check_val_every_n_epoch=cfg.eval_freq,
+        check_val_every_n_epoch=check_val_every_n_epoch,
+        val_check_interval=val_check_interval,
     )
     trainer.fit(module, datamodule=datamodule)
 

@@ -59,7 +59,18 @@ def smooth_pointcloud_surface(
     # return Pointclouds(points=[points[0].to(device)], features=[features])
 
 
-def load_ply_pointcloud(ply_path: str, device: torch.device, remove_outlier: bool) -> Pointclouds:
+def load_ply_pointcloud(
+    ply_path: str,
+    device: torch.device,
+    remove_outlier: bool,
+    max_points: int | None = 500_000,
+) -> Pointclouds:
+    """Load mesh vertices as a point cloud, with a bounded GPU footprint.
+
+    Vertices are sampled at evenly spaced indices because PLY mesh vertices are
+    generally spatially ordered. This is deterministic and avoids allocating a
+    multi-million-element random permutation for dense validation meshes.
+    """
     verts, faces = load_ply(ply_path)
 
     if remove_outlier:
@@ -69,6 +80,17 @@ def load_ply_pointcloud(ply_path: str, device: torch.device, remove_outlier: boo
         pcd.points = o3d.utility.Vector3dVector(np.ascontiguousarray(verts.cpu().numpy(), dtype=np.float64))
         cl, ind = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
         verts = torch.from_numpy(np.asarray(pcd.points)[ind]).to(verts.dtype)
+
+    if max_points is not None:
+        if max_points <= 0:
+            raise ValueError(f"max_points must be positive or None, got {max_points}")
+        if verts.shape[0] > max_points:
+            original_count = verts.shape[0]
+            indices = torch.linspace(
+                0, original_count - 1, steps=max_points, dtype=torch.float64
+            ).to(torch.long)
+            verts = verts[indices]
+            print(f"Downsampled point cloud from {original_count:,} to {max_points:,} points")
 
     # verts = smooth_pointcloud_surface(verts, device=device, num_iterations=2, neighbor_size=20)
     #     from sklearn.neighbors import NearestNeighbors
@@ -189,9 +211,11 @@ def build_colored_pointcloud(
         mean = pts.mean(dim=0, keepdim=True)
         centered = pts - mean
         cov = centered.t().mm(centered) / max(centered.shape[0] - 1, 1)
-        evals, evecs = torch.linalg.eigh(cov)
+        # This is only a 3x3 matrix. Use CPU float32 to avoid initializing
+        # cuSOLVER for preview coloring while training occupies the GPU.
+        evals, evecs = torch.linalg.eigh(cov.detach().to(device="cpu", dtype=torch.float32))
         order = torch.argsort(evals, descending=False)
-        evecs = evecs[:, order]
+        evecs = evecs[:, order].to(device=centered.device, dtype=centered.dtype)
 
         # Project onto first principal component
         pca_coords = centered @ evecs[:, 0]
@@ -337,6 +361,12 @@ def parse_args():
     )
     p.add_argument("--radius", type=float, default=0.005)
     p.add_argument("--points-per-pixel", type=int, default=10)
+    p.add_argument(
+        "--max-points",
+        type=int,
+        default=500_000,
+        help="Maximum mesh vertices to render; set to 0 to disable downsampling",
+    )
     p.add_argument("--normal-neighbors", type=int, default=60)
     p.add_argument(
         "--compositor", choices=["alpha", "normweighted"], default="alpha", help="Compositor type for point blending"
@@ -380,7 +410,12 @@ def main():
         raise ValueError("When using --ply-folder, also provide --save-folder.")
 
     def render_one(ply_path: str, out_path: str) -> None:
-        point_cloud = load_ply_pointcloud(ply_path, device=device, remove_outlier=True)
+        point_cloud = load_ply_pointcloud(
+            ply_path,
+            device=device,
+            remove_outlier=True,
+            max_points=args.max_points or None,
+        )
         if args.pca:
             point_cloud = pca_align_pointcloud(point_cloud)
         if args.obb:

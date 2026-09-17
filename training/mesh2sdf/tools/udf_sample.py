@@ -8,13 +8,15 @@ import trimesh
 from scipy.stats import truncnorm
 
 
-def random_sample_pointcloud(mesh, num=30000):
+def random_sample_pointcloud(mesh, num=30000, return_index=False):
     points, face_idx = mesh.sample(num, return_index=True)
     normals = mesh.face_normals[face_idx]
+    if return_index:
+        return points, normals, face_idx
     return points, normals
 
 
-def sharp_sample_pointcloud(mesh, num=16384):
+def sharp_sample_pointcloud(mesh, num=16384, vertex_rgb=None):
     V = np.asarray(mesh.vertices)
     F = np.asarray(mesh.faces)
     N = np.asarray(mesh.face_normals)
@@ -44,7 +46,15 @@ def sharp_sample_pointcloud(mesh, num=16384):
 
     if len(edge_a) == 0:
         print("Warning: no sharp edges found. Falling back to random surface samples.")
-        return random_sample_pointcloud(mesh, num=num)
+        if vertex_rgb is None:
+            return random_sample_pointcloud(mesh, num=num)
+        points, normals, face_idx = random_sample_pointcloud(
+            mesh, num=num, return_index=True
+        )
+        colors = closest_surface_rgb(
+            points, face_idx, V, F, vertex_rgb
+        )
+        return points, normals, colors
 
     sharp_verts_a = V[edge_a]
     sharp_verts_b = V[edge_b]
@@ -62,7 +72,10 @@ def sharp_sample_pointcloud(mesh, num=16384):
     samples = w * sharp_verts_a[index] + (1.0 - w) * sharp_verts_b[index]
     normals = w * sharp_verts_an[index] + (1.0 - w) * sharp_verts_bn[index]
 
-    return samples, normals
+    if vertex_rgb is None:
+        return samples, normals
+    colors = w * vertex_rgb[edge_a[index]] + (1.0 - w) * vertex_rgb[edge_b[index]]
+    return samples, normals, np.clip(np.rint(colors), 0, 255).astype(np.uint8)
 
 
 def mesh_radius_scale(V):
@@ -73,28 +86,47 @@ def mesh_radius_scale(V):
         return 1.0
     return max(float(distances.max()) * 1.01, 1e-6)
 
-def load_vertices_and_faces(input_file):
+def _mesh_with_vertex_colors(mesh):
+    """Convert textures/material colors to vertex colors before concatenation."""
+    if getattr(mesh.visual, "kind", None) not in ("vertex", "face", "texture"):
+        return mesh
+    try:
+        colors = np.asarray(mesh.visual.to_color().vertex_colors)
+    except (AttributeError, TypeError, ValueError):
+        colors = np.asarray(getattr(mesh.visual, "vertex_colors", []))
+    if colors.ndim != 2 or len(colors) != len(mesh.vertices) or colors.shape[1] < 3:
+        return mesh
+
+    converted = mesh.copy()
+    converted.visual = trimesh.visual.ColorVisuals(
+        mesh=converted, vertex_colors=colors
+    )
+    return converted
+
+
+def load_mesh(input_file):
     input_path = Path(input_file)
-
-    if input_path.suffix.lower() == ".glb":
-        geometry = trimesh.load(str(input_path), force=None)
-
-        if isinstance(geometry, trimesh.Scene):
-            if len(geometry.geometry) == 0:
-                raise ValueError("GLB scene is empty.")
-            mesh = geometry.dump(concatenate=True)
-        else:
-            mesh = geometry
-
-        V = np.asarray(mesh.vertices, dtype=np.float64)
-        F = np.asarray(mesh.faces, dtype=np.int64)
-
+    geometry = trimesh.load(str(input_path), force=None, process=False)
+    if isinstance(geometry, trimesh.Scene):
+        if len(geometry.geometry) == 0:
+            raise ValueError(f"Mesh scene is empty: {input_path}")
+        scene = geometry.copy()
+        for name, part in tuple(scene.geometry.items()):
+            scene.geometry[name] = _mesh_with_vertex_colors(part)
+        mesh = scene.dump(concatenate=True)
     else:
-        V, F = igl.read_triangle_mesh(str(input_path))
-        V = np.asarray(V, dtype=np.float64)
-        F = np.asarray(F, dtype=np.int64)
+        mesh = _mesh_with_vertex_colors(geometry)
+    if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) == 0:
+        raise ValueError(f"Input does not contain a triangle mesh: {input_path}")
+    return mesh
 
-    return V, F
+
+def load_vertices_and_faces(input_file):
+    mesh = load_mesh(input_file)
+    return (
+        np.asarray(mesh.vertices, dtype=np.float64),
+        np.asarray(mesh.faces, dtype=np.int64),
+    )
 
 
 def load_excluded_vertex_indices(mask_file, num_vertices):
@@ -118,10 +150,12 @@ def load_excluded_vertex_indices(mask_file, num_vertices):
     return np.unique(indices)
 
 
-def remove_vertices_and_incident_faces(V, F, excluded_indices):
+def remove_vertices_and_incident_faces(V, F, excluded_indices, vertex_colors=None):
     excluded_indices = np.asarray(excluded_indices, dtype=np.int64).reshape(-1)
     if excluded_indices.size == 0:
-        return V, F
+        if vertex_colors is None:
+            return V, F
+        return V, F, vertex_colors
 
     excluded = np.zeros(len(V), dtype=bool)
     excluded[excluded_indices] = True
@@ -132,7 +166,49 @@ def remove_vertices_and_incident_faces(V, F, excluded_indices):
     used_vertices = np.unique(kept_faces)
     old_to_new = np.full(len(V), -1, dtype=np.int64)
     old_to_new[used_vertices] = np.arange(len(used_vertices))
-    return V[used_vertices], old_to_new[kept_faces]
+    if vertex_colors is None:
+        return V[used_vertices], old_to_new[kept_faces]
+    return V[used_vertices], old_to_new[kept_faces], vertex_colors[used_vertices]
+
+
+def mesh_vertex_rgb(mesh):
+    """Return uint8 RGB vertex colors, including colors derived from textures."""
+    if getattr(mesh.visual, "kind", None) not in ("vertex", "face", "texture"):
+        return None
+    try:
+        colors = np.asarray(mesh.visual.to_color().vertex_colors)
+    except (AttributeError, TypeError, ValueError):
+        colors = np.asarray(getattr(mesh.visual, "vertex_colors", []))
+    if colors.ndim != 2 or len(colors) != len(mesh.vertices) or colors.shape[1] < 3:
+        return None
+    colors = colors[:, :3]
+    if np.issubdtype(colors.dtype, np.floating) and colors.size and colors.max() <= 1.0:
+        colors = colors * 255.0
+    return np.clip(np.rint(colors), 0, 255).astype(np.uint8)
+
+
+def closest_surface_rgb(
+    closest_points,
+    face_indices,
+    vertices,
+    faces,
+    vertex_rgb,
+    chunk_size=262144,
+):
+    rgb = np.empty((len(closest_points), 3), dtype=np.uint8)
+    for start in range(0, len(closest_points), chunk_size):
+        stop = min(start + chunk_size, len(closest_points))
+        face_vertices = faces[face_indices[start:stop]]
+        triangles = vertices[face_vertices]
+        barycentric = trimesh.triangles.points_to_barycentric(
+            triangles, closest_points[start:stop]
+        )
+        barycentric = np.nan_to_num(
+            barycentric, nan=1.0 / 3.0, posinf=1.0 / 3.0, neginf=1.0 / 3.0
+        )
+        values = np.einsum("ni,nij->nj", barycentric, vertex_rgb[face_vertices])
+        rgb[start:stop] = np.clip(np.rint(values), 0, 255).astype(np.uint8)
+    return rgb
 
 
 def padded_mesh_bounds(mesh, padding_ratio=0.2, min_padding=0.1, sampling_scale=1.0):
@@ -153,7 +229,14 @@ def sample_volume_points(bounds, num_points):
     return np.random.rand(num_points, 3) * (high - low) + low
 
 
-def sample_udf(mesh, random_surface, sharp_surface, sampling_scale=1.0):
+def sample_udf(
+    mesh,
+    random_surface,
+    sharp_surface,
+    sampling_scale=1.0,
+    vertex_rgb=None,
+    color_max_distance=0.05,
+):
     n_volume_points = sharp_surface.shape[0] * 2
 
     volume_bounds = padded_mesh_bounds(mesh, sampling_scale=sampling_scale)
@@ -221,7 +304,9 @@ def sample_udf(mesh, random_surface, sharp_surface, sampling_scale=1.0):
         axis=0,
     ).astype(np.float64)
 
-    squared_distance, _, _ = igl.point_mesh_squared_distance(all_points, V_np, F_np)
+    squared_distance, face_indices, closest_points = igl.point_mesh_squared_distance(
+        all_points, V_np, F_np
+    )
     udf = np.sqrt(np.maximum(squared_distance, 0.0))
 
     idx1 = len(vol_points)
@@ -242,11 +327,31 @@ def sample_udf(mesh, random_surface, sharp_surface, sampling_scale=1.0):
         "sampling_scale": np.float32(sampling_scale),
     }
 
+    if vertex_rgb is not None:
+        all_rgb = closest_surface_rgb(
+            closest_points, face_indices, V_np, F_np, vertex_rgb
+        )
+        vol_rgb_valid = vol_udf <= color_max_distance * sampling_scale
+        vol_rgb = all_rgb[:idx1].copy()
+        vol_rgb[~vol_rgb_valid] = 0
+        data.update(
+            {
+                "vol_rgb": vol_rgb,
+                "vol_rgb_valid": vol_rgb_valid,
+                "random_near_rgb": all_rgb[idx1:idx2],
+                "sharp_near_rgb": all_rgb[idx2:],
+                "color_max_distance": np.float32(
+                    color_max_distance * sampling_scale
+                ),
+            }
+        )
+
     return data
 
 
-def sample_mesh_udf(V, F):
-    mesh = trimesh.Trimesh(vertices=V, faces=F, process=False)
+def sample_mesh_udf(mesh, color_max_distance=0.05):
+    V = np.asarray(mesh.vertices, dtype=np.float64)
+    vertex_rgb = mesh_vertex_rgb(mesh)
     sampling_scale = mesh_radius_scale(V)
 
     print(f"Watertight: {mesh.is_watertight}")
@@ -259,8 +364,24 @@ def sample_mesh_udf(V, F):
 
     sample_num = (1048576 * 2) // 4
 
-    random_surface, random_normal = random_sample_pointcloud(mesh, num=sample_num)
-    sharp_surface, sharp_normal = sharp_sample_pointcloud(mesh, num=sample_num)
+    if vertex_rgb is None:
+        random_surface, random_normal = random_sample_pointcloud(mesh, num=sample_num)
+        sharp_surface, sharp_normal = sharp_sample_pointcloud(mesh, num=sample_num)
+        random_surface_rgb = sharp_surface_rgb = None
+    else:
+        random_surface, random_normal, random_face_idx = random_sample_pointcloud(
+            mesh, num=sample_num, return_index=True
+        )
+        random_surface_rgb = closest_surface_rgb(
+            random_surface,
+            random_face_idx,
+            np.asarray(mesh.vertices),
+            np.asarray(mesh.faces),
+            vertex_rgb,
+        )
+        sharp_surface, sharp_normal, sharp_surface_rgb = sharp_sample_pointcloud(
+            mesh, num=sample_num, vertex_rgb=vertex_rgb
+        )
 
     surface_data = {
         "random_surface": np.concatenate((random_surface, random_normal), axis=1).astype(np.float16),
@@ -268,8 +389,22 @@ def sample_mesh_udf(V, F):
         "bounds": np.concatenate((volume_bounds[0], volume_bounds[1])).astype(np.float32),
         "sampling_scale": np.float32(sampling_scale),
     }
+    if vertex_rgb is not None:
+        surface_data.update(
+            {
+                "random_surface_rgb": random_surface_rgb,
+                "sharp_surface_rgb": sharp_surface_rgb,
+            }
+        )
 
-    udf_data = sample_udf(mesh, random_surface, sharp_surface, sampling_scale=sampling_scale)
+    udf_data = sample_udf(
+        mesh,
+        random_surface,
+        sharp_surface,
+        sampling_scale=sampling_scale,
+        vertex_rgb=vertex_rgb,
+        color_max_distance=color_max_distance,
+    )
 
     return surface_data, udf_data
 
@@ -296,23 +431,50 @@ if __name__ == "__main__":
         default=None,
         help="Text file containing mesh vertex indices to remove, one or more per line.",
     )
+    parser.add_argument(
+        "--color_max_distance",
+        type=float,
+        default=0.05,
+        help=(
+            "Maximum UDF for assigning RGB to uniform volume points, as a "
+            "fraction of sampling_scale (default: 0.05)."
+        ),
+    )
 
     args = parser.parse_args()
+    if args.color_max_distance < 0:
+        parser.error("--color_max_distance must be non-negative")
 
-    V, F = load_vertices_and_faces(args.input_obj)
+    mesh = load_mesh(args.input_obj)
 
     if args.exclude_vertex_indices is not None:
+        V = np.asarray(mesh.vertices, dtype=np.float64)
+        F = np.asarray(mesh.faces, dtype=np.int64)
+        vertex_rgb = mesh_vertex_rgb(mesh)
         original_vertex_count = len(V)
         original_face_count = len(F)
         excluded_indices = load_excluded_vertex_indices(args.exclude_vertex_indices, original_vertex_count)
-        V, F = remove_vertices_and_incident_faces(V, F, excluded_indices)
+        if vertex_rgb is None:
+            V, F = remove_vertices_and_incident_faces(V, F, excluded_indices)
+        else:
+            V, F, vertex_rgb = remove_vertices_and_incident_faces(
+                V, F, excluded_indices, vertex_rgb
+            )
+        mesh = trimesh.Trimesh(
+            vertices=V,
+            faces=F,
+            vertex_colors=vertex_rgb,
+            process=False,
+        )
         print(
             f"Excluded {len(excluded_indices)} masked vertices; mesh reduced from "
             f"{original_vertex_count} vertices/{original_face_count} faces to "
             f"{len(V)} vertices/{len(F)} faces."
         )
 
-    surface_data, udf_data = sample_mesh_udf(V, F)
+    surface_data, udf_data = sample_mesh_udf(
+        mesh, color_max_distance=args.color_max_distance
+    )
 
     parent_folder = os.path.dirname(args.output_prefix)
     if parent_folder:

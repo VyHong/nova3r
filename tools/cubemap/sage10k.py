@@ -27,7 +27,7 @@ def output_is_complete(output_dir, require_depth=False):
     )
 
 
-def add_world_extrinsics(output_dir, panorama_w2c):
+def add_world_extrinsics(output_dir, panorama_w2c, normalization=None):
     metadata_path = output_dir / "camera_data.json"
     metadata = json.loads(metadata_path.read_text())
     panorama_w2c = np.asarray(panorama_w2c, dtype=np.float64)
@@ -38,7 +38,36 @@ def add_world_extrinsics(output_dir, panorama_w2c):
         face_w2c = np.asarray(face["extrinsics"], dtype=np.float64)
         world_w2c = face_w2c @ BLENDER_TO_OPENCV @ panorama_w2c
         face["world_extrinsics"] = world_w2c.tolist()
+        if normalization is not None:
+            # x_normalized = scale * (x_gltf - center). Keep rotations rigid;
+            # normalized camera coordinates are scaled metric camera coordinates.
+            center = np.asarray(normalization["center_gltf"], dtype=np.float64)
+            scale = normalization["scale"]
+            normalized_w2c = world_w2c.copy()
+            normalized_w2c[:3, 3] = scale * (
+                world_w2c[:3, :3] @ center + world_w2c[:3, 3]
+            )
+            face["normalized_world_extrinsics"] = normalized_w2c.tolist()
     metadata_path.write_text(json.dumps(metadata, indent=4))
+    if normalization is not None:
+        (output_dir / "normalization.json").write_text(json.dumps(normalization, indent=2) + "\n")
+
+
+def projection_signature(panorama_path, scene_dir, shape, fov, res, depth_dir_name="depth"):
+    # Resume only if the source image, poses, normalization, and projection
+    # settings still match. In particular, never reuse faces of an old pose.
+    signature = {"shape": shape, "fov": fov, "res": res}
+    for path in (panorama_path, scene_dir / depth_dir_name / panorama_path.name,
+                 scene_dir / "extrinsics.json", scene_dir / "normalization.json"):
+        if path.is_file():
+            stat = path.stat()
+            signature[str(path.relative_to(scene_dir))] = [stat.st_size, stat.st_mtime_ns]
+    render_marker = scene_dir / ".complete.json"
+    if render_marker.is_file():
+        settings = json.loads(render_marker.read_text()).get("render_settings")
+        if settings is not None:
+            signature["render_settings"] = settings
+    return signature
 
 
 def process_panorama(panorama_path, scene_dir, output_root, args):
@@ -49,15 +78,26 @@ def process_panorama(panorama_path, scene_dir, output_root, args):
         / f"{panorama_path.stem}_{args.shape}_{int(args.fov)}"
     )
     depth_path = scene_dir / args.depth_dir_name / panorama_path.name
+    extrinsics_path = scene_dir / "extrinsics.json"
+    normalization_path = scene_dir / "normalization.json"
+    signature = projection_signature(
+        panorama_path, scene_dir, args.shape, args.fov, args.res, args.depth_dir_name,
+    )
+    marker = output_dir / ".complete.json"
+    try:
+        matching_signature = json.loads(marker.read_text()) == signature
+    except (OSError, ValueError):
+        matching_signature = False
     if args.require_depth and not depth_path.is_file():
         raise FileNotFoundError(
             f"No rendered depth for {panorama_path}; expected {depth_path}"
         )
-    if not args.overwrite and output_is_complete(
+    if not args.overwrite and matching_signature and output_is_complete(
         output_dir, require_depth=depth_path.is_file()
-    ):
+    ) and (not normalization_path.is_file() or (output_dir / "normalization.json").is_file()):
         print(f"Skipping complete panorama: {panorama_path}")
         return
+    marker.unlink(missing_ok=True)
 
     command = [
         sys.executable,
@@ -84,14 +124,17 @@ def process_panorama(panorama_path, scene_dir, output_root, args):
         )
     subprocess.run(command, check=True)
 
-    extrinsics_path = scene_dir / "extrinsics.json"
     if extrinsics_path.is_file():
         panorama_extrinsics = json.loads(extrinsics_path.read_text())
         if panorama_path.name not in panorama_extrinsics:
             raise KeyError(f"{panorama_path.name} is missing from {extrinsics_path}")
         add_world_extrinsics(
-            output_dir, panorama_extrinsics[panorama_path.name]
+            output_dir, panorama_extrinsics[panorama_path.name],
+            json.loads(normalization_path.read_text()) if normalization_path.is_file() else None,
         )
+    if not output_is_complete(output_dir, require_depth=depth_path.is_file()):
+        raise RuntimeError(f"Cubemap generator left incomplete output: {output_dir}")
+    marker.write_text(json.dumps(signature, indent=2) + "\n")
 
 
 def main():

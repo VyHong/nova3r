@@ -1,14 +1,20 @@
 import os
 import sys
+from datetime import timedelta
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+from training.distributed_env import configure, validate
+from training.eval_freq import resolve_eval_freq
+
+configure()
+
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.strategies import DDPStrategy
 import argparse
 import torch
 from training.nova3r.lightning_module import Nova3RLightningModule
@@ -19,8 +25,10 @@ from demo_nova3r import load_model
 
 def parse_args():
     parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
-    parser.add_argument("--config", default="checkpoints/hunyuan/.hydra/config.yaml", help="Model and training config")
-    parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
+    parser.add_argument("--config", default="checkpoints/unconditional_dit/.hydra/config.yaml", help="Model and training config")
+    parser.add_argument("--device", default="gpu", help="Device (default: gpu)")
+    parser.add_argument("--devices", type=int, default=None, help="Number of devices; defaults to experiment.gpus")
+    parser.add_argument("--ddp-timeout-seconds", type=int, default=600)
     args = parser.parse_args()
 
     return args
@@ -31,7 +39,12 @@ def main():
     args = parse_args()
     pl.seed_everything(40, workers=True)
 
-    model, cfg = load_model(device=args.device, config_path=args.config, stage="test")
+    model, cfg = load_model(
+        device="cpu",
+        config_path=args.config,
+        dtype=torch.float32,
+        stage="test",
+    )
     data_cfg = cfg.data
 
     datamodule = Nova3RDataModule(
@@ -58,10 +71,17 @@ def main():
     )
     lr_monitor = LearningRateMonitor(logging_interval="step")
 
+    devices = args.devices if args.devices is not None else int(cfg.gpus)
+    validate(torch, devices, args.device)
+    check_val_every_n_epoch, val_check_interval = resolve_eval_freq(cfg.eval_freq)
     trainer = pl.Trainer(
         max_epochs=cfg.epochs,
         accelerator=args.device,
-        devices=cfg.gpus,
+        devices=devices,
+        strategy=DDPStrategy(
+            timeout=timedelta(seconds=args.ddp_timeout_seconds),
+            find_unused_parameters=True,
+        ) if devices > 1 else "auto",
         logger=logger,
         callbacks=[checkpoint_callback, last_checkpoint, lr_monitor],
         precision=cfg.amp_dtype,
@@ -69,7 +89,8 @@ def main():
         gradient_clip_algorithm="norm",
         accumulate_grad_batches=cfg.accum_iter,
         log_every_n_steps=1,
-        check_val_every_n_epoch=cfg.eval_freq,
+        check_val_every_n_epoch=check_val_every_n_epoch,
+        val_check_interval=val_check_interval,
     )
 
     trainer.fit(module, datamodule=datamodule)

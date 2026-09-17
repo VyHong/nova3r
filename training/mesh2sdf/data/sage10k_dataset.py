@@ -31,11 +31,29 @@ class SAGE10KSDFDataset(SDFDatasetMixin):
     world-to-camera poses are loaded from ``pose_root/<scene>.json`` and
     composed at load time. Geometry defaults to
     ``sdf_data_root/<scene>/scene_{surface,udf}.npz``.
+
+    ``modalities`` can contain ``images``, ``cameras``, ``surface``,
+    ``geo_points``, ``conditioning_latent``, ``visible_geometry_latent``,
+    ``image_features``, and ``gt_latent``. When omitted,
+    images, cameras, and both geometry modalities are loaded; configured latent
+    roots enable their corresponding latent modalities.
     """
 
     PANORAMA_TO_OPENCV = np.diag(np.asarray([1.0, -1.0, -1.0, 1.0], dtype=np.float32))
     SURFACE_FILENAME = "scene_surface.npz"
     GEO_POINTS_FILENAME = "scene_udf.npz"
+    AVAILABLE_MODALITIES = frozenset(
+        {
+            "images",
+            "cameras",
+            "surface",
+            "geo_points",
+            "conditioning_latent",
+            "visible_geometry_latent",
+            "image_features",
+            "gt_latent",
+        }
+    )
 
     def __init__(
         self,
@@ -49,7 +67,13 @@ class SAGE10KSDFDataset(SDFDatasetMixin):
         dataset_prefix="sage10k",
         load_conditioning_latent=False,
         conditioning_latent_root=None,
+        image_feature_root=None,
+        gt_latent_root=None,
+        gt_latent_source="latent",
         subseq_ids=None,
+        modalities=None,
+        load_visible_geometry_latent=False,
+        visible_geometry_latent_root=None,
     ):
         super().__init__(common_conf)
         self.data_root = Path(data_root)
@@ -61,7 +85,45 @@ class SAGE10KSDFDataset(SDFDatasetMixin):
         self.split = split
         self.format = format
         self.configure_subseq_ids(subseq_ids)
-        self.configure_conditioning_latents(load_conditioning_latent, conditioning_latent_root)
+        if modalities is None:
+            self.modalities = {"images", "cameras", "surface", "geo_points"}
+            if load_conditioning_latent:
+                self.modalities.add("conditioning_latent")
+            if load_visible_geometry_latent:
+                self.modalities.add("visible_geometry_latent")
+            if gt_latent_root is not None:
+                self.modalities.add("gt_latent")
+        else:
+            self.modalities = {str(modality) for modality in modalities}
+            unknown = self.modalities - self.AVAILABLE_MODALITIES
+            if unknown:
+                raise ValueError(
+                    f"Unknown SAGE-10K modalities: {sorted(unknown)}. "
+                    f"Available: {sorted(self.AVAILABLE_MODALITIES)}"
+                )
+        self.configure_conditioning_latents(
+            "conditioning_latent" in self.modalities,
+            conditioning_latent_root,
+        )
+        self.configure_visible_geometry_latents(
+            "visible_geometry_latent" in self.modalities,
+            visible_geometry_latent_root,
+        )
+        self.image_feature_root = (
+            Path(image_feature_root) if image_feature_root is not None else None
+        )
+        if "image_features" in self.modalities:
+            if self.image_feature_root is None:
+                raise ValueError(
+                    "image_feature_root is required when modalities contains image_features"
+                )
+            if not self.image_feature_root.is_dir():
+                raise ValueError(
+                    f"Image feature root does not exist: {self.image_feature_root}"
+                )
+        if gt_latent_root is not None:
+            self.modalities.add("gt_latent")
+        self.configure_gt_latents(gt_latent_root, gt_latent_source)
         if samples_list_path is None:
             self.samples_list = self._discover_samples()
         else:
@@ -121,35 +183,125 @@ class SAGE10KSDFDataset(SDFDatasetMixin):
         panorama_w2c = np.asarray(poses[panorama_name], dtype=np.float32)
         return self.PANORAMA_TO_OPENCV @ panorama_w2c
 
-    def _load_geometry(self, anno, rng, world_to_first_camera):
-        surface_path = Path(anno["surface"])
-        geo_points_path = Path(anno["geo_points"])
+    def _load_image_features(self, seq_name, anno):
+        feature_path = self.image_feature_root / seq_name / Path(
+            anno["panorama_name"]
+        ).with_suffix(".pt")
+        if not feature_path.is_file():
+            raise FileNotFoundError(f"Missing panorama image features: {feature_path}")
+        checkpoint = torch.load(feature_path, map_location="cpu", weights_only=True)
+        features = checkpoint.get("patch_features") if isinstance(checkpoint, dict) else checkpoint
+        features = self._validate_single_latent(
+            features, feature_path, "panorama patch features"
+        )
+        return features
 
-        with np.load(surface_path, allow_pickle=True) as data:
-            surface = self.load_surface_points(
-                rng,
-                random_surface=data["random_surface"],
-                sharpedge_surface=data["sharp_surface"],
-            )
-        with np.load(geo_points_path, allow_pickle=True) as data:
-            geo_points = self.load_sdf_points(
-                rng,
-                vol_points=data["vol_points"],
-                vol_label=data["vol_label"],
-                near_points=data["random_near_points"],
-                near_label=data["random_near_label"],
-                sharpedge_points=data["sharp_near_points"],
-                sharpedge_label=data["sharp_near_label"],
-            )
+    def _load_geometry(
+        self,
+        anno,
+        rng,
+        world_to_first_camera,
+        *,
+        load_surface,
+        load_geo_points,
+    ):
+        surface = None
+        if load_surface:
+            with np.load(Path(anno["surface"]), allow_pickle=True) as data:
+                surface = self.load_surface_points(
+                    rng,
+                    random_surface=data["random_surface"],
+                    sharpedge_surface=data["sharp_surface"],
+                    **self.surface_rgb_kwargs(data),
+                )
+
+        geo_points = None
+        if load_geo_points:
+            with np.load(Path(anno["geo_points"]), allow_pickle=True) as data:
+                geo_points = self.load_sdf_points(
+                    rng,
+                    vol_points=data["vol_points"],
+                    vol_label=data["vol_label"],
+                    near_points=data["random_near_points"],
+                    near_label=data["random_near_label"],
+                    sharpedge_points=data["sharp_near_points"],
+                    sharpedge_label=data["sharp_near_label"],
+                    **self.sdf_rgb_kwargs(data),
+                )
 
         # The UDF points and panorama poses both use the exported glTF scene
         # coordinates, so image_w2c is already the complete geometry transform.
         transform = torch.from_numpy(world_to_first_camera).float()
-        surface[:, :3] = (transform[:3, :3] @ surface[:, :3].T).T + transform[:3, 3]
-        if surface.shape[1] >= 6:
-            surface[:, 3:6] = (transform[:3, :3] @ surface[:, 3:6].T).T
-        geo_points[:, :3] = (transform[:3, :3] @ geo_points[:, :3].T).T + transform[:3, 3]
+        if surface is not None:
+            surface[:, :3] = (
+                (transform[:3, :3] @ surface[:, :3].T).T + transform[:3, 3]
+            )
+            if surface.shape[1] >= 6:
+                surface[:, 3:6] = (transform[:3, :3] @ surface[:, 3:6].T).T
+        if geo_points is not None:
+            geo_points[:, :3] = (
+                (transform[:3, :3] @ geo_points[:, :3].T).T + transform[:3, 3]
+            )
         return surface, geo_points
+
+    def _load_views(
+        self,
+        anno,
+        subseq_ids,
+        *,
+        load_images,
+        load_cameras,
+        need_camera_transform,
+    ):
+        """Load selected cubemap faces and compose their camera transforms."""
+        camera_data = None
+        panorama_w2c = None
+        if need_camera_transform:
+            camera_data = json.loads(Path(anno["camera_data"]).read_text())
+            panorama_w2c = self._load_panorama_w2c(
+                anno["pose_path"],
+                anno["panorama_name"],
+            )
+
+        images, extrinsics, intrinsics = [], [], []
+        first_image_extrinsics = None
+        for subseq_order, subseq_id in enumerate(subseq_ids):
+            face_index = int(subseq_id)
+            image_path = anno["subsequence_images"][face_index]
+            original_size = None
+
+            if load_images:
+                image = read_image_cv2(str(image_path))
+                original_size = image.shape[:2]
+                image = self.resize_image(image, cv2.INTER_LANCZOS4)
+                images.append(self._image_to_tensor(image))
+
+            if not need_camera_transform:
+                continue
+
+            face = camera_data[f"{face_index:04d}"]
+            face_w2c = np.asarray(face["extrinsics"], dtype=np.float32)
+            image_extrinsics = face_w2c @ panorama_w2c
+            if subseq_order == 0:
+                first_image_extrinsics = image_extrinsics
+            if not load_cameras:
+                continue
+
+            if original_size is None:
+                original_size = cv2.imread(
+                    str(image_path),
+                    cv2.IMREAD_UNCHANGED,
+                ).shape[:2]
+            intrinsics.append(
+                self._intrinsics_to_resized_pixels(
+                    np.asarray(face["intrinsics"], dtype=np.float32),
+                    original_size,
+                    (self.img_size, self.img_size),
+                )
+            )
+            extrinsics.append(torch.from_numpy(image_extrinsics))
+
+        return images, extrinsics, intrinsics, first_image_extrinsics
 
     def get_data(
         self,
@@ -168,48 +320,62 @@ class SAGE10KSDFDataset(SDFDatasetMixin):
 
         ids = [f"{int(id):05d}"]
 
-        images, extrinsics, intrinsics = [], [], []
+        load_images = "images" in self.modalities
+        load_cameras = "cameras" in self.modalities
+        load_surface = "surface" in self.modalities
+        load_geo_points = "geo_points" in self.modalities
+        load_geometry = load_surface or load_geo_points
+        need_camera_transform = load_cameras or load_geometry
+
+        anno = metadata[ids[0]]
+        images, extrinsics, intrinsics, first_image_extrinsics = self._load_views(
+            anno,
+            subseq_ids,
+            load_images=load_images,
+            load_cameras=load_cameras,
+            need_camera_transform=need_camera_transform,
+        )
+
         surface = geo_points = None
-        for anno in (metadata[item] for item in ids):
-            camera_data = json.loads(Path(anno["camera_data"]).read_text())
-            panorama_w2c = self._load_panorama_w2c(anno["pose_path"], anno["panorama_name"])
-            for subseq_order, subseq_id in enumerate(subseq_ids):
-                face_key = f"{int(subseq_id):04d}"
-                face = camera_data[face_key]
-
-                image = read_image_cv2(str(anno["subsequence_images"][int(subseq_id)]))
-                original_size = image.shape[:2]
-                image = self.resize_image(image, cv2.INTER_LANCZOS4)
-                images.append(self._image_to_tensor(image))
-                intrinsics.append(
-                    self._intrinsics_to_resized_pixels(
-                        np.asarray(face["intrinsics"], dtype=np.float32),
-                        original_size,
-                        image.shape[:2],
-                    )
-                )
-                face_w2c = np.asarray(face["extrinsics"], dtype=np.float32)
-                image_extrinsics = face_w2c @ panorama_w2c
-                extrinsics.append(torch.from_numpy(image_extrinsics))
-
-                if subseq_order == 0:
-                    rng = self._pointcloud_rng(seq_name, ids[0], int(subseq_ids[0]))
-                    surface, geo_points = self._load_geometry(anno, rng, image_extrinsics)
-
-        normalized_extrinsics = self._normalize_extrinsics(torch.stack(extrinsics).unsqueeze(0), translation_scale=1.0).squeeze(0)
+        if load_geometry:
+            rng = self._pointcloud_rng(seq_name, ids[0], int(subseq_ids[0]))
+            surface, geo_points = self._load_geometry(
+                anno,
+                rng,
+                first_image_extrinsics,
+                load_surface=load_surface,
+                load_geo_points=load_geo_points,
+            )
 
         batch = {
             "seq_name": f"{self.dataset_prefix}_{seq_name}",
             "id": ids[0] if len(ids) == 1 else ids,
             "subseq_ids": torch.as_tensor(subseq_ids, dtype=torch.long),
-            "images": images,
-            "extrinsics": normalized_extrinsics,
-            "intrinsics": torch.from_numpy(np.asarray(intrinsics)),
-            "surface": surface,
-            "geo_points": geo_points,
         }
+        if load_images:
+            batch["images"] = images
+        if load_cameras:
+            batch["extrinsics"] = self._normalize_extrinsics(
+                torch.stack(extrinsics).unsqueeze(0),
+                translation_scale=1.0,
+            ).squeeze(0)
+            batch["intrinsics"] = torch.from_numpy(np.asarray(intrinsics))
+        if surface is not None:
+            batch["surface"] = surface
+        if geo_points is not None:
+            batch["geo_points"] = geo_points
         if self.load_conditioning_latent:
             batch["conditioning_latents"] = self._load_conditioning_latent(seq_name, ids)
+        if self.load_visible_geometry_latent:
+            batch["visible_geometry_latents"] = self._load_visible_geometry_latent(seq_name, ids)
+        if "image_features" in self.modalities:
+            batch["image_features"] = self._load_image_features(seq_name, anno)
+        if self.load_gt_latent:
+            gt_latent = self._load_gt_latent(seq_name, ids)
+            if isinstance(gt_latent, dict):
+                batch.update(gt_latent)
+            else:
+                batch["gt_latents"] = gt_latent
         return batch
 
 
@@ -221,7 +387,7 @@ def _main():
     parser.add_argument("--data-root", default="/tmp/datasets/sage-10k/cubemap_data/cubemaps")
     parser.add_argument("--sdf-data-root", default="/tmp/datasets/sage-10k/udf")
     parser.add_argument("--pose-root", default="/mnt/projects/theses/vyhong/sage-10k/poses")
-    parser.add_argument("--samples-list-path", default=None)
+    parser.add_argument("--samples-list-path", default="data/sage-10k/val_list.json")
     parser.add_argument("--index", type=int, default=None)
     parser.add_argument("--scene", default=None)
     parser.add_argument("--frame-id", type=int, default=None)

@@ -24,7 +24,9 @@ def output_prefix_for(mesh_path, data_root, output_root):
     return (output_root / relative_path).with_suffix("")
 
 
-def process_mesh(mesh_path, mask_path, output_prefix, overwrite):
+def process_mesh(
+    mesh_path, mask_path, output_prefix, overwrite, color_max_distance=0.05
+):
     expected_surface = Path(f"{output_prefix}_surface.npz")
     expected_udf = Path(f"{output_prefix}_udf.npz")
 
@@ -39,6 +41,8 @@ def process_mesh(mesh_path, mask_path, output_prefix, overwrite):
         str(mesh_path),
         "--output_prefix",
         str(output_prefix),
+        "--color_max_distance",
+        str(color_max_distance),
     ]
     if mask_path.is_file():
         command.extend(["--exclude_vertex_indices", str(mask_path)])
@@ -57,7 +61,15 @@ def process_mesh(mesh_path, mask_path, output_prefix, overwrite):
         return "failed"
 
 
-def main(data_root, output_root, workers, overwrite, dry_run, limit):
+def main(
+    data_root,
+    output_root,
+    workers,
+    overwrite,
+    dry_run,
+    limit,
+    color_max_distance=0.05,
+):
     data_root = data_root.resolve()
     output_root = output_root.resolve()
 
@@ -93,7 +105,14 @@ def main(data_root, output_root, workers, overwrite, dry_run, limit):
     print(f"Processing with {workers} concurrent worker(s)...")
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(process_mesh, mesh_path, mask_path, output_prefix, overwrite): mesh_path
+            executor.submit(
+                process_mesh,
+                mesh_path,
+                mask_path,
+                output_prefix,
+                overwrite,
+                color_max_distance,
+            ): mesh_path
             for mesh_path, mask_path, output_prefix in jobs
         }
         progress = tqdm(
@@ -158,7 +177,15 @@ if __name__ == "__main__":
         default=None,
         help="Process only the first N meshes, useful for a small test run.",
     )
+    parser.add_argument(
+        "--color_max_distance",
+        type=float,
+        default=0.05,
+        help="Near-surface RGB band as a fraction of each mesh's sampling scale.",
+    )
     args = parser.parse_args()
+    if args.color_max_distance < 0:
+        parser.error("--color_max_distance must be non-negative")
     main(
         data_root=args.data_root,
         output_root=args.output_root,
@@ -166,4 +193,5 @@ if __name__ == "__main__":
         overwrite=args.overwrite,
         dry_run=args.dry_run,
         limit=args.limit,
+        color_max_distance=args.color_max_distance,
     )

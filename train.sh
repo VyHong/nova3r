@@ -53,14 +53,20 @@ RUN bash -c "
 
   bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/sage-10k/udf.zip  /tmp/datasets/sage-10k
   bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/sage-10k/cubemap_data.zip /tmp/datasets/sage-10k -o notrim
+  bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/sage-10k/panorama_latents.zip /tmp/datasets/sage-10k
+  bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/sage-10k/cube_latents_512.zip /tmp/datasets/sage-10k 
+  bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/sage-10k/visible_latent_cube.zip /tmp/datasets/sage-10k 
   
   export PYTHONUNBUFFERED=1
   export PYTHONPATH=\${PYTHONPATH}:/mnt/home/vyhong/projects/nova3r
   
   echo 'Running training...'
-  python -u training/train.py
+  python -u training/resume_train.py
 "
 
+#   bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/sage-10k/median_latents_512.zip /tmp/datasets/sage-10k
+#   bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/sage-10k/panorama_latents.zip /tmp/datasets/sage-10k
+# bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/scannetpp/cubemap_data.zip  /tmp/datasets/scannetpp
 #echo 'Mounting 3D-FRONT dataset using Mount Zip...'
 #bash bulk_mount_mount_zip.sh /mnt/projects/theses/vyhong/3dfront/3D-FRONT-TEST-SCENE-UDF.zip /tmp/datasets/3dfront
 

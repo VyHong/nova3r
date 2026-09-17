@@ -39,6 +39,8 @@ class ReplicaPanoSDFDataset(SDFDatasetMixin):
         load_conditioning_latent=False,
         conditioning_latent_root=None,
         subseq_ids=None,
+        load_visible_geometry_latent=False,
+        visible_geometry_latent_root=None,
     ):
         """
         Initialize the ReplicaPano dataset.
@@ -63,6 +65,9 @@ class ReplicaPanoSDFDataset(SDFDatasetMixin):
         self.configure_subseq_ids(subseq_ids)
         self.configure_conditioning_latents(
             load_conditioning_latent, conditioning_latent_root
+        )
+        self.configure_visible_geometry_latents(
+            load_visible_geometry_latent, visible_geometry_latent_root
         )
 
         self.sequence_list = []
@@ -241,7 +246,12 @@ class ReplicaPanoSDFDataset(SDFDatasetMixin):
 
                     total_transform = torch.from_numpy(total_transform).float()
 
-                    surface = self.load_surface_points(rng, random_surface=surface["random_surface"], sharpedge_surface=surface["sharp_surface"])
+                    surface = self.load_surface_points(
+                        rng,
+                        random_surface=surface["random_surface"],
+                        sharpedge_surface=surface["sharp_surface"],
+                        **self.surface_rgb_kwargs(surface),
+                    )
                     geo_points = self.load_sdf_points(
                         rng,
                         vol_points=geo_points["vol_points"],
@@ -250,6 +260,7 @@ class ReplicaPanoSDFDataset(SDFDatasetMixin):
                         near_label=geo_points["random_near_label"],
                         sharpedge_points=geo_points["sharp_near_points"],
                         sharpedge_label=geo_points["sharp_near_label"],
+                        **self.sdf_rgb_kwargs(geo_points),
                     )
                     surface[:, :3] = (total_transform[:3, :3] @ surface[:, :3].T).T + total_transform[:3, 3]
                     surface[:, 3:6] = (total_transform[:3, :3] @ surface[:, 3:6].T).T
@@ -284,6 +295,8 @@ class ReplicaPanoSDFDataset(SDFDatasetMixin):
         }
         if self.load_conditioning_latent:
             batch["conditioning_latents"] = self._load_conditioning_latent(seq_name, ids)
+        if self.load_visible_geometry_latent:
+            batch["visible_geometry_latents"] = self._load_visible_geometry_latent(seq_name, ids)
         # save_batch_debug(batch, self.debug_vis_dir, batched=False)
         return batch
 

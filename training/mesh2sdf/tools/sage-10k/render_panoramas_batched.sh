@@ -161,7 +161,9 @@ while IFS= read -r -d '' scene; do
         fi
     fi
     scenes+=("$scene")
-done < <(find "$input_dir" -maxdepth 1 -type f -name '*.zip' -print0 | sort -z)
+# The centered-cubemap driver stages selected scenes as symlinks. Follow them
+# for the file-type check, while still ignoring broken links and directories.
+done < <(find -L "$input_dir" -maxdepth 1 -type f -name '*.zip' -print0 | sort -z)
 
 if [[ "$reverse" == true ]]; then
     declare -a reversed_scenes=()
@@ -210,9 +212,17 @@ run_batch() {
     local log_file
     log_file=$(printf '%s/batch-%05d.log' "$log_dir" "$batch_number")
     printf 'Starting batch %d on GPU %s; log: %s\n' "$batch_number" "$gpu" "$log_file"
+    local status=0
     CUDA_VISIBLE_DEVICES="$gpu" conda run --no-capture-output -n "$conda_env" \
-        python "$renderer" "$batch_dir" --output-dir "$output_dir" \
+        python -u "$renderer" "$batch_dir" --output-dir "$output_dir" \
         --allow-scene-failures "${renderer_args[@]}" >"$log_file" 2>&1
+    status=$?
+    if ((status != 0)); then
+        printf 'Batch %d exited with status %d; last log lines (%s):\n' \
+            "$batch_number" "$status" "$log_file" >&2
+        tail -n 25 -- "$log_file" >&2
+    fi
+    return "$status"
 }
 
 total_batches=$(( (${#scenes[@]} + batch_size - 1) / batch_size ))

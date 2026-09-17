@@ -69,6 +69,71 @@ conda run --no-capture-output -n nova3r \
   --res 518
 ```
 
+## One centered RGB cubemap per SAGE-10k scene
+
+`render_centered_sage10k.py` deduplicates the `SCENE FRAME` list by scene and
+renders one view at the exact room midpoint (including half-height), with a
+fixed SAGE +Y heading. The supplied list contains 9,796 unique scenes.
+`--camera-height 1.7` overrides the height above the floor. The camera is not
+moved away from furniture at the room center.
+
+Run from the repository root; create `blender` once if needed with
+`conda env create -f environment-panorama.yml`.
+
+```bash
+conda run --no-capture-output -n nova3r python tools/cubemap/render_centered_sage10k.py \
+  --scene-list data/sage-10k/surface_vae_latent_list.json \
+  --scene-root /tmp/datasets/sage-10k/scenes \
+  --output-root /tmp/datasets/sage-10k/centered_median \
+  --conda-env blender --projection-env nova3r \
+  --gpus 0,1 --jobs 32 --batch-size 50 --workers 4
+```
+
+Add `--limit 1` to test one scene, or `--dry-run` to check input coverage.
+Surface files and median normalization are no longer used; `--surface-root`
+is accepted only for compatibility with older commands. The directory name
+`centered_median` is retained here so existing rendered panoramas can be reused.
+
+Final data for each scene:
+
+```text
+panoramas/<scene>/
+  <scene>_panorama_000.png       # centered 2048x1024 panorama
+  extrinsics.json                # panorama pose
+  .complete.json                 # render settings and completion record
+cubemaps/<scene>/<scene>_panorama_000_cube_95/
+  0000.jpg ... 0005.jpg          # six 518x518 faces, 95-degree FOV
+  camera_data.json               # face intrinsics and local/world extrinsics
+  .complete.json                 # settings and completion record for resume
+```
+
+The renderer first creates the missing panoramas, then converts them to
+cubemaps. The panorama PNG and its extrinsics are retained. The driver removes
+only obsolete `normalization.json` files and normalized pose fields left by the
+older workflow. Logs and `scene_list.json`, `completed_list.json`, and
+`failures.json` remain as progress records. Cubemap camera metadata contains
+metric glTF `world_extrinsics`.
+
+Reruns skip completed cubemaps even after the source panorama has been deleted.
+To convert existing panoramas or remove normalization metadata from the older
+workflow without launching Blender:
+
+```bash
+python tools/cubemap/render_centered_sage10k.py \
+  --output-root /tmp/datasets/sage-10k/centered_median \
+  --projection-env nova3r --convert-only
+```
+
+Do not run cleanup concurrently with another driver using the same output root.
+An already-running Python driver keeps the old behavior: either restart it to
+use the updated pipeline (completed panoramas are reused), or let it finish
+and run `--convert-only` afterward. Existing matching cubemaps from the older
+workflow are reused without reprojecting their images.
+
+GPU IDs default to `0,1`; `--jobs` is total concurrency across both GPUs.
+`--gpus 0` restricts rendering to one GPU. Batch logs are in
+`panoramas/logs-batched/`, and failed scenes have `panoramas/<scene>/failure.log`.
+
 ## Single panorama
 
 ```bash

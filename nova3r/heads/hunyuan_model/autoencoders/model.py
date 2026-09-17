@@ -47,8 +47,14 @@ class DiagonalGaussianDistribution(object):
         if self.deterministic:
             self.var = self.std = torch.zeros_like(self.mean)
 
-    def sample(self):
-        x = self.mean + self.std * torch.randn_like(self.mean)
+    def sample(self, generator=None):
+        noise = torch.randn(
+            self.mean.shape,
+            device=self.mean.device,
+            dtype=self.mean.dtype,
+            generator=generator,
+        )
+        x = self.mean + self.std * noise
         return x
 
     def kl(self, other=None, dims=(1, 2, 3)):
@@ -205,6 +211,8 @@ class ShapeVAE(VectsetVAE):
         drop_path_rate: float = 0.0,
         scale_factor: float = 1.0,
         sdf_label_scale: float = 128.0,
+        predict_rgb: bool = False,
+        rgb_loss_weight: float = 1.0,
         use_ln_post: bool = True,
         ckpt_path=None,
         cfg=None,
@@ -254,6 +262,28 @@ class ShapeVAE(VectsetVAE):
                 label_type=label_type,
             )
 
+        self.predict_rgb = bool(predict_rgb)
+        self.rgb_loss_weight = float(rgb_loss_weight)
+        if self.rgb_loss_weight < 0:
+            raise ValueError("rgb_loss_weight must be non-negative")
+        self.rgb_decoder = None
+        if self.predict_rgb:
+            if cfg is not None and "pts3d_head" in cfg:
+                raise ValueError("predict_rgb is only supported with the implicit geo_decoder")
+            self.rgb_decoder = CrossAttentionDecoder(
+                fourier_embedder=self.fourier_embedder,
+                out_channels=3,
+                num_latents=num_latents,
+                mlp_expand_ratio=geo_decoder_mlp_expand_ratio,
+                downsample_ratio=geo_decoder_downsample_ratio,
+                enable_ln_post=self.geo_decoder_ln_post,
+                width=width // geo_decoder_downsample_ratio,
+                heads=heads // geo_decoder_downsample_ratio,
+                qkv_bias=qkv_bias,
+                qk_norm=qk_norm,
+                label_type=label_type,
+            )
+
         self.scale_factor = scale_factor
         self.sdf_label_scale = sdf_label_scale
         self.latent_shape = (num_latents, embed_dim)
@@ -273,6 +303,24 @@ class ShapeVAE(VectsetVAE):
         kw.pop("stage", None)
         kw.pop("vae_ckpt", None)
 
+        input_weight_key = "encoder.input_proj.weight"
+        checkpoint_weight = state_dict.get(input_weight_key)
+        model_weight = self.state_dict().get(input_weight_key)
+        if (
+            checkpoint_weight is not None
+            and model_weight is not None
+            and checkpoint_weight.shape[0] == model_weight.shape[0]
+            and checkpoint_weight.shape[1] < model_weight.shape[1]
+        ):
+            expanded_weight = checkpoint_weight.new_zeros(model_weight.shape)
+            expanded_weight[:, : checkpoint_weight.shape[1]] = checkpoint_weight
+            state_dict[input_weight_key] = expanded_weight
+            print(
+                "Expanded encoder input weights from "
+                f"{tuple(checkpoint_weight.shape)} to {tuple(model_weight.shape)} "
+                "with zero-initialized feature columns."
+            )
+
         # when using pointcloud decoder
         # state_dict = self.prepare_hunyuan_weights(state_dict)
 
@@ -286,13 +334,17 @@ class ShapeVAE(VectsetVAE):
         latents = self.transformer(latents)
         return latents
 
-    def encode(self, surface, sample_posterior=True):
+    def encode(self, surface, sample_posterior=True, posterior_seed=None):
         pc, feats = surface[:, :, :3], surface[:, :, 3:]
         latents, _ = self.encoder(pc, feats)
         moments = self.pre_kl(latents)
         posterior = DiagonalGaussianDistribution(moments, feat_dim=-1)
         if sample_posterior:
-            latents = posterior.sample()
+            generator = None
+            if posterior_seed is not None:
+                generator = torch.Generator(device=posterior.mean.device)
+                generator.manual_seed(int(posterior_seed))
+            latents = posterior.sample(generator=generator)
         else:
             latents = posterior.mode()
         return latents
@@ -301,6 +353,12 @@ class ShapeVAE(VectsetVAE):
         latents = self.post_kl(latents)
         latents = self.transformer(latents)
         return latents
+
+    def decode_rgb(self, queries, latents):
+        """Predict RGB in [0, 1] at query locations from decoded latents."""
+        if self.rgb_decoder is None:
+            raise RuntimeError("RGB prediction is disabled; set predict_rgb=true")
+        return torch.sigmoid(self.rgb_decoder(queries=queries, latents=latents))
 
     def _encode(self, pointmaps, sample_posterior=True, **kwargs):
         latents = self.encode(pointmaps, sample_posterior=sample_posterior)
@@ -368,6 +426,26 @@ class ShapeVAE(VectsetVAE):
 
         loss, details = criterion(gt_list, pred_list)
 
+        if self.rgb_decoder is not None:
+            if geo_points.shape[-1] < 8:
+                raise ValueError(
+                    "predict_rgb=true requires geo_points columns "
+                    "[XYZ, distance, RGB, RGB-valid]"
+                )
+            rgb_target = geo_points[:, :, 4:7].clamp(0.0, 1.0)
+            rgb_valid = geo_points[:, :, 7:8] > 0.5
+            rgb_pred = self.decode_rgb(geo_points_coords, latents)
+            rgb_error = F.smooth_l1_loss(
+                rgb_pred, rgb_target, reduction="none"
+            )
+            valid_values = rgb_valid.expand_as(rgb_error)
+            if valid_values.any():
+                rgb_loss = rgb_error[valid_values].mean()
+            else:
+                rgb_loss = rgb_error.new_zeros(())
+            loss = loss + self.rgb_loss_weight * rgb_loss
+            details["rgb_loss"] = rgb_loss.detach().item()
+
         loss += kl_loss * kl_weight
         details["kl_loss"] = kl_loss.item()
         return loss, details, latents
@@ -388,6 +466,8 @@ class ShapeVAEDecoder(VectsetVAE):
         pc_size: int = 5120,
         pc_sharpedge_size: int = 5120,
         point_feats: int = 3,
+        predict_rgb: bool = False,
+        rgb_loss_weight: float = 1.0,
         downsample_ratio: int = 20,
         geo_decoder_downsample_ratio: int = 1,
         geo_decoder_mlp_expand_ratio: int = 4,
@@ -411,6 +491,7 @@ class ShapeVAEDecoder(VectsetVAE):
             pc_size,
             pc_sharpedge_size,
             point_feats,
+            rgb_loss_weight,
             downsample_ratio,
             use_ln_post,
         )
@@ -450,11 +531,36 @@ class ShapeVAEDecoder(VectsetVAE):
                 label_type=label_type,
             )
 
+        self.predict_rgb = bool(predict_rgb)
+        self.rgb_decoder = None
+        if self.predict_rgb:
+            if cfg is not None and "pts3d_head" in cfg:
+                raise ValueError("predict_rgb is only supported with the implicit geo_decoder")
+            self.rgb_decoder = CrossAttentionDecoder(
+                fourier_embedder=self.fourier_embedder,
+                out_channels=3,
+                num_latents=num_latents,
+                mlp_expand_ratio=geo_decoder_mlp_expand_ratio,
+                downsample_ratio=geo_decoder_downsample_ratio,
+                enable_ln_post=self.geo_decoder_ln_post,
+                width=width // geo_decoder_downsample_ratio,
+                heads=heads // geo_decoder_downsample_ratio,
+                qkv_bias=qkv_bias,
+                qk_norm=qk_norm,
+                label_type=label_type,
+            )
+
         self.scale_factor = scale_factor
         self.latent_shape = (num_latents, embed_dim)
 
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path)
+
+    def decode_rgb(self, queries, latents):
+        """Predict RGB in [0, 1] at query locations from decoded latents."""
+        if self.rgb_decoder is None:
+            raise RuntimeError("RGB prediction is disabled; set predict_rgb=true")
+        return torch.sigmoid(self.rgb_decoder(queries=queries, latents=latents))
 
     def remove_encoder_keys(self, state_dict):
         encoder_keys = [key for key in state_dict.keys() if key.startswith("encoder")]

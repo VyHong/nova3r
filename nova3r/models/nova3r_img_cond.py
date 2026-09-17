@@ -1,35 +1,30 @@
 # Copyright (c) 2026 Weirong Chen
-from typing import Dict, List, Optional, Tuple, Union
-
-
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from huggingface_hub import PyTorchModelHubMixin  # used for model hub
 
-from nova3r.heads.hunyuan_model.autoencoders.model import DiagonalGaussianDistribution
+from nova3r.heads.hunyuan_model.autoencoders.model import ShapeVAE
+from nova3r.heads.pts3d_decoder import LatentJointFMDecoder, PointJointFMDecoderV2
+from nova3r.heads.pts3d_decoder.latent_flowm_decoder import (
+    DiT,
+    flow_matching_losses,
+    resolve_precomputed_gt_latents,
+    sample_linear_flow_path,
+)
 from nova3r.models.aggregator_pts3d import AggregatorPts3D
-from nova3r.heads.pts3d_decoder import *
-from nova3r.heads.triposg_model.autoencoder_kl_triposg import FrequencyPositionalEmbedding
-from nova3r.layers.hunyuan_block import FourierEmbedder
-import numpy as np
-import math
-from torch_cluster import fps
-
-from einops import rearrange
-
 from safetensors.torch import load_file
 from nova3r.models.aggregator_da3 import DepthAnything3
-from nova3r.heads.hunyuan_model.autoencoders.model import ShapeVAE, ShapeVAEDecoder
-
-from nova3r.flow_matching.path.scheduler import LinearScheduler
-from nova3r.flow_matching.path import AffineProbPath
-
 from nova3r.flow_matching.solver import ODESolver
 from nova3r.models.model_wrapper import BatchModelWrapper
+
 from nova3r.utils.batch_debug import save_batch_debug
 
-from nova3r.heads.pts3d_decoder.latent_flowm_decoder import DiT
+HEAD_TYPES = {
+    "DiT": DiT,
+    "LatentJointFMDecoder": LatentJointFMDecoder,
+    "PointJointFMDecoderV2": PointJointFMDecoderV2,
+}
+FIRST_STAGE_TYPES = {"ShapeVAE": ShapeVAE}
 
 
 def _load_checkpoint_state_dict(path):
@@ -49,6 +44,14 @@ def _load_checkpoint_state_dict(path):
         state_dict = {key[len("model.") :]: value for key, value in state_dict.items()}
 
     return state_dict
+
+
+def _without_prefixes(state_dict, prefixes):
+    return {
+        key: value
+        for key, value in state_dict.items()
+        if not key.startswith(prefixes)
+    }
 
 
 class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
@@ -72,104 +75,81 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
         super().__init__()
         self.cfg = cfg
 
-        # Classifier-free guidance settings
-        self.cfg_drop_prob = classifier_free_guidance_drop_pro
+        del (
+            img_size,
+            patch_size,
+            patch_3d_size,
+            num_3d_tokens,
+            classifier_free_guidance_drop_pro,
+        )
 
         if self.cfg.aggregator.name == "DepthAnything3Net":
             self.da3_aggregator = DepthAnything3(cfg=self.cfg)
         elif self.cfg.aggregator.name == "AggregatorPts3D":
             self.vggt_aggregator = AggregatorPts3D(**self.cfg.aggregator.params)
+        elif self.cfg.aggregator.name != "PrecomputedDINOv3":
+            raise ValueError(f"Unknown aggregator: {self.cfg.aggregator.name}")
 
         token_dim = self.cfg.aggregator.params.token_dim
         self.detach_vit_token = self.cfg.aggregator.params.detach_vit_token if "detach_vit_token" in self.cfg.aggregator.params else False
-        self.detach_vggt_token = self.cfg.aggregator.params.detach_vggt_token if "detach_vggt_token" in self.cfg.aggregator.params else False
 
-        self.embedder = FrequencyPositionalEmbedding(
-            num_freqs=8,
-            logspace=True,
-            input_dim=3,
-            include_pi=False,
+        projection_input_dim = (
+            int(self.cfg.aggregator.params.get("feature_dim", embed_dim))
+            if self.cfg.aggregator.name == "PrecomputedDINOv3"
+            else embed_dim * 2
         )
-        # self.embedder.out_dim
-        # self.embed_3d_proj = nn.Linear(self.embedder.out_dim, token_dim)
-
-        self.img_token_proj = nn.Linear(embed_dim * 2, token_dim)
+        self.img_token_proj = nn.Linear(projection_input_dim, token_dim)
         # Initialize img_token_proj with small values to prevent early NaN
         nn.init.trunc_normal_(self.img_token_proj.weight, std=0.02)
         nn.init.zeros_(self.img_token_proj.bias)
 
-        self.num_3d_tokens = num_3d_tokens
-
         self.use_token_ln = self.cfg.aggregator.params.get("use_token_ln", False)
-        self.token_noise_prob = self.cfg.aggregator.params.get("token_noise_prob", 0.0)
-        self.token_noise_sigma = self.cfg.aggregator.params.get("token_noise_sigma", 0.0)
-        self.sample_posterior = getattr(self.cfg, "sample_posterior", True)
-
-        if self.use_token_ln:
-            self.token_norm = nn.LayerNorm(self.cfg.aggregator.params.token_dim)
-        else:
-            self.token_norm = None
+        self.token_norm = (
+            nn.LayerNorm(self.cfg.aggregator.params.token_dim)
+            if self.use_token_ln
+            else None
+        )
 
         self.pts3d_head = None
         self.first_stage = None
         if "pts3d_head" in cfg:
-            self.pts3d_head = eval(cfg.pts3d_head.name)(**cfg.pts3d_head.params)
+            self.pts3d_head = HEAD_TYPES[cfg.pts3d_head.name](**cfg.pts3d_head.params)
 
         if "first_stage" in cfg:
             self.token_to_moments = nn.Linear(token_dim, self.cfg.first_stage.params.embed_dim * 2)
-            self.first_stage = eval(cfg.first_stage.name)(**cfg.first_stage.params)
+            self.first_stage = FIRST_STAGE_TYPES[cfg.first_stage.name](**cfg.first_stage.params)
 
-    def _embed_3d(self, pts3d: torch.Tensor):
-        x = self.embedder(pts3d)  # [B, N, d_point]
-        x = self.embed_3d_proj(x)  # [B, N, d]
-        return x
+    def load_dit_checkpoint(self, checkpoint_path):
+        """Overlay a standalone DiT Lightning checkpoint onto pts3d_head."""
+        if not isinstance(self.pts3d_head, DiT):
+            raise TypeError(
+                "experiment.dit_ckpt requires Nova3rImgCond.cfg.pts3d_head "
+                f"to be DiT, got {type(self.pts3d_head).__name__}"
+            )
 
-    def _sample_features(self, x: torch.Tensor, num_tokens: int = 2048, oversample_factor: int = 4, seed: Optional[int] = None):
-        """
-        Sample points from features of the input point cloud.
+        state_dict = _load_checkpoint_state_dict(str(checkpoint_path))
+        if any(key.startswith("model.") for key in state_dict):
+            # Standalone Mesh2SDFLightningModule checkpoints store the DiT as
+            # model.* and may also contain the frozen validation VAE.
+            state_dict = {
+                key.removeprefix("model."): value
+                for key, value in state_dict.items()
+                if key.startswith("model.")
+            }
+        elif any(key.startswith("pts3d_head.") for key in state_dict):
+            # Also accept a DiT extracted from a full Nova3rImgCond checkpoint.
+            state_dict = {
+                key.removeprefix("pts3d_head."): value
+                for key, value in state_dict.items()
+                if key.startswith("pts3d_head.")
+            }
 
-        Args:
-            x (torch.Tensor): The input point cloud. shape: (B, N, C)
-            num_tokens (int, optional): The number of points to sample. Defaults to 2048.
-            oversample_factor (int, optional): Factor to oversample before FPS. Defaults to 4.
-            seed (Optional[int], optional): The random seed. Defaults to None.
-        """
-        rng = np.random.default_rng(seed)
-        indices = rng.choice(x.shape[1], num_tokens * oversample_factor, replace=num_tokens * oversample_factor > x.shape[1])
-        selected_points = x[:, indices]
-
-        batch_size, num_points, num_channels = selected_points.shape
-        flattened_points = selected_points.view(batch_size * num_points, num_channels)
-        batch_indices = torch.arange(batch_size).to(x.device).repeat_interleave(num_points)
-
-        # fps sampling
-        sampling_ratio = 1.0 / oversample_factor
-        sampled_indices = fps(
-            flattened_points[:, :3],
-            batch_indices,
-            ratio=sampling_ratio,
-            # random_start=self.training,
-            random_start=False,  # for deterministic sampling
+        incompatible = self.pts3d_head.load_state_dict(state_dict, strict=True)
+        print(
+            f"Loaded standalone DiT checkpoint from {checkpoint_path} into "
+            "Nova3rImgCond.pts3d_head"
         )
-        sampled_points = flattened_points[sampled_indices].view(batch_size, -1, num_channels)
-
-        return sampled_points
-
-    def remove_aggregator_weights(self, nova3r_checkpoint):
-        for key in list(nova3r_checkpoint.keys()):
-            if key.startswith("vggt_aggregator"):
-                nova3r_checkpoint.pop(key)
-            if key.startswith("img_token_proj"):
-                nova3r_checkpoint.pop(key)
-
-        return nova3r_checkpoint
-
-    def remove_decoder_weights(self, nova3r_checkpoint):
-        for key in list(nova3r_checkpoint.keys()):
-            if key.startswith("pts3d"):
-                nova3r_checkpoint.pop(key)
-
-        return nova3r_checkpoint
+        return incompatible
 
     def prep_ckpt_for_3d_token(self, ckpt):
         if self.cfg.aggregator.params.token_dim != 128:
@@ -183,32 +163,73 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
 
     def load_state_dict(self, ckpt, **kw):
         new_ckpt = dict(ckpt)
-        aggregator_ckpt = kw.get("aggregator_ckpt")
-        if self.cfg.aggregator.name == "DepthAnything3Net" and kw.get("stage") != "test" and aggregator_ckpt:
-            state_dict = load_file(aggregator_ckpt)
-            missing_keys, unexpected_keys = self.da3_aggregator.load_state_dict(state_dict, strict=False)
-            print(f"Loaded DepthAnything3Net aggregator weights")
-            print(f"Missing keys: {len(missing_keys)}")
-            print(f"Unexpected keys: {len(unexpected_keys)}")
-            print(f"{"-"*100}")
-            new_ckpt = self.remove_aggregator_weights(new_ckpt)
+        stage = kw.pop("stage", None)
+        strict = kw.pop("strict", False)
+        aggregator_ckpt = kw.pop("aggregator_ckpt", None)
+        vae_ckpt = kw.pop("vae_ckpt", None)
+        dit_ckpt = kw.pop("dit_ckpt", None)
+        if kw:
+            unknown = ", ".join(sorted(kw))
+            raise TypeError(f"Unexpected load_state_dict keyword argument(s): {unknown}")
 
-        vae_ckpt = kw.get("vae_ckpt")
-        if "first_stage" in self.cfg and kw.get("stage") != "test" and vae_ckpt:
-            state_dict = _load_checkpoint_state_dict(vae_ckpt)
-            missing_keys, unexpected_keys = self.first_stage.load_state_dict(state_dict, strict=False)
-            print(f"Loaded ShapeVAEDecoder weights")
-            print(f"Missing keys: {len(missing_keys)}")
-            print(f"Unexpected keys: {len(unexpected_keys)}")
-            print(f"{"-"*100}")
-            # when we use the vae the pts3d head from nova3r is never used
-            new_ckpt = self.remove_decoder_weights(new_ckpt)
+        load_aggregator = self.cfg.aggregator.name == "DepthAnything3Net" and stage != "test" and aggregator_ckpt
+        load_vae = "first_stage" in self.cfg and stage != "test" and vae_ckpt
+        if self.cfg.aggregator.name == "PrecomputedDINOv3" and stage != "test":
+            # The precomputed path has no image encoder, and its 1024->token_dim
+            # projection does not match the legacy DA3 2048->token_dim layer.
+            new_ckpt = _without_prefixes(
+                new_ckpt,
+                ("vggt_aggregator.", "da3_aggregator.", "img_token_proj."),
+            )
+        if load_aggregator:
+            new_ckpt = _without_prefixes(
+                new_ckpt,
+                ("vggt_aggregator.", "da3_aggregator.", "img_token_proj."),
+            )
+        if load_vae:
+            # The legacy point decoder is not compatible with the latent-flow
+            # head, and any embedded VAE must not overwrite the requested VAE.
+            new_ckpt = _without_prefixes(
+                new_ckpt,
+                ("pts3d_head.", "first_stage."),
+            )
 
-        if kw.pop("stage", None) != "test" and self.cfg.aggregator.name == "AggregatorPts3D":
+        if stage != "test" and self.cfg.aggregator.name == "AggregatorPts3D":
             new_ckpt = self.prep_ckpt_for_3d_token(new_ckpt)
 
-        missing_keys, unexpected_keys = super().load_state_dict(new_ckpt, strict=False)
+        # Apply the base/full checkpoint first. Optional component checkpoints
+        # are overlays and are deliberately applied last, so nothing can replace
+        # their initialized weights afterward.
+        incompatible = super().load_state_dict(new_ckpt, strict=strict)
+        missing_keys, unexpected_keys = incompatible
         print(f"Loaded Nova3RImgCond weights with {len(missing_keys)} missing keys and {len(unexpected_keys)} unexpected keys.")
+
+        if load_aggregator:
+            state_dict = load_file(aggregator_ckpt)
+            component_incompatible = self.da3_aggregator.load_state_dict(state_dict, strict=False)
+            print("Loaded DepthAnything3Net aggregator weights")
+            print(f"Missing keys: {len(component_incompatible.missing_keys)}")
+            print(f"Unexpected keys: {len(component_incompatible.unexpected_keys)}")
+            print(f"{'-'*100}")
+
+        if load_vae:
+            state_dict = _load_checkpoint_state_dict(vae_ckpt)
+            component_missing, component_unexpected = self.first_stage.load_state_dict(
+                state_dict,
+                strict=True,
+            )
+            print("Loaded ShapeVAE weights")
+            print(f"Missing keys: {len(component_missing)}")
+            print(f"Unexpected keys: {len(component_unexpected)}")
+            print(f"{'-'*100}")
+
+        # Apply the unconditional DiT last. In particular, this must happen
+        # after the VAE overlay, whose legacy checkpoint filtering removes
+        # pts3d_head.* from the base checkpoint.
+        if stage != "test" and dit_ckpt:
+            self.load_dit_checkpoint(dit_ckpt)
+
+        return incompatible
 
     def forward_vggt(
         self,
@@ -248,99 +269,43 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
 
     def _encode(self, images, test=False, **kwargs):
         """Project visual tokens to 3D token space with optional learned token initialization."""
-
-        if self.cfg.aggregator.name == "DepthAnything3Net":
-            aggregated_tokens_list, pts3d, pts3d_conf = self.forward_da3(images, batch=kwargs.get("batch"), ref_view_strategy="first")
+        batch = kwargs.get("batch") or {}
+        if "image_features" in batch:
+            scene_tokens = batch["image_features"]
+            if scene_tokens.ndim != 3:
+                raise ValueError(
+                    "image_features must have shape [B, patches, channels], got "
+                    f"{tuple(scene_tokens.shape)}"
+                )
+            scene_tokens = scene_tokens.to(
+                device=self.img_token_proj.weight.device,
+                dtype=self.img_token_proj.weight.dtype,
+                non_blocking=True,
+            )
+        elif self.cfg.aggregator.name == "PrecomputedDINOv3":
+            raise ValueError(
+                "PrecomputedDINOv3 requires batch['image_features']; configure the "
+                "dataset with modalities: [image_features, gt_latent]"
+            )
+        elif self.cfg.aggregator.name == "DepthAnything3Net":
+            aggregated_tokens_list, _, _ = self.forward_da3(
+                images,
+                batch=batch,
+                ref_view_strategy="first",
+            )
+            scene_tokens = aggregated_tokens_list[-1]  # [B, S, K, C]
         elif self.cfg.aggregator.name == "AggregatorPts3D":
-            aggregated_tokens_list, pts3d, pts3d_conf = self.forward_vggt(images)
-
-        scene_tokens = aggregated_tokens_list[-1]  # [B, S, K, C]
-        B, K, C = scene_tokens.shape
-
+            aggregated_tokens_list, _, _ = self.forward_vggt(images)
+            scene_tokens = aggregated_tokens_list[-1]  # [B, S, K, C]
         tokens = self.img_token_proj(scene_tokens)
-
-        pointmaps = None
 
         if self.use_token_ln and self.token_norm is not None:
             tokens = self.token_norm(tokens)
 
-        encoder_data = {
-            "pointmaps": pointmaps,
+        return {
+            "pointmaps": None,
             "tokens": tokens,
         }
-        return encoder_data
-
-    def _apply_cfg_dropout(self, tokens: torch.Tensor) -> torch.Tensor:
-        """
-        Apply classifier-free guidance dropout to tokens during training.
-
-        Randomly drops (zeros out) tokens with probability cfg_drop_prob.
-        This allows the model to learn both conditional and unconditional generation,
-        enabling classifier-free guidance at inference time.
-
-        Args:
-            tokens (torch.Tensor): Condition tokens with shape [B, N, C]
-
-        Returns:
-            torch.Tensor: Tokens with some potentially zeroed out (during training)
-        """
-        if not self.training or self.cfg_drop_prob <= 0.0:
-            return tokens
-
-        B = tokens.shape[0]
-        # Create a mask for each sample in the batch
-        # With probability cfg_drop_prob, drop all tokens for that sample
-        drop_mask = torch.rand(B, device=tokens.device) < self.cfg_drop_prob
-
-        # Expand mask to match token dimensions [B, 1, 1] for broadcasting
-        drop_mask = drop_mask.view(B, 1, 1).expand_as(tokens)
-        # Zero out tokens where drop_mask is True
-        tokens = tokens.masked_fill(drop_mask, 0.0)
-
-        return tokens
-
-    def _encode_with_cfg(self, images: torch.Tensor, cfg_scale: float = 1.0, **kwargs) -> dict:
-        """
-        Encode images with classifier-free guidance for inference.
-
-        This method runs the encoder and applies CFG interpolation using
-        the cfg_scale parameter.
-
-        Args:
-            images (torch.Tensor): Input images with shape [B, S, C, H, W]
-            cfg_scale (float): Classifier-free guidance scale.
-                               1.0 = no guidance (conditional only)
-                               >1.0 = stronger guidance toward condition
-                               0.0 = unconditional only
-            **kwargs: Additional arguments
-
-        Returns:
-            dict: Dictionary containing 'tokens' with CFG-interpolated tokens
-        """
-        # Get conditional tokens (normal encoding, without CFG dropout)
-        # Temporarily ensure we're in eval mode
-        original_training = self.training
-        self.eval()
-
-        aggregated_tokens_list, pts3d, pts3d_conf = self.forward_vggt(images)
-        scene_tokens = aggregated_tokens_list[-1]  # [B, S, K, C]
-        tokens_cond = self.img_token_proj(scene_tokens)
-
-        # Restore training mode
-        if original_training:
-            self.train()
-
-        # If cfg_scale is 1.0, just return conditional tokens (no CFG)
-        if cfg_scale == 1.0:
-            return {"pointmaps": None, "tokens": tokens_cond}
-
-        # Unconditional tokens are zeros
-        tokens_uncond = torch.zeros_like(tokens_cond)
-
-        # Apply CFG interpolation: uncond + cfg_scale * (cond - uncond)
-        tokens = tokens_uncond + cfg_scale * (tokens_cond - tokens_uncond)
-
-        return {"pointmaps": None, "tokens": tokens}
 
     def _decode(self, tokens, images, token_mask=None, query_points=None, timestep=None, **kwargs):
         """Decode 3D tokens into point cloud coordinates using flow matching ODE solver."""
@@ -354,7 +319,6 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
 
         if self.pts3d_head is not None:
             aggregated_tokens_3d_list = [tokens]
-            cond_tokens = tokens
 
             pts3d_xyz = self.pts3d_head(
                 aggregated_tokens_3d_list,
@@ -363,6 +327,7 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
                 timestep=timestep,
                 num_views=num_views,
                 conditioning_latents=kwargs.get("conditioning_latents", None),
+                visible_geometry_latents=kwargs.get("visible_geometry_latents", None),
             )
 
             predictions["pts3d_xyz"] = pts3d_xyz
@@ -406,17 +371,41 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
         return predictions
 
     def _prepare_lightning_batch(self, batch, deterministic_seed):
-        sample_posterior = self.sample_posterior if deterministic_seed is None else False
-        with torch.no_grad():
-            gt_latents = self.first_stage.encode(
-                batch["surface"],
-                sample_posterior=sample_posterior,
-            )
-        images = torch.stack(batch["images"], dim=1)
+        latent_parameter = self.pts3d_head.x_embedder.weight
 
-        # save_batch_debug({**batch, "images": images, "gt_latents": gt_latents}, "debug_points/lightning_batch", max_samples=2, batched=True)
+        #load or compute gt_latents
+        gt_latents = resolve_precomputed_gt_latents(
+            batch,
+            device=latent_parameter.device,
+            dtype=latent_parameter.dtype,
+            sample_posterior=self.sample_posterior,
+            deterministic_seed=deterministic_seed,
+        )
+        if gt_latents is None:
+            posterior_seed = (
+                deterministic_seed
+                if deterministic_seed is not None
+                else 42 if self.sample_posterior is False else None
+            )
+            with torch.no_grad():
+                gt_latents = self.first_stage.encode(
+                    batch["surface"],
+                    sample_posterior=self.sample_posterior != "mode",
+                    posterior_seed=posterior_seed,
+                )
+
+        images = (
+            torch.stack(batch["images"], dim=1)
+            if "images" in batch
+            else None
+        )
+        #save_batch_debug({**batch, "images": images, "gt_latents": gt_latents}, "debug_points/lightning_batch", max_samples=2, batched=True)
         encoder_data = self._encode(images, batch=batch)
         tokens = encoder_data["tokens"]
+        if images is None:
+            # ODE plumbing uses images only to recover batch/view counts. Keep
+            # this tiny placeholder off the dataset and never invoke an encoder.
+            images = tokens.new_zeros((tokens.shape[0], 1, 0, 0, 0))
 
         conditioning_latents = batch.get("conditioning_latents")
         if conditioning_latents is not None:
@@ -425,70 +414,23 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
                 dtype=tokens.dtype,
             ).contiguous()
 
+        visible_geometry_latents = batch.get("visible_geometry_latents")
+        if visible_geometry_latents is not None:
+            visible_geometry_latents = visible_geometry_latents.to(
+                device=tokens.device,
+                dtype=tokens.dtype,
+            ).contiguous()
+
         encoder_data["conditioning_latents"] = conditioning_latents
         gt_latents = gt_latents.to(device=tokens.device, dtype=tokens.dtype).contiguous()
-        return images, encoder_data, tokens, gt_latents, conditioning_latents
-
-    def _sample_lightning_flow_path(self, gt_latents, deterministic_seed):
-        device = gt_latents.device
-        batch_size = gt_latents.shape[0]
-
-        generator = None
-        if deterministic_seed is not None:
-            generator = torch.Generator(device=device)
-            generator.manual_seed(int(deterministic_seed))
-        x_0 = torch.randn(
-            gt_latents.shape,
-            dtype=gt_latents.dtype,
-            device=device,
-            generator=generator,
+        return (
+            images,
+            encoder_data,
+            tokens,
+            gt_latents,
+            conditioning_latents,
+            visible_geometry_latents,
         )
-        t = torch.rand(batch_size, device=device, generator=generator)
-
-        path = AffineProbPath(scheduler=LinearScheduler())
-        fm_path = path
-        path_sample = fm_path.sample(x_0=x_0, x_1=gt_latents, t=t)
-        t_query = t[:, None].expand(batch_size, path_sample.x_t.shape[1])
-        return path_sample.x_t, path_sample.dx_t, t, t_query
-
-    def _predict_lightning_velocity(
-        self,
-        batch,
-        tokens,
-        x_t,
-        t_query,
-        conditioning_latents=None,
-    ):
-        v_pred = self.pts3d_head(
-            decout=[tokens],
-            noised_latents=x_t,
-            timestep=t_query,
-            conditioning_latents=conditioning_latents,
-        )
-        return v_pred
-
-    def _compute_lightning_losses(self, v_pred, dx_t, x_t, t, gt_latents):
-        velocity_loss = F.mse_loss(v_pred, dx_t)
-
-        # For the linear probability path,
-        #   x_t = (1 - t) * x_0 + t * x_1
-        # and the target velocity is x_1 - x_0.  A velocity prediction can
-        # therefore be converted directly into an estimate of the clean
-        # target latent without running the ODE solver:
-        #   x_1_pred = x_t + (1 - t) * v_pred.
-        batch_size = x_t.shape[0]
-        t_broadcast = t.reshape(batch_size, *([1] * (x_t.ndim - 1)))
-        pred_latents = x_t + (1.0 - t_broadcast) * v_pred
-        latent_reconstruction_loss = F.mse_loss(pred_latents, gt_latents)
-        latent_reconstruction_loss_weight = float(getattr(self.cfg, "latent_reconstruction_loss_weight", 0.1))
-
-        loss = velocity_loss + latent_reconstruction_loss_weight * latent_reconstruction_loss
-        details = {
-            "velocity_loss": float(velocity_loss.detach()),
-            "latent_reconstruction_loss": float(latent_reconstruction_loss.detach()),
-            "latent_reconstruction_loss_weight": latent_reconstruction_loss_weight,
-        }
-        return loss, details
 
     def _reconstruct_lightning_latents(
         self,
@@ -496,37 +438,26 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
         encoder_data,
         gt_latents,
         conditioning_latents,
+        visible_geometry_latents,
     ):
         with torch.no_grad():
-            step_size = 0.01
-            method = "euler"
-            token_mask = None
-            pts3d_src = None
-
-            num_steps = int(round(1.0 / step_size)) + 1
-
             wrapped_vf = BatchModelWrapper(model=self)
-
             wrapped_vf.eval()
             self.eval()
 
             noise_generator = torch.Generator(device=gt_latents.device)
             noise_generator.manual_seed(42)
-
             x_init = torch.randn_like(gt_latents, generator=noise_generator)
-            time_grid = torch.linspace(0, 1, num_steps).to(gt_latents.device)
-            solver = ODESolver(velocity_model=wrapped_vf)
-            sol = solver.sample(
-                time_grid=time_grid,
+            sol = ODESolver(velocity_model=wrapped_vf).sample(
+                time_grid=torch.linspace(0, 1, 101, device=gt_latents.device),
                 x_init=x_init,
-                method=method,
-                step_size=step_size,
+                method="euler",
+                step_size=0.01,
                 return_intermediates=False,
                 images=images,
-                token_mask=token_mask,
                 encoder_data=encoder_data,
-                pointmaps=pts3d_src,
                 conditioning_latents=conditioning_latents,
+                visible_geometry_latents=visible_geometry_latents,
             )
 
         return self.first_stage.decode(sol)
@@ -545,25 +476,59 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
             tokens,
             gt_latents,
             conditioning_latents,
+            visible_geometry_latents,
         ) = self._prepare_lightning_batch(batch, deterministic_seed)
-        x_t, dx_t, t, t_query = self._sample_lightning_flow_path(gt_latents, deterministic_seed)
 
-        v_pred = self._predict_lightning_velocity(
-            batch,
-            tokens,
-            x_t,
-            t_query,
-            conditioning_latents=conditioning_latents,
+        x_t, dx_t, t = sample_linear_flow_path(
+            gt_latents,
+            deterministic_seed,
+            timestep_sampling=self.timestep_sampling,
+            timestep_mu=self.timestep_mu,
+            timestep_sigma=self.timestep_sigma,
+            timestep_p_zero=self.timestep_p_zero,
         )
-        loss, details = self._compute_lightning_losses(v_pred, dx_t, x_t, t, gt_latents)
+        v_pred = self.pts3d_head(
+            decout=[tokens],
+            noised_latents=x_t,
+            timestep=t[:, None].expand_as(x_t[..., 0]),
+            conditioning_latents=conditioning_latents,
+            visible_geometry_latents=visible_geometry_latents,
+        )
+        loss, velocity_loss, reconstruction_loss, pred_latents = flow_matching_losses(
+            v_pred,
+            dx_t,
+            x_t,
+            t,
+            gt_latents,
+            self.latent_reconstruction_loss_weight,
+        )
+
+        # Preserve per-sample errors so the Lightning module can aggregate
+        # validation metrics by timestep bucket. Keep these detached: they are
+        # diagnostics and must not retain the training graph.
+        reduce_dims = tuple(range(1, v_pred.ndim))
+        velocity_mse_per_sample = (v_pred - dx_t).square().mean(dim=reduce_dims)
+        reconstruction_mse_per_sample = (
+            (pred_latents - gt_latents).square().mean(dim=reduce_dims)
+        )
+        details = {
+            "velocity_loss": float(velocity_loss.detach()),
+            "latent_reconstruction_loss": float(reconstruction_loss.detach()),
+            "timestep_bucket_samples": {
+                "t": t.detach(),
+                "velocity_mse": velocity_mse_per_sample.detach(),
+                "reconstruction_mse": reconstruction_mse_per_sample.detach(),
+            },
+        }
 
         latents = None
-        if recon_latents == True:
+        if recon_latents:
             latents = self._reconstruct_lightning_latents(
                 images,
                 encoder_data,
                 gt_latents,
                 conditioning_latents,
+                visible_geometry_latents,
             )
 
         return loss, details, latents

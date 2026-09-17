@@ -14,6 +14,7 @@ class SDFDatasetMixin(Dataset):
     """Base for Mesh2SDF datasets and their shared sampling behavior."""
 
     CUBEMAP_SUBSEQ_IDS = tuple(range(6))
+    GT_LATENT_FILENAME_SUFFIX = ""
 
     def __init__(self, common_conf):
         super().__init__()
@@ -28,6 +29,7 @@ class SDFDatasetMixin(Dataset):
         self.pc_sharpedge_size = common_conf.pc_sharpedge_size
         self.pointcloud_sample = getattr(common_conf, "pointcloud_sample", True)
         self.return_normal = common_conf.return_normal
+        self.return_color = bool(getattr(common_conf, "return_color", False))
         self.sharpedge_label = common_conf.sharpedge_label
         self.sdf_size = common_conf.sdf_size
         self.sdf_near_size = common_conf.sdf_near_size
@@ -45,6 +47,46 @@ class SDFDatasetMixin(Dataset):
             if not self.conditioning_latent_root.is_dir():
                 raise ValueError(
                     f"Conditioning latent root does not exist: {self.conditioning_latent_root}"
+                )
+
+    def configure_visible_geometry_latents(self, enabled, root):
+        """Configure latents encoding the geometry visible in the input views."""
+        self.load_visible_geometry_latent = bool(enabled)
+        self.visible_geometry_latent_root = Path(root) if root is not None else None
+        if self.load_visible_geometry_latent:
+            if self.visible_geometry_latent_root is None:
+                raise ValueError(
+                    "visible_geometry_latent_root is required when "
+                    "load_visible_geometry_latent=True"
+                )
+            if not self.visible_geometry_latent_root.is_dir():
+                raise ValueError(
+                    "Visible geometry latent root does not exist: "
+                    f"{self.visible_geometry_latent_root}"
+                )
+
+    def configure_gt_latents(self, root, source="latent"):
+        """Configure panorama-specific precomputed VAE targets.
+
+        Files are expected at
+        ``<root>/<scene>/<frame><GT_LATENT_FILENAME_SUFFIX>.pt`` and must
+        contain a ``latent`` tensor shaped ``[1, N, C]`` (or directly
+        ``[N, C]``). With ``source='posterior'``, files are read from
+        ``<frame>_before_sampling.pt`` and must contain ``posterior_mean`` and
+        ``posterior_logvar`` so the model can sample a fresh target on-device.
+        """
+        self.gt_latent_root = Path(root) if root is not None else None
+        self.load_gt_latent = self.gt_latent_root is not None
+        self.gt_latent_source = str(source).lower()
+        if self.gt_latent_source not in {"latent", "posterior"}:
+            raise ValueError(
+                "gt_latent_source must be 'latent' or 'posterior', got "
+                f"{source!r}"
+            )
+        if self.load_gt_latent:
+            if not self.gt_latent_root.is_dir():
+                raise ValueError(
+                    f"GT latent root does not exist: {self.gt_latent_root}"
                 )
 
     def _pointcloud_rng(self, seq_name, sample_id, first_subseq_id):
@@ -80,14 +122,87 @@ class SDFDatasetMixin(Dataset):
     def _has_complete_cube_faces(path):
         return all((path / f"{face_idx:04d}.jpg").is_file() for face_idx in range(6))
 
-    def _load_conditioning_latent(self, seq_name, ids):
+    @staticmethod
+    def _validate_single_latent(tensor, path, description):
+        """Validate a saved single-sample latent and remove its batch axis."""
+        if not torch.is_tensor(tensor):
+            raise ValueError(f"No {description} tensor found in {path}")
+        if tensor.ndim == 3:
+            if tensor.shape[0] != 1:
+                raise ValueError(
+                    f"Expected one {description} in {path}, got {tuple(tensor.shape)}"
+                )
+            tensor = tensor[0]
+        if tensor.ndim != 2:
+            raise ValueError(
+                f"Expected {description} [N, C] or [1, N, C] in {path}, "
+                f"got {tuple(tensor.shape)}"
+            )
+        if not torch.isfinite(tensor).all():
+            raise ValueError(
+                f"{description.capitalize()} contains non-finite values: {path}"
+            )
+        return tensor.float()
+
+    @staticmethod
+    def _require_single_panorama(ids, description):
         if len(ids) != 1:
             raise ValueError(
-                "Precomputed conditioning latents require exactly one panorama per sample"
+                f"Precomputed {description} require exactly one panorama per sample"
             )
-        latent_path = self.conditioning_latent_root / seq_name / f"{ids[0]}.pt"
+        return f"{int(ids[0]):05d}"
+
+    def _load_conditioning_latent(self, seq_name, ids):
+        frame_id = self._require_single_panorama(ids, "conditioning latents")
+        latent_path = self.conditioning_latent_root / seq_name / f"{frame_id}.pt"
         checkpoint = torch.load(latent_path, map_location="cpu", weights_only=True)
-        return checkpoint["latent"][0].float()
+        latent = checkpoint.get("latent") if isinstance(checkpoint, dict) else checkpoint
+        return self._validate_single_latent(
+            latent,
+            latent_path,
+            "conditioning latent",
+        )
+
+    def _load_visible_geometry_latent(self, seq_name, ids):
+        frame_id = self._require_single_panorama(ids, "visible geometry latents")
+        latent_path = self.visible_geometry_latent_root / seq_name / f"{frame_id}.pt"
+        if not latent_path.is_file():
+            raise FileNotFoundError(f"Missing visible geometry latent: {latent_path}")
+        checkpoint = torch.load(latent_path, map_location="cpu", weights_only=True)
+        latent = checkpoint.get("latent") if isinstance(checkpoint, dict) else checkpoint
+        return self._validate_single_latent(
+            latent,
+            latent_path,
+            "visible geometry latent",
+        )
+
+    def _load_gt_latent(self, seq_name, ids):
+        frame_id = self._require_single_panorama(ids, "GT latents")
+        filename_suffix = self.GT_LATENT_FILENAME_SUFFIX
+        if self.gt_latent_source == "posterior":
+            filename_suffix += "_before_sampling"
+        latent_path = self.gt_latent_root / seq_name / f"{frame_id}{filename_suffix}.pt"
+        if not latent_path.is_file():
+            raise FileNotFoundError(f"Missing GT latent: {latent_path}")
+        checkpoint = torch.load(latent_path, map_location="cpu", weights_only=True)
+        if self.gt_latent_source == "posterior":
+            if not isinstance(checkpoint, dict):
+                raise ValueError(f"Expected posterior dictionary in {latent_path}")
+            return {
+                "gt_latent_posterior_mean": self._validate_single_latent(
+                    checkpoint.get("posterior_mean"),
+                    latent_path,
+                    "posterior_mean",
+                ),
+                "gt_latent_posterior_logvar": self._validate_single_latent(
+                    checkpoint.get("posterior_logvar"),
+                    latent_path,
+                    "posterior_logvar",
+                ),
+            }
+
+        latent = checkpoint.get("latent") if isinstance(checkpoint, dict) else checkpoint
+        return self._validate_single_latent(latent, latent_path, "GT latent")
 
     @staticmethod
     def _normalize_extrinsics(extrinsics, translation_scale=None):
@@ -158,17 +273,37 @@ class SDFDatasetMixin(Dataset):
         seed = int.from_bytes(hashlib.sha256(key).digest()[:8], "little")
         return np.random.default_rng(seed)
 
-    def load_surface_points(self, rng, random_surface, sharpedge_surface):
+    def load_surface_points(
+        self,
+        rng,
+        random_surface,
+        sharpedge_surface,
+        random_surface_rgb=None,
+        sharpedge_surface_rgb=None,
+    ):
         sample_groups = []
-        for points, sample_count, label in (
-            (random_surface, self.pc_size, 0),
-            (sharpedge_surface, self.pc_sharpedge_size, 1),
+        for points, colors, sample_count, label in (
+            (random_surface, random_surface_rgb, self.pc_size, 0),
+            (sharpedge_surface, sharpedge_surface_rgb, self.pc_sharpedge_size, 1),
         ):
             if sample_count <= 0:
                 continue
 
             indices = rng.choice(points.shape[0], sample_count, replace=False)
             samples = points[indices]
+            if self.return_color:
+                if colors is None:
+                    raise ValueError(
+                        "return_color=true requires RGB arrays in the surface NPZ"
+                    )
+                if len(colors) != len(points):
+                    raise ValueError(
+                        f"Surface RGB/point count mismatch: {len(colors)} colors "
+                        f"for {len(points)} points."
+                    )
+                samples = np.concatenate(
+                    (samples, colors[indices].astype(np.float32) / 255.0), axis=1
+                )
             if self.sharpedge_label:
                 labels = np.full((sample_count, 1), label)
                 samples = np.concatenate((samples, labels), axis=1)
@@ -184,7 +319,28 @@ class SDFDatasetMixin(Dataset):
             surface = torch.cat((surface, normals), dim=-1)
         if self.sharpedge_label:
             surface = torch.cat((surface, surface_normal[:, -1:]), dim=-1)
+        if self.return_color:
+            # Keep the legacy normal/edge-label feature prefix intact so old
+            # encoder weights can be expanded with zero-initialized RGB columns.
+            surface = torch.cat((surface, surface_normal[:, 6:9]), dim=-1)
         return surface
+
+    def surface_rgb_kwargs(self, data):
+        if not self.return_color:
+            return {}
+        color_keys = ("random_surface_rgb", "sharp_surface_rgb")
+        present = [key in data.files for key in color_keys]
+        if any(present) and not all(present):
+            missing = [key for key, exists in zip(color_keys, present) if not exists]
+            raise ValueError(
+                f"Incomplete surface RGB data; missing: {', '.join(missing)}"
+            )
+        if not all(present):
+            return {}
+        return {
+            "random_surface_rgb": data["random_surface_rgb"],
+            "sharpedge_surface_rgb": data["sharp_surface_rgb"],
+        }
 
     def load_sdf_points(
         self,
@@ -195,18 +351,56 @@ class SDFDatasetMixin(Dataset):
         near_label,
         sharpedge_points,
         sharpedge_label,
+        vol_rgb=None,
+        vol_rgb_valid=None,
+        near_rgb=None,
+        sharpedge_rgb=None,
     ):
         sample_groups = []
-        for points, distances, sample_count, label in (
-            (vol_points, vol_label, self.sdf_size, 0),
-            (near_points, near_label, self.sdf_near_size, 1),
-            (sharpedge_points, sharpedge_label, self.sdf_sharpedge_size, 2),
+        has_rgb = any(
+            colors is not None for colors in (vol_rgb, near_rgb, sharpedge_rgb)
+        )
+        if has_rgb and not all(
+            colors is not None for colors in (vol_rgb, near_rgb, sharpedge_rgb)
+        ):
+            raise ValueError("UDF RGB arrays must contain vol, random-near, and sharp-near colors.")
+
+        for points, distances, colors, color_valid, sample_count, label in (
+            (vol_points, vol_label, vol_rgb, vol_rgb_valid, self.sdf_size, 0),
+            (near_points, near_label, near_rgb, None, self.sdf_near_size, 1),
+            (
+                sharpedge_points,
+                sharpedge_label,
+                sharpedge_rgb,
+                None,
+                self.sdf_sharpedge_size,
+                2,
+            ),
         ):
             if sample_count <= 0:
                 continue
 
             indices = rng.choice(points.shape[0], sample_count, replace=False)
             samples = np.concatenate((points[indices], distances[indices, None]), axis=1)
+            if has_rgb:
+                if len(colors) != len(points):
+                    raise ValueError(
+                        f"RGB/point count mismatch: {len(colors)} colors for {len(points)} points."
+                    )
+                sampled_rgb = colors[indices].astype(np.float32) / 255.0
+                if color_valid is None:
+                    sampled_valid = np.ones((sample_count, 1), dtype=np.float32)
+                else:
+                    if len(color_valid) != len(points):
+                        raise ValueError(
+                            "RGB validity/point count mismatch: "
+                            f"{len(color_valid)} flags for {len(points)} points."
+                        )
+                    sampled_valid = color_valid[indices, None].astype(np.float32)
+                # Layout with color: XYZ, distance, RGB in [0, 1], RGB-valid.
+                samples = np.concatenate(
+                    (samples, sampled_rgb, sampled_valid), axis=1
+                )
             if self.sdf_label:
                 labels = np.full((sample_count, 1), label)
                 samples = np.concatenate((samples, labels), axis=1)
@@ -216,3 +410,22 @@ class SDFDatasetMixin(Dataset):
             raise ValueError("At least one SDF sample count must be positive.")
 
         return torch.from_numpy(np.concatenate(sample_groups, axis=0)).float()
+
+    @staticmethod
+    def sdf_rgb_kwargs(data):
+        """Extract optional RGB arrays from a UDF NPZ without requiring them."""
+        color_keys = ("vol_rgb", "random_near_rgb", "sharp_near_rgb")
+        present = [key in data.files for key in color_keys]
+        if any(present) and not all(present):
+            missing = [key for key, exists in zip(color_keys, present) if not exists]
+            raise ValueError(f"Incomplete UDF RGB data; missing: {', '.join(missing)}")
+        if not all(present):
+            return {}
+        return {
+            "vol_rgb": data["vol_rgb"],
+            "vol_rgb_valid": (
+                data["vol_rgb_valid"] if "vol_rgb_valid" in data.files else None
+            ),
+            "near_rgb": data["random_near_rgb"],
+            "sharpedge_rgb": data["sharp_near_rgb"],
+        }

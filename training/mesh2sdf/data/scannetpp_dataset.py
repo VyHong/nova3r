@@ -42,6 +42,8 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
         load_conditioning_latent=False,
         conditioning_latent_root=None,
         subseq_ids=None,
+        load_visible_geometry_latent=False,
+        visible_geometry_latent_root=None,
     ):
         super().__init__(common_conf)
         self.allow_duplicate_img = common_conf.allow_duplicate_img
@@ -57,6 +59,9 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
         self.format = format
         self.configure_subseq_ids(subseq_ids)
         self.configure_conditioning_latents(load_conditioning_latent, conditioning_latent_root)
+        self.configure_visible_geometry_latents(
+            load_visible_geometry_latent, visible_geometry_latent_root
+        )
 
         if samples_list_path is None:
             self.samples_list = self._discover_samples()
@@ -186,6 +191,7 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
                 rng,
                 random_surface=surface_data["random_surface"],
                 sharpedge_surface=surface_data["sharp_surface"],
+                **self.surface_rgb_kwargs(surface_data),
             )
 
         with np.load(geo_points_path, allow_pickle=True) as geo_points_data:
@@ -197,6 +203,7 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
                 near_label=geo_points_data["random_near_label"],
                 sharpedge_points=geo_points_data["sharp_near_points"],
                 sharpedge_label=geo_points_data["sharp_near_label"],
+                **self.sdf_rgb_kwargs(geo_points_data),
             )
 
         total_transform = torch.from_numpy(total_transform).float()
@@ -290,6 +297,8 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
         }
         if self.load_conditioning_latent:
             batch["conditioning_latents"] = self._load_conditioning_latent(seq_name, ids)
+        if self.load_visible_geometry_latent:
+            batch["visible_geometry_latents"] = self._load_visible_geometry_latent(seq_name, ids)
         return batch
 
     def __getitem__(self, index):

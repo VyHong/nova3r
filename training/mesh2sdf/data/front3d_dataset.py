@@ -121,6 +121,7 @@ class Front3DSDFDataset(SDFDatasetMixin):
                 rng,
                 random_surface=surface_data["random_surface"],
                 sharpedge_surface=surface_data["sharp_surface"],
+                **self.surface_rgb_kwargs(surface_data),
             )
 
         with np.load(metadata["geo_points"], allow_pickle=True) as sdf_data:
@@ -132,6 +133,7 @@ class Front3DSDFDataset(SDFDatasetMixin):
                 near_label=sdf_data["random_near_label"],
                 sharpedge_points=sdf_data["sharp_near_points"],
                 sharpedge_label=sdf_data["sharp_near_label"],
+                **self.sdf_rgb_kwargs(sdf_data),
             )
 
         T = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])

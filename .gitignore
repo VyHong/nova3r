@@ -14,3 +14,4 @@ archive
 .conda-envs
 sage10k-panorama-logs
 open3d*
+eval_results

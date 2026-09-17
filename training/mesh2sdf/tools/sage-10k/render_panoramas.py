@@ -52,6 +52,15 @@ def parse_args():
     parser.add_argument("input", help="Layout JSON, scene ZIP, or ZIP directory")
     parser.add_argument("--output-dir", default="panoramas")
     parser.add_argument("--num-panoramas", type=int, default=10)
+    parser.add_argument(
+        "--camera-position", choices=("random", "center"), default="random",
+        help="center renders exactly one panorama at the room's 3D midpoint; "
+             "--camera-height overrides its height. No collision displacement is applied.",
+    )
+    parser.add_argument(
+        "--world-coordinate-system", choices=("sage_z_up", "gltf_y_up"),
+        help="Pose world axes (default: glTF with --save-scene-glb, otherwise SAGE)",
+    )
     parser.add_argument("--room-id", help="Room to render (default: first room)")
     parser.add_argument("--width", type=int, default=2048)
     parser.add_argument("--height", type=int, default=1024)
@@ -142,7 +151,8 @@ def safe_extract(archive, destination):
         zf.extractall(root)
 
 
-def complete(scene_dir, count, require_scene_glb=False, camera_height_range=(1.6, 1.8)):
+def complete(scene_dir, count, require_scene_glb=False, camera_height_range=(1.6, 1.8),
+             render_settings=None):
     marker = scene_dir / ".complete.json"
     extrinsics_path = scene_dir / "extrinsics.json"
     if not marker.is_file() or not extrinsics_path.is_file():
@@ -156,6 +166,7 @@ def complete(scene_dir, count, require_scene_glb=False, camera_height_range=(1.6
     return (
         data.get("num_panoramas") == count
         and data.get("camera_height_range") == list(camera_height_range)
+        and (render_settings is None or data.get("render_settings") == render_settings)
         and set(extrinsics) == expected_files
         and (
             not require_scene_glb
@@ -174,6 +185,15 @@ def atomic_json(path, data):
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2) + "\n")
     os.replace(tmp, path)
+
+
+def room_center_position(bounds, camera_height=None):
+    position = (bounds[:3] + bounds[3:]) * 0.5
+    if camera_height is not None:
+        position[2] = bounds[2] + camera_height
+    if not np.all((position > bounds[:3]) & (position < bounds[3:])):
+        raise ValueError("Centered camera must lie strictly inside the room bounds")
+    return position
 
 
 def choose_positions(
@@ -277,21 +297,18 @@ def render_scene(layout_path, scene_dir, args, scene_seed):
         if not scene_ply_tmp.is_file() or scene_ply_tmp.stat().st_size == 0:
             raise RuntimeError(f"Failed to export scene geometry to {scene_ply_tmp}")
         os.replace(scene_ply_tmp, scene_ply)
-    env = CameraPlannerEnv(
-        bounds,
-        all_meshes,
-        collision_samples=100000,
-        build_ray_intersector=False,
-    )
     rng = np.random.default_rng(scene_seed)
-    positions = choose_positions(
-        env,
-        args.num_panoramas,
-        rng,
-        args.min_separation,
-        args.max_attempts,
-        args.camera_height_range,
-    )
+    if args.camera_position == "center":
+        positions = [room_center_position(bounds, args.camera_height)]
+    else:
+        env = CameraPlannerEnv(
+            bounds, all_meshes, collision_samples=100000,
+            build_ray_intersector=False,
+        )
+        positions = choose_positions(
+            env, args.num_panoramas, rng, args.min_separation,
+            args.max_attempts, args.camera_height_range,
+        )
 
     load_scene_meshes_into_blender(
         room, layout, str(layout_path.parent), mesh_info_dict=mesh_info_dict
@@ -324,7 +341,8 @@ def render_scene(layout_path, scene_dir, args, scene_seed):
     # One unified mapping with exactly one W2C extrinsic per image. The scene
     # ID in every filename preserves provenance if images are moved elsewhere.
     extrinsics = {}
-    base_yaw = rng.uniform(0.0, 2.0 * np.pi)
+    # Fixed +Y SAGE heading is -Z in glTF, with +X right and +Y up.
+    base_yaw = np.pi / 2 if args.camera_position == "center" else rng.uniform(0.0, 2.0 * np.pi)
     for index, position in enumerate(positions):
         final_path = scene_dir / f"{scene_dir.name}_panorama_{index:03d}.png"
         tmp_path = scene_dir / f".{scene_dir.name}_panorama_{index:03d}.tmp.png"
@@ -336,7 +354,7 @@ def render_scene(layout_path, scene_dir, args, scene_seed):
         setup_camera_look_at(camera, position, position + heading)
         bpy.context.view_layer.update()
         world_to_camera = np.linalg.inv(np.asarray(camera.matrix_world, dtype=np.float64))
-        if args.save_scene_glb:
+        if args.world_coordinate_system == "gltf_y_up":
             # p_gltf = SAGE_TO_GLTF @ p_sage, hence
             # p_camera = W2C_sage @ inv(SAGE_TO_GLTF) @ p_gltf.
             world_to_camera = world_to_camera @ SAGE_TO_GLTF.T
@@ -353,7 +371,8 @@ def render_scene(layout_path, scene_dir, args, scene_seed):
         "room_id": room.id,
         "camera_height_range": list(args.camera_height_range),
         "seed": scene_seed,
-        "world_coordinate_system": "gltf_y_up" if args.save_scene_glb else "sage_z_up",
+        "world_coordinate_system": args.world_coordinate_system,
+        "render_settings": args.render_settings,
         "extrinsics_convention": "row_major_world_to_camera_blender_axes",
     })
     clear_blender_scene()
@@ -377,6 +396,18 @@ def main():
             "Camera heights must satisfy 0 < --camera-height-min <= --camera-height-max"
         )
     args.camera_height_range = (args.camera_height_min, args.camera_height_max)
+    if args.camera_position == "center" and args.num_panoramas != 1:
+        raise SystemExit("--camera-position center requires --num-panoramas 1")
+    if args.world_coordinate_system is None:
+        args.world_coordinate_system = "gltf_y_up" if args.save_scene_glb else "sage_z_up"
+    if args.save_scene_glb and args.world_coordinate_system != "gltf_y_up":
+        raise SystemExit("--save-scene-glb requires gltf_y_up world coordinates")
+    args.render_settings = {
+        key: getattr(args, key) for key in (
+            "camera_position", "camera_height", "world_coordinate_system",
+            "width", "height", "samples", "adaptive_threshold", "seed", "room_id",
+        )
+    }
     if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
         raise SystemExit("Require --shard-count >= 1 and 0 <= --shard-index < --shard-count")
     output_root = Path(args.output_dir).resolve()
@@ -407,9 +438,12 @@ def main():
             args.num_panoramas,
             require_scene_glb=args.save_scene_glb,
             camera_height_range=args.camera_height_range,
+            render_settings=args.render_settings,
         ):
             print(f"[{index}/{len(inputs)}] Skipping complete scene {scene_name}")
             continue
+        # A failed retry must never retain the previous completion marker.
+        (scene_dir / ".complete.json").unlink(missing_ok=True)
         if args.overwrite:
             for old in scene_dir.glob("*panorama_*.png"):
                 old.unlink()

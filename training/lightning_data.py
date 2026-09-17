@@ -19,7 +19,8 @@ class Nova3RDataModule(pl.LightningDataModule):
         self.batch_size = data_cfg.batch_size
         self.test_batch_size = data_cfg.test_batch_size
         self.num_workers = data_cfg.num_workers
-        self.persistent_workers = self.num_workers > 0 and getattr(data_cfg, "persistent_workers", True)
+        self.test_num_workers = int(getattr(data_cfg, "test_num_workers", self.num_workers))
+        self.persistent_workers = bool(getattr(data_cfg, "persistent_workers", True))
         self.prefetch_factor = getattr(data_cfg, "prefetch_factor", None)
 
         self.dataset_registry = {
@@ -46,7 +47,7 @@ class Nova3RDataModule(pl.LightningDataModule):
             self.test_dataset, self.test_collate_fn = self._build_concat_dataset("test_datasets", split="test")
 
     def train_dataloader(self):
-        loader_kwargs = self._loader_worker_kwargs()
+        loader_kwargs = self._loader_worker_kwargs(self.num_workers)
         return DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
@@ -57,9 +58,9 @@ class Nova3RDataModule(pl.LightningDataModule):
             **loader_kwargs,
         )
 
-    def _loader_worker_kwargs(self):
+    def _loader_worker_kwargs(self, num_workers):
         kwargs = {}
-        if self.num_workers > 0:
+        if num_workers > 0:
             kwargs["persistent_workers"] = self.persistent_workers
             if self.prefetch_factor is not None:
                 kwargs["prefetch_factor"] = self.prefetch_factor
@@ -96,7 +97,7 @@ class Nova3RDataModule(pl.LightningDataModule):
         return ConcatDataset(datasets), collate_fn
 
     def val_dataloader(self):
-        loader_kwargs = self._loader_worker_kwargs()
+        loader_kwargs = self._loader_worker_kwargs(self.num_workers)
         return DataLoader(
             self.val_dataset,
             batch_size=self.test_batch_size,
@@ -108,12 +109,12 @@ class Nova3RDataModule(pl.LightningDataModule):
         )
 
     def test_dataloader(self):
-        loader_kwargs = self._loader_worker_kwargs()
+        loader_kwargs = self._loader_worker_kwargs(self.test_num_workers)
         return DataLoader(
             self.test_dataset,
             batch_size=self.test_batch_size,
             shuffle=False,
-            num_workers=self.num_workers,
+            num_workers=self.test_num_workers,
             pin_memory=True,
             collate_fn=self.test_collate_fn,
             **loader_kwargs,

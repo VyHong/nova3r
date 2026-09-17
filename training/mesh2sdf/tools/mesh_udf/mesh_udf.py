@@ -33,6 +33,38 @@ def _make_decoder_input(latent_vec, xyz):
     return torch.cat([batch_vecs.reshape(-1, latent_dim), xyz], dim=1)
 
 
+def _grid_spec(N, grid_bounds=None):
+    resolution = np.asarray([N, N, N] if np.isscalar(N) else N, dtype=np.int64)
+    if resolution.shape != (3,) or np.any(resolution < 2):
+        raise ValueError(f"Grid resolution must contain three values >= 2, got {N}")
+
+    bounds = np.asarray(
+        [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]
+        if grid_bounds is None
+        else grid_bounds,
+        dtype=np.float64,
+    )
+    if bounds.shape != (6,):
+        raise ValueError(f"Grid bounds must be [xmin, ymin, zmin, xmax, ymax, zmax], got {bounds}")
+    minimum, maximum = bounds[:3], bounds[3:]
+    if not np.isfinite(bounds).all() or np.any(maximum <= minimum):
+        raise ValueError(f"Grid bounds must be finite with positive extents, got {bounds}")
+
+    spacing = (maximum - minimum) / (resolution - 1)
+    return tuple(int(value) for value in resolution), minimum, maximum, spacing
+
+
+def _decoder_device(decoder, latent_vec=None, device=None):
+    if device is not None:
+        return torch.device(device)
+    if isinstance(latent_vec, torch.Tensor):
+        return latent_vec.device
+    try:
+        return next(decoder.parameters()).device
+    except StopIteration:
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 def _clean_mesh(mesh, validate=False):
     mesh = mesh.process(validate=validate)
 
@@ -50,15 +82,25 @@ def _clean_mesh(mesh, validate=False):
     return mesh
 
 
-def get_udf_normals_grid_slow(decoder, latent_vec, N=56, max_batch=int(2 ** 20), fourier=False):
+def get_udf_normals_grid_slow(
+    decoder,
+    latent_vec,
+    N=56,
+    max_batch=int(2 ** 20),
+    fourier=False,
+    grid_bounds=None,
+    device=None,
+):
     """
-    Fills a dense N*N*N regular grid by querying the decoder network
+    Fills a dense regular grid by querying the decoder network.
     Inputs: 
         decoder: coordinate network to evaluate
         latent_vec: conditioning vector
-        N: grid size
+        N: scalar grid size or per-axis ``(Nx, Ny, Nz)`` resolution
         max_batch: number of points we can simultaneously evaluate
         fourier: are xyz coordinates encoded with fourier?
+        grid_bounds: optional query bounds ``[xmin, ymin, zmin, xmax, ymax, zmax]``
+        device: decoder device; inferred from the latent or decoder when omitted
     Returns:
         df_values: (N,N,N) tensor representing distance field values on the grid
         vecs: (N,N,N,3) tensor representing gradients values on the grid, only for locations with a small
@@ -66,27 +108,25 @@ def get_udf_normals_grid_slow(decoder, latent_vec, N=56, max_batch=int(2 ** 20),
         samples: (N**3, 7) tensor representing (x,y,z, distance field, grad_x, grad_y, grad_z)
     """
     decoder.eval()
+    resolution, grid_min, _, spacing = _grid_spec(N, grid_bounds)
+    nx, ny, nz = resolution
+    decoder_device = _decoder_device(decoder, latent_vec, device)
     ################
     # 1: setting up the empty grid
     ################
-    # NOTE: the voxel_origin is actually the (bottom, left, down) corner, not the middle
-    voxel_origin = [-1, -1, -1]
-    voxel_size = 2.0 / (N - 1)
-    overall_index = torch.arange(0, N ** 3, 1, out=torch.LongTensor())
-    samples = torch.zeros(N ** 3, 7)
+    num_samples = nx * ny * nz
+    overall_index = torch.arange(num_samples, dtype=torch.long)
+    samples = torch.zeros(num_samples, 7)
     # transform first 3 columns
     # to be the x, y, z index
-    samples[:, 2] = overall_index % N
-    samples[:, 1] = torch.div(overall_index, N, rounding_mode='floor') % N
-    samples[:, 0] = torch.div(torch.div(overall_index, N, rounding_mode='floor'), N, rounding_mode='floor') % N
+    samples[:, 2] = overall_index % nz
+    samples[:, 1] = torch.div(overall_index, nz, rounding_mode="floor") % ny
+    samples[:, 0] = torch.div(overall_index, ny * nz, rounding_mode="floor")
     # transform first 3 columns
     # to be the x, y, z coordinate
-    samples[:, 0] = (samples[:, 0] * voxel_size) + voxel_origin[2]
-    samples[:, 1] = (samples[:, 1] * voxel_size) + voxel_origin[1]
-    samples[:, 2] = (samples[:, 2] * voxel_size) + voxel_origin[0]
-    num_samples = N ** 3
+    for axis in range(3):
+        samples[:, axis] = samples[:, axis] * float(spacing[axis]) + float(grid_min[axis])
     samples.requires_grad = False
-    samples.pin_memory()
     ################
     # 2: Run forward pass to fill the grid
     ################
@@ -94,7 +134,7 @@ def get_udf_normals_grid_slow(decoder, latent_vec, N=56, max_batch=int(2 ** 20),
     ## FIRST: fill distance field grid without gradients
     while head < num_samples:
         # xyz coords
-        sample_subset = samples[head : min(head + max_batch, num_samples), 0:3].clone().cuda()
+        sample_subset = samples[head : min(head + max_batch, num_samples), 0:3].clone().to(decoder_device)
         # Create input
         if fourier:
             xyz = ws.fourier_transform(sample_subset)
@@ -112,7 +152,7 @@ def get_udf_normals_grid_slow(decoder, latent_vec, N=56, max_batch=int(2 ** 20),
     ## THEN: compute gradients only where needed,
     # ie. where the predicted df value is small
     max_batch = max_batch // 4
-    norm_mask = samples[:, 3] < 2 * voxel_size
+    norm_mask = samples[:, 3] < 2 * float(np.max(spacing))
     norm_idx = torch.where(norm_mask)[0]
     head, num_samples = 0, norm_idx.shape[0]
     while head < num_samples:
@@ -122,7 +162,7 @@ def get_udf_normals_grid_slow(decoder, latent_vec, N=56, max_batch=int(2 ** 20),
         sample_subset_mask[norm_idx[head]: norm_idx[min(head + max_batch, num_samples) - 1] + 1] = True
         sample_subset_mask = norm_mask * sample_subset_mask
         # xyz coords
-        sample_subset = samples[sample_subset_mask, 0:3].clone().cuda()
+        sample_subset = samples[sample_subset_mask, 0:3].clone().to(decoder_device)
         sample_subset.requires_grad = True
         # Create input
         if fourier:
@@ -140,13 +180,23 @@ def get_udf_normals_grid_slow(decoder, latent_vec, N=56, max_batch=int(2 ** 20),
     #
     # Separate values in DF / gradients
     df_values = samples[:, 3]
-    df_values = df_values.reshape(N, N, N)
+    df_values = df_values.reshape(*resolution)
     vecs = samples[:, 4:]
-    vecs = vecs.reshape(N, N, N, 3)
+    vecs = vecs.reshape(*resolution, 3)
     return df_values, vecs, samples
 
 
-def get_udf_normals_grid_fast(decoder, latent_vec, samples, indices, N=56, max_batch=int(2 ** 18), fourier=False):
+def get_udf_normals_grid_fast(
+    decoder,
+    latent_vec,
+    samples,
+    indices,
+    N=56,
+    max_batch=int(2 ** 18),
+    fourier=False,
+    grid_bounds=None,
+    device=None,
+):
     """
     Updates the N*N*N regular grid by querying the decoder network ONLY AT INDICES
     Inputs: 
@@ -155,18 +205,30 @@ def get_udf_normals_grid_fast(decoder, latent_vec, samples, indices, N=56, max_b
         samples: already computed (N**3, 7) tensor representing (x,y,z, distance field, grad_x, grad_y, grad_z)
                     for a previous latent_vec, which is assumed to be close to the current one.
         indices: tensor representing the coordinates that need updating
-        N: grid size
+        N: scalar grid size or per-axis ``(Nx, Ny, Nz)`` resolution
         max_batch: number of points we can simultaneously evaluate
         fourier: are xyz coordinates encoded with fourier?
+        grid_bounds: bounds used to create ``samples``
+        device: decoder device; inferred from the latent or decoder when omitted
     Returns:
         df_values: (N,N,N) tensor representing distance field values on the grid
         vecs: (N,N,N,3) tensor representing gradients values on the grid, only for locations with a small
                 distance field value
         samples: (N**3, 7) tensor representing (x,y,z, distance field, grad_x, grad_y, grad_z)
     """
+    resolution, _, _, _ = _grid_spec(N, grid_bounds)
+    decoder_device = _decoder_device(decoder, latent_vec, device)
     # If there is no indicesm fallback to the slow version
     if indices is None or samples is None:
-        return get_udf_normals_grid_slow(decoder, latent_vec, N, max_batch, fourier)
+        return get_udf_normals_grid_slow(
+            decoder,
+            latent_vec,
+            N,
+            max_batch,
+            fourier,
+            grid_bounds=grid_bounds,
+            device=decoder_device,
+        )
     decoder.eval()
     ################
     # 1: setting up the empty grid: no longer needed
@@ -174,7 +236,6 @@ def get_udf_normals_grid_fast(decoder, latent_vec, samples, indices, N=56, max_b
     # NOTE: the voxel_origin is actually the (bottom, left, down) corner, not the middle
     num_samples = indices.shape[0]
     samples.requires_grad = False
-    samples.pin_memory()
     ################
     # 2: Run forward pass to fill the grid, only where needed
     ################
@@ -182,7 +243,9 @@ def get_udf_normals_grid_fast(decoder, latent_vec, samples, indices, N=56, max_b
     ## Fill distance field grid with gradients
     while head < num_samples:
         # xyz coords
-        sample_subset = samples[indices[head : min(head + max_batch, num_samples)], 0:3].clone().cuda()
+        sample_subset = samples[
+            indices[head : min(head + max_batch, num_samples)], 0:3
+        ].clone().to(decoder_device)
         sample_subset.requires_grad = True
         # Create input
         if fourier:
@@ -201,15 +264,16 @@ def get_udf_normals_grid_fast(decoder, latent_vec, samples, indices, N=56, max_b
         head += max_batch
     # Separate values in DF / gradients
     df_values = samples[:, 3]
-    df_values = df_values.reshape(N, N, N)
+    df_values = df_values.reshape(*resolution)
     vecs = samples[:, 4:]
-    vecs = vecs.reshape(N, N, N, 3)
+    vecs = vecs.reshape(*resolution, 3)
     return df_values, vecs, samples
 
 
 def get_mesh_udf_fast(decoder, latent_vec, samples=None, indices=None, N_MC=128, fourier=False,
                         gradient=True, eps=0.1, border_gradients=False, smooth_borders=False,
-                        vertex_max_batch=int(2 ** 16), surface_threshold=None):
+                        vertex_max_batch=int(2 ** 16), surface_threshold=None,
+                        grid_bounds=None, device=None):
     """
     Computes a triangulated mesh from a distance field network conditioned on the latent vector
     Inputs: 
@@ -219,7 +283,7 @@ def get_mesh_udf_fast(decoder, latent_vec, samples=None, indices=None, N_MC=128,
                     for a previous latent_vec, which is assumed to be close to the current one, if any
         indices: tensor representing the coordinates that need updating in the previous samples tensor (to speed
                     up iterations)
-        N_MC: grid size
+        N_MC: scalar grid size or per-axis ``(Nx, Ny, Nz)`` resolution
         fourier: are xyz coordinates encoded with fourier?
         gradient: do we need gradients?
         eps: length of the normal vectors used to derive gradients
@@ -227,6 +291,8 @@ def get_mesh_udf_fast(decoder, latent_vec, samples=None, indices=None, N_MC=128,
         smooth_borders: do we smooth borders with a Laplacian?
         vertex_max_batch: maximum number of marching-cubes vertices to evaluate at once
         surface_threshold: maximum predicted UDF at every face vertex; defaults to voxel_size / 6
+        grid_bounds: optional query bounds ``[xmin, ymin, zmin, xmax, ymax, zmax]``
+        device: decoder device; inferred from the latent or decoder when omitted
     Returns:
         verts: vertices of the mesh
         faces: faces of the mesh
@@ -234,17 +300,25 @@ def get_mesh_udf_fast(decoder, latent_vec, samples=None, indices=None, N_MC=128,
         samples: (N**3, 7) tensor representing (x,y,z, distance field, grad_x, grad_y, grad_z)
         indices: tensor representing the coordinates that need updating in the next iteration
     """
+    resolution, grid_min, grid_max, spacing = _grid_spec(N_MC, grid_bounds)
+    decoder_device = _decoder_device(decoder, latent_vec, device)
     ### 1: sample grid
-    df_values, normals, samples = get_udf_normals_grid_fast(decoder, latent_vec, samples, indices, N=N_MC, fourier=fourier)
+    df_values, normals, samples = get_udf_normals_grid_fast(
+        decoder,
+        latent_vec,
+        samples,
+        indices,
+        N=resolution,
+        fourier=fourier,
+        grid_bounds=np.concatenate([grid_min, grid_max]),
+        device=decoder_device,
+    )
     df_values[df_values < 0] = 0
     ### 2: run our custom MC on it
-    N = df_values.shape[0]
-    voxel_size = 2.0 / (N - 1)
-    voxel_origin = [-1, -1, -1]
     verts, faces, _, _ = udf_mc_lewiner(df_values.cpu().detach().numpy(),
                                         normals.cpu().detach().numpy(),
-                                        spacing=[voxel_size] * 3)
-    verts = verts - 1 # since voxel_origin = [-1, -1, -1]
+                                        spacing=spacing)
+    verts = verts + grid_min
     ### 3: evaluate vertices DF, and remove the ones that are too far
     if vertex_max_batch < 1:
         raise ValueError("vertex_max_batch must be at least 1")
@@ -254,7 +328,7 @@ def get_mesh_udf_fast(decoder, latent_vec, samples=None, indices=None, N_MC=128,
         for start in range(0, len(verts), vertex_max_batch):
             verts_torch = torch.from_numpy(
                 verts[start : start + vertex_max_batch]
-            ).float().cuda()
+            ).float().to(decoder_device)
             if fourier:
                 xyz = ws.fourier_transform(verts_torch)
             else:
@@ -265,7 +339,7 @@ def get_mesh_udf_fast(decoder, latent_vec, samples=None, indices=None, N_MC=128,
     pred_df_verts = torch.cat(pred_df_chunks, dim=0).numpy()
     # An absolute override avoids an overly strict voxel-relative filter at high resolutions.
     if surface_threshold is None:
-        surface_threshold = voxel_size / 6
+        surface_threshold = float(np.max(spacing)) / 6
     elif surface_threshold < 0:
         raise ValueError("surface_threshold must be non-negative")
     filtered_faces = faces[
@@ -319,7 +393,11 @@ def get_mesh_udf_fast(decoder, latent_vec, samples=None, indices=None, N_MC=128,
             filtered_mesh.vertices[border_vertices] = filtered_mesh.vertices[border_vertices] + lambda_ * laplacian
 
     if not gradient:
-        return torch.tensor(filtered_mesh.vertices).float().cuda(), torch.tensor(filtered_mesh.faces).long().cuda(), filtered_mesh
+        return (
+            torch.as_tensor(filtered_mesh.vertices, dtype=torch.float32, device=decoder_device),
+            torch.as_tensor(filtered_mesh.faces, dtype=torch.long, device=decoder_device),
+            filtered_mesh,
+        )
     else:
         ### 5: use the mesh to compute normals
         normals = trimesh.geometry.weighted_vertex_normals( vertex_count=len(filtered_mesh.vertices),
@@ -327,8 +405,8 @@ def get_mesh_udf_fast(decoder, latent_vec, samples=None, indices=None, N_MC=128,
                                                             face_normals=filtered_mesh.face_normals,
                                                             face_angles=filtered_mesh.face_angles)
         ### 6: evaluate the DF around each vertex, based on normals
-        normals = torch.tensor(normals).float().cuda()
-        verts = torch.tensor(filtered_mesh.vertices).float().cuda()
+        normals = torch.as_tensor(normals, dtype=torch.float32, device=decoder_device)
+        verts = torch.as_tensor(filtered_mesh.vertices, dtype=torch.float32, device=decoder_device)
         if fourier:
             xyz_s1 = ws.fourier_transform(verts + eps * normals)
             xyz_s2 = ws.fourier_transform(verts - eps * normals)
@@ -342,17 +420,20 @@ def get_mesh_udf_fast(decoder, latent_vec, samples=None, indices=None, N_MC=128,
 
         ## Compute indices needed for re-evaluation at the next iteration
         # fetch bins that are activated
-        k = ((new_verts[:, 2].detach().cpu().numpy() -  voxel_origin[2])/voxel_size).astype(int)
-        j = ((new_verts[:, 1].detach().cpu().numpy() -  voxel_origin[1])/voxel_size).astype(int)
-        i = ((new_verts[:, 0].detach().cpu().numpy() -  voxel_origin[0])/voxel_size).astype(int)
+        vertex_indices = np.floor(
+            (new_verts.detach().cpu().numpy() - grid_min) / spacing
+        ).astype(int)
+        vertex_indices = np.clip(vertex_indices, 0, np.asarray(resolution) - 1)
+        i, j, k = vertex_indices.T
+        nx, ny, nz = resolution
         # find points around
-        next_samples = i*N_MC*N_MC + j*N_MC + k
-        next_samples_ip = np.minimum(i+1, N_MC-1)*N_MC*N_MC + j*N_MC + k
-        next_samples_jp = i*N_MC*N_MC + np.minimum(j+1, N_MC-1)*N_MC + k
-        next_samples_kp = i*N_MC*N_MC + j*N_MC + np.minimum(k+1,N-1)
-        next_samples_im = np.maximum(i-1,0)*N_MC*N_MC + j*N_MC + k
-        next_samples_jm = i*N_MC*N_MC + np.maximum(j-1,0)*N_MC + k
-        next_samples_km = i*N_MC*N_MC + j*N_MC + np.maximum(k-1,0)
+        next_samples = i * ny * nz + j * nz + k
+        next_samples_ip = np.minimum(i + 1, nx - 1) * ny * nz + j * nz + k
+        next_samples_jp = i * ny * nz + np.minimum(j + 1, ny - 1) * nz + k
+        next_samples_kp = i * ny * nz + j * nz + np.minimum(k + 1, nz - 1)
+        next_samples_im = np.maximum(i - 1, 0) * ny * nz + j * nz + k
+        next_samples_jm = i * ny * nz + np.maximum(j - 1, 0) * nz + k
+        next_samples_km = i * ny * nz + j * nz + np.maximum(k - 1, 0)
         # Concatenate
         next_indices = np.concatenate((next_samples, next_samples_ip, next_samples_jp,
                         next_samples_kp, next_samples_im, next_samples_jm, next_samples_km))
@@ -376,13 +457,17 @@ def get_mesh_udf_fast(decoder, latent_vec, samples=None, indices=None, N_MC=128,
             # its normal and the border's edge
             normals_border = normals[u_border]
             edge_border = filtered_mesh.vertices[v_border] - filtered_mesh.vertices[u_border]
-            edge_border = torch.tensor(edge_border).float().cuda()
+            edge_border = torch.as_tensor(edge_border, dtype=torch.float32, device=decoder_device)
             out_vec = torch.cross(edge_border, normals_border, dim=1)
             out_vec = out_vec / (torch.norm(out_vec, dim=1, keepdim=True) + 1e-6) # make it unit length
 
             # Then we need to orient the out_vec such that they point outwards
             # To do so, we evaluate at +- their offset, and take the corresponding max DF value
-            border_verts = torch.tensor(filtered_mesh.vertices[u_border]).float().cuda()
+            border_verts = torch.as_tensor(
+                filtered_mesh.vertices[u_border],
+                dtype=torch.float32,
+                device=decoder_device,
+            )
             if fourier:
                 xyz_s1_border = ws.fourier_transform(border_verts + 3*eps * out_vec)
                 xyz_s2_border = ws.fourier_transform(border_verts - 3*eps * out_vec)
@@ -406,7 +491,13 @@ def get_mesh_udf_fast(decoder, latent_vec, samples=None, indices=None, N_MC=128,
             s_border = (eps * (out_df_filtered - out_df_filtered.detach())).unsqueeze(-1)   # Fake zero, just to pass grads
             new_verts[u_border_filtered] = new_verts[u_border_filtered] - s_border * out_vec_filtered
 
-        return new_verts, torch.tensor(filtered_mesh.faces).long().cuda(), filtered_mesh, samples, next_indices
+        return (
+            new_verts,
+            torch.as_tensor(filtered_mesh.faces, dtype=torch.long, device=decoder_device),
+            filtered_mesh,
+            samples,
+            next_indices,
+        )
 
 
 def optimize(decoder, iterations, latent_start, mesh_target, lr=5e-3, fourier=False,

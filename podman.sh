@@ -17,6 +17,10 @@
 #     -t example \
 #     -f /mnt/general/examples/container/Dockerfile \
 #     /mnt/general/examples/container
+
+VISIBLE_GPUS="${CUDA_VISIBLE_DEVICES:?CUDA_VISIBLE_DEVICES is not set}"
+echo Visible GPUs: $VISIBLE_GPUS
+
 echo "Loading image..."
 podman import ~/projects/demo/nova3r.tar nova3r
 # Save image
@@ -51,7 +55,7 @@ podman run -v /mnt:/mnt:rw \
     -e PORT=$(python -c "import random; print(random.randint(20000,30000))") \
     --name=nova3r \
     --shm-size=1024gb \
-    -e CUDA_VISIBLE_DEVICES=0 \
+    -e CUDA_VISIBLE_DEVICES \
     -e PYTHONPATH="\$PYTHONPATH:/absolute/path/to/nova3r" \
     --device=/dev/fuse \
     -d \
