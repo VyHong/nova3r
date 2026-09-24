@@ -17,7 +17,10 @@ from eval.baselines.common import (
     write_evaluation_results,
 )
 
-from nova3r.heads.hunyuan_model.pipelines import export_to_trimesh
+from nova3r.heads.hunyuan_model.pipelines import (
+    colorize_trimesh_vertices,
+    export_to_trimesh,
+)
 from nova3r.utils.batch_debug import save_batch_debug
 import os
 import sys
@@ -215,6 +218,15 @@ class Mesh2SDFLightningModule(pl.LightningModule):
             kl_weight=self.kl_weight,
         )
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+        if "rgb_loss" in details:
+            self.log(
+                "train_rgb_loss",
+                details["rgb_loss"],
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                sync_dist=True,
+            )
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -463,6 +475,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
 
     def mesh_from_latents(self, latent_batch, sample_idx, bounds, decoder, method=None):
         method = self.mesh_options.method if method is None else method
+        mesh = None
         if method == "latent2mesh":
             mc_level = self._resolve_mesh_mc_level(
                 bounds,
@@ -482,9 +495,8 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                 mc_algo=self.mesh_options.algorithm,
             )
             meshes = export_to_trimesh(mesh_outputs)
-            return meshes[0] if isinstance(meshes, list) and meshes else meshes
-
-        if method == "mesh_udf":
+            mesh = meshes[0] if isinstance(meshes, list) and meshes else meshes
+        elif method == "mesh_udf":
             with torch.inference_mode(False), torch.enable_grad():
                 latent_target = latent_batch[sample_idx : sample_idx + 1].float().detach().clone()
                 udf_decoder = UDFGeoDecoderAdapter(decoder.geo_decoder, latent_target, bounds)
@@ -505,9 +517,15 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                 )
                 if mesh is not None:
                     mesh = udf_decoder.mesh_to_world(mesh)
-            return mesh
+        else:
+            raise ValueError(f"Unknown mesh extraction method: {method}")
 
-        raise ValueError(f"Unknown mesh extraction method: {method}")
+        return colorize_trimesh_vertices(
+            mesh,
+            decoder,
+            latent_batch[sample_idx : sample_idx + 1],
+            batch_size=self.mesh_options.rgb_vertex_batch_size,
+        )
 
     @staticmethod
     def _slice_batch(batch, max_elements):
@@ -623,8 +641,6 @@ class Mesh2SDFLightningModule(pl.LightningModule):
             try:
                 bounds = self._reconstruction_bounds(batch["surface"][sample_idx])
 
-                # Testing always uses MeshUDF so validation visualization settings do
-                # not silently change the evaluation geometry.
                 mesh = self.mesh_from_latents(
                     latents,
                     sample_idx,

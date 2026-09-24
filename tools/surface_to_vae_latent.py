@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Encode SAGE-10K surfaces into panorama-specific VAE latent files."""
+"""Encode scene surfaces into camera-specific VAE latent files."""
 
 from __future__ import annotations
 
@@ -26,6 +26,10 @@ DEFAULT_CHECKPOINT = REPO_ROOT / "exp_output/hunyuan_vae_v2_1_udf/checkpoints/la
 DEFAULT_CONFIG = REPO_ROOT / "checkpoints/hunyuan/.hydra/config.yaml"
 DEFAULT_SPLIT_LIST = REPO_ROOT / "data/sage-10k/surface_vae_latent_list.json"
 PANORAMA_TO_OPENCV = np.diag(np.asarray([1.0, -1.0, -1.0, 1.0], dtype=np.float32))
+SCANNETPP_AXIS_CONVERSION = np.asarray(
+    [[0, 1, 0, 0], [0, 0, -1, 0], [-1, 0, 0, 0], [0, 0, 0, 1]],
+    dtype=np.float32,
+)
 
 
 @dataclass(frozen=True)
@@ -46,12 +50,21 @@ class PreparedSurface:
     bounds: torch.Tensor
     normalization_scale: float
     room_center: torch.Tensor
+    cube_bbox_center: torch.Tensor
+    normalized_camera_translation: torch.Tensor
     seed: int
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description=("Load SAGE-10K scene_surface.npz for every listed panorama, apply " "the requested coordinate transform, and save a VAE latent.")
+        description=("Load scene surfaces for every listed camera, apply the "
+                     "requested coordinate transform, and save a VAE latent.")
+    )
+    parser.add_argument(
+        "--dataset-layout",
+        choices=("sage10k", "scannetpp"),
+        default="sage10k",
+        help="Input path and pose convention (default: sage10k).",
     )
     parser.add_argument("--split-list", type=Path, default=DEFAULT_SPLIT_LIST)
     parser.add_argument(
@@ -69,7 +82,7 @@ def parse_args():
     parser.add_argument(
         "--surface-root",
         type=Path,
-        default=Path("/tmp/datasets/sage-10k/udf"),
+        default=Path("/tmp/datasets/sage-10k/udf_colored"),
     )
     parser.add_argument(
         "--cubemap-root",
@@ -150,6 +163,16 @@ def parse_args():
         help=("Translate the sampled room bounding-box center to (0, 0, 0) " "before applying normalization."),
     )
     parser.add_argument(
+        "--cube-center-camera",
+        action="store_true",
+        help=(
+            "With --normalization cube, first normalize about the sampled "
+            "room bounding-box midpoint, then translate the normalized camera "
+            "back to (0, 0, 0). This matches cube normalization with "
+            "surface_geo_use_camera_translation enabled."
+        ),
+    )
+    parser.add_argument(
         "--save-latent-before-sampling",
         action="store_true",
         help=("Also save the posterior mean and log-variance needed to draw latent " "samples as <frame>_before_sampling.pt."),
@@ -178,6 +201,12 @@ def parse_args():
         parser.error("--camera-poses values must be non-negative")
     if args.devices is not None and len(set(args.devices)) != len(args.devices):
         parser.error("--devices must not contain duplicate devices")
+    if args.cube_center_camera and args.normalization not in ("cube", "auto"):
+        parser.error("--cube-center-camera requires --normalization cube (or auto resolving to cube)")
+    if args.cube_center_camera and args.center_room:
+        parser.error("--cube-center-camera and --center-room are mutually exclusive")
+    if args.cube_center_camera and args.no_camera_extrinsics:
+        parser.error("--cube-center-camera requires camera extrinsics")
     return args
 
 
@@ -271,16 +300,48 @@ def load_world_to_camera(
     scene: str,
     frame: str,
     face_id: int,
+    dataset_layout: str = "sage10k",
 ):
     frame_index = int(frame)
-    cube_dir = cubemap_root / scene / f"{scene}_panorama_{frame_index:03d}_cube_95"
-    camera_data = json.loads((cube_dir / "camera_data.json").read_text())
-    poses = json.loads((pose_root / f"{scene}.json").read_text())
-    panorama_name = f"{scene}_panorama_{frame_index:03d}.png"
+    if dataset_layout == "sage10k":
+        cube_dir = cubemap_root / scene / f"{scene}_panorama_{frame_index:03d}_cube_95"
+        camera_data = json.loads((cube_dir / "camera_data.json").read_text())
+        poses = json.loads((pose_root / f"{scene}.json").read_text())
+        panorama_name = f"{scene}_panorama_{frame_index:03d}.png"
+        panorama_w2c = PANORAMA_TO_OPENCV @ np.asarray(
+            poses[panorama_name], dtype=np.float32
+        )
+        face_w2c = np.asarray(
+            camera_data[f"{face_id:04d}"]["extrinsics"], dtype=np.float32
+        )
+        return face_w2c @ panorama_w2c, cube_dir
 
-    panorama_w2c = PANORAMA_TO_OPENCV @ np.asarray(poses[panorama_name], dtype=np.float32)
-    face_w2c = np.asarray(camera_data[f"{face_id:04d}"]["extrinsics"], dtype=np.float32)
-    return face_w2c @ panorama_w2c, cube_dir
+    cube_dir = cubemap_root / scene / "panocam" / "images" / f"{frame_index}_cube_95"
+    camera_data = json.loads((cube_dir / "camera_data.json").read_text())
+    poses_path = pose_root / scene / "scans" / "scanner_poses.json"
+    scanner_poses = json.loads(poses_path.read_text())
+    if frame_index >= len(scanner_poses):
+        raise IndexError(
+            f"Pose index {frame_index} is out of range for {poses_path} "
+            f"with {len(scanner_poses)} poses"
+        )
+    scanner_c2w = np.asarray(scanner_poses[frame_index], dtype=np.float32)
+    if scanner_c2w.shape != (4, 4):
+        raise ValueError(
+            f"Expected 4x4 scanner pose at index {frame_index} in {poses_path}, "
+            f"got {scanner_c2w.shape}"
+        )
+    scanner_w2c = (
+        SCANNETPP_AXIS_CONVERSION
+        @ np.linalg.inv(scanner_c2w).astype(np.float32)
+        @ SCANNETPP_AXIS_CONVERSION.T
+    )
+    face_w2c = np.asarray(
+        camera_data[f"{face_id:04d}"]["extrinsics"], dtype=np.float32
+    )
+    # ScanNet++ surface points need the final axis conversion as well; this is
+    # identical to ScanNetPPSDFDataset._load_geometry.
+    return face_w2c @ scanner_w2c @ SCANNETPP_AXIS_CONVERSION, cube_dir
 
 
 def choose_rows(rng, rows, count):
@@ -374,6 +435,22 @@ def center_surface(surface: torch.Tensor):
     return result, center
 
 
+def cube_normalize_and_center_camera(surface: torch.Tensor):
+    """Cube-normalize about the bbox midpoint, then restore the camera origin.
+
+    The input is already in the camera frame, so its camera is at zero. Standard
+    cube normalization moves that camera to ``-bbox_center * scale``. Subtracting
+    that transformed camera position puts it back at zero while retaining the
+    bbox-derived uniform scale.
+    """
+    xyz = surface[:, :3]
+    bbox_center = (xyz.amin(dim=0) + xyz.amax(dim=0)) * 0.5
+    result, scale = normalize_to_unit_box(surface, padding=1.0)
+    normalized_camera = -bbox_center * scale
+    result[:, :3] -= normalized_camera
+    return result, scale, bbox_center, -normalized_camera
+
+
 def prepare_job(
     job,
     *,
@@ -384,16 +461,23 @@ def prepare_job(
     no_camera_extrinsics: bool,
     base_seed: int,
     center_room: bool,
+    cube_center_camera: bool,
     normalization: str,
     random_count: int,
     sharp_count: int,
     point_feats: int,
+    dataset_layout: str = "sage10k",
 ):
     """Load and transform one surface on a CPU worker."""
     scene, frame = job.scene, job.frame
-    surface_path = surface_root / scene / "scene_surface.npz"
+    if dataset_layout == "scannetpp":
+        surface_path = surface_root / scene / "scans" / "mesh_aligned_0.05_surface.npz"
+        scene_axis_conversion = SCANNETPP_AXIS_CONVERSION
+    else:
+        surface_path = surface_root / scene / "scene_surface.npz"
+        scene_axis_conversion = PANORAMA_TO_OPENCV
     if no_camera_extrinsics:
-        input_transform = PANORAMA_TO_OPENCV.copy()
+        input_transform = scene_axis_conversion.copy()
         cube_dir = None
         seed = sample_seed(base_seed, scene, frame)
         coordinate_frame = "scene_opencv_axes"
@@ -404,9 +488,10 @@ def prepare_job(
             scene,
             frame,
             face_id,
+            dataset_layout,
         )
         seed = sample_seed(base_seed, scene, frame, face_id)
-        coordinate_frame = "panorama_camera"
+        coordinate_frame = f"{dataset_layout}_camera"
 
     surface = make_surface(
         surface_path,
@@ -417,9 +502,21 @@ def prepare_job(
         seed=seed,
     )
     room_center = torch.zeros(3, dtype=surface.dtype)
+    cube_bbox_center = torch.zeros(3, dtype=surface.dtype)
+    normalized_camera_translation = torch.zeros(3, dtype=surface.dtype)
     if center_room:
         surface, room_center = center_surface(surface)
-    surface, scale = normalize_surface(surface, normalization)
+    if cube_center_camera:
+        if normalization != "cube":
+            raise ValueError(
+                "--cube-center-camera requires normalization to resolve to 'cube', "
+                f"got {normalization!r}"
+            )
+        surface, scale, cube_bbox_center, normalized_camera_translation = (
+            cube_normalize_and_center_camera(surface)
+        )
+    else:
+        surface, scale = normalize_surface(surface, normalization)
 
     xyz = surface[:, :3]
     lower = xyz.amin(dim=0)
@@ -436,6 +533,8 @@ def prepare_job(
         bounds=bounds,
         normalization_scale=scale,
         room_center=room_center,
+        cube_bbox_center=cube_bbox_center,
+        normalized_camera_translation=normalized_camera_translation,
         seed=seed,
     )
 
@@ -568,6 +667,9 @@ def result_metadata(item: PreparedSurface, args, normalization: str):
         "normalization_scale": item.normalization_scale,
         "room_centered": args.center_room,
         "room_center": item.room_center,
+        "cube_center_camera": args.cube_center_camera,
+        "cube_bbox_center": item.cube_bbox_center,
+        "normalized_camera_translation": item.normalized_camera_translation,
         "coordinate_frame": item.coordinate_frame,
         "input_transform": torch.from_numpy(item.input_transform.copy()),
         "bounds": item.bounds,
@@ -656,7 +758,14 @@ def encode_jobs_on_device(args, pending, device, worker_rank=0, world_size=1):
         args.config, args.checkpoint, device, dtype
     )
     normalization = training_normalization if args.normalization == "auto" else args.normalization
+    if args.cube_center_camera and normalization != "cube":
+        raise ValueError(
+            "--cube-center-camera requires normalization to resolve to 'cube', "
+            f"but the selected config resolved auto to {normalization!r}"
+        )
     centering = " after room centering" if args.center_room else ""
+    if args.cube_center_camera:
+        centering = " followed by translating the normalized camera to the origin"
     if args.no_camera_extrinsics:
         print(
             prefix + f"Using {normalization} scaling{centering} in the scene frame with " "only the " "fixed (x, y, z) -> (x, -y, -z) axis conversion"
@@ -673,10 +782,12 @@ def encode_jobs_on_device(args, pending, device, worker_rank=0, world_size=1):
         no_camera_extrinsics=args.no_camera_extrinsics,
         base_seed=args.seed,
         center_room=args.center_room,
+        cube_center_camera=args.cube_center_camera,
         normalization=normalization,
         random_count=vae.encoder.pc_size,
         sharp_count=vae.encoder.pc_sharpedge_size,
         point_feats=vae.encoder.point_feats,
+        dataset_layout=args.dataset_layout,
     )
     preparation = "sequentially" if args.num_workers == 0 else f"with {args.num_workers} worker threads"
     print(f"{prefix}Preparing surfaces {preparation}")

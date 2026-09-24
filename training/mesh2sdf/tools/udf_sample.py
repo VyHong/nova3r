@@ -349,7 +349,7 @@ def sample_udf(
     return data
 
 
-def sample_mesh_udf(mesh, color_max_distance=0.05):
+def sample_mesh_udf(mesh, color_max_distance=0.05, sample_num=524288):
     V = np.asarray(mesh.vertices, dtype=np.float64)
     vertex_rgb = mesh_vertex_rgb(mesh)
     sampling_scale = mesh_radius_scale(V)
@@ -361,8 +361,6 @@ def sample_mesh_udf(mesh, color_max_distance=0.05):
     volume_bounds = padded_mesh_bounds(mesh, sampling_scale=sampling_scale)
     print(f"Volume sample bounds min: {volume_bounds[0]}")
     print(f"Volume sample bounds max: {volume_bounds[1]}")
-
-    sample_num = (1048576 * 2) // 4
 
     if vertex_rgb is None:
         random_surface, random_normal = random_sample_pointcloud(mesh, num=sample_num)
@@ -440,10 +438,18 @@ if __name__ == "__main__":
             "fraction of sampling_scale (default: 0.05)."
         ),
     )
+    parser.add_argument(
+        "--sample_num",
+        type=int,
+        default=524288,
+        help="Number of random-surface and sharp-surface samples (default: 524288).",
+    )
 
     args = parser.parse_args()
     if args.color_max_distance < 0:
         parser.error("--color_max_distance must be non-negative")
+    if args.sample_num < 1:
+        parser.error("--sample_num must be positive")
 
     mesh = load_mesh(args.input_obj)
 
@@ -473,7 +479,9 @@ if __name__ == "__main__":
         )
 
     surface_data, udf_data = sample_mesh_udf(
-        mesh, color_max_distance=args.color_max_distance
+        mesh,
+        color_max_distance=args.color_max_distance,
+        sample_num=args.sample_num,
     )
 
     parent_folder = os.path.dirname(args.output_prefix)

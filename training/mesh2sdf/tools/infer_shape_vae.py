@@ -15,7 +15,10 @@ from omegaconf import OmegaConf
 from torch_cluster import knn
 
 from nova3r.heads.hunyuan_model.autoencoders.model import ShapeVAE
-from nova3r.heads.hunyuan_model.pipelines import export_to_trimesh
+from nova3r.heads.hunyuan_model.pipelines import (
+    colorize_trimesh_vertices,
+    export_to_trimesh,
+)
 
 
 def parse_args():
@@ -296,6 +299,7 @@ def main():
     mesh = meshes[0] if isinstance(meshes, list) else meshes
     if mesh is None or not len(mesh.vertices) or not len(mesh.faces):
         raise RuntimeError("The VAE decoder did not produce a surface")
+    mesh = colorize_trimesh_vertices(mesh, model, decoded)
     mesh.vertices = np.asarray(mesh.vertices) / scale.item() + center.cpu().numpy()
     mesh_path = args.output_dir / "reconstruction.ply"
     mesh.export(mesh_path)

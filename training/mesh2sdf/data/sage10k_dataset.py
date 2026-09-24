@@ -35,7 +35,7 @@ class SAGE10KSDFDataset(SDFDatasetMixin):
     ``modalities`` can contain ``images``, ``cameras``, ``surface``,
     ``geo_points``, ``conditioning_latent``, ``visible_geometry_latent``,
     ``image_features``, and ``gt_latent``. When omitted,
-    images, cameras, and both geometry modalities are loaded; configured latent
+    images, cameras, and surface geometry are loaded; configured latent
     roots enable their corresponding latent modalities.
     """
 
@@ -86,7 +86,7 @@ class SAGE10KSDFDataset(SDFDatasetMixin):
         self.format = format
         self.configure_subseq_ids(subseq_ids)
         if modalities is None:
-            self.modalities = {"images", "cameras", "surface", "geo_points"}
+            self.modalities = {"images", "cameras", "surface"}
             if load_conditioning_latent:
                 self.modalities.add("conditioning_latent")
             if load_visible_geometry_latent:
@@ -385,7 +385,8 @@ def _main():
 
     parser = argparse.ArgumentParser(description="Load one SAGE-10K sample and inspect the dataset return values.")
     parser.add_argument("--data-root", default="/tmp/datasets/sage-10k/cubemap_data/cubemaps")
-    parser.add_argument("--sdf-data-root", default="/tmp/datasets/sage-10k/udf")
+    parser.add_argument("--sdf-data-root", default="/tmp/datasets/sage-10k/udf_surfaces")
+    parser.add_argument("--with-geo-points", action="store_true", help="Also load scene_udf.npz when available")
     parser.add_argument("--pose-root", default="/mnt/projects/theses/vyhong/sage-10k/poses")
     parser.add_argument("--samples-list-path", default="data/sage-10k/val_list.json")
     parser.add_argument("--index", type=int, default=None)
@@ -429,6 +430,7 @@ def _main():
         sdf_data_root=args.sdf_data_root,
         pose_root=args.pose_root,
         subseq_ids=subseq_ids,
+        modalities=["images", "cameras", "surface", "geo_points"] if args.with_geo_points else ["images", "cameras", "surface"],
     )
     if not dataset.samples_list:
         raise RuntimeError(f"No complete cubemaps found under {args.data_root}")
@@ -446,12 +448,13 @@ def _main():
                 item
                 for item in dataset.samples_list
                 if (dataset.data_store[item.split()[0]][item.split()[1]]["surface"]).is_file()
-                and (dataset.data_store[item.split()[0]][item.split()[1]]["geo_points"]).is_file()
+                and (not args.with_geo_points or (dataset.data_store[item.split()[0]][item.split()[1]]["geo_points"]).is_file())
             ),
             None,
         )
         if sample is None:
-            raise RuntimeError("No discovered cubemap has both scene_surface.npz and scene_udf.npz " f"under {args.sdf_data_root}")
+            required = "scene_surface.npz and scene_udf.npz" if args.with_geo_points else "scene_surface.npz"
+            raise RuntimeError(f"No discovered cubemap has {required} under {args.sdf_data_root}")
 
     scene, frame_id = sample.split()
     item = dataset.get_data(seq_name=scene, id=frame_id, subseq_ids=subseq_ids)
@@ -459,7 +462,7 @@ def _main():
 
     output_dir = Path(args.output_dir) / f"{scene}_{frame_id}"
     save_batch_debug(item, output_dir, batched=False)
-    print(f"Saved cubemap, extrinsics, surface points, and geo points to {output_dir}")
+    print(f"Saved cubemap, extrinsics, and surface points to {output_dir}")
 
 
 if __name__ == "__main__":

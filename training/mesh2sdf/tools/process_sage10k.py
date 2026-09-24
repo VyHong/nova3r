@@ -14,7 +14,13 @@ from tqdm import tqdm
 UDF_SCRIPT = Path(__file__).with_name("udf_sample.py").resolve()
 
 
-def process_scene(mesh_path, output_prefix, overwrite, color_max_distance=0.05):
+def process_scene(
+    mesh_path,
+    output_prefix,
+    overwrite,
+    color_max_distance=0.05,
+    sample_num=524288,
+):
     outputs = (
         Path(f"{output_prefix}_surface.npz"),
         Path(f"{output_prefix}_udf.npz"),
@@ -32,6 +38,8 @@ def process_scene(mesh_path, output_prefix, overwrite, color_max_distance=0.05):
         str(output_prefix),
         "--color_max_distance",
         str(color_max_distance),
+        "--sample_num",
+        str(sample_num),
     ]
     try:
         with tempfile.TemporaryDirectory(
@@ -69,6 +77,7 @@ def main(args):
                 prefix,
                 args.overwrite,
                 args.color_max_distance,
+                args.sample_num,
             ): mesh
             for mesh, prefix in jobs
         }
@@ -105,6 +114,12 @@ if __name__ == "__main__":
         default=0.05,
         help="Near-surface RGB band as a fraction of each mesh's sampling scale.",
     )
+    parser.add_argument(
+        "--sample-num",
+        type=int,
+        default=524288,
+        help="Random-surface and sharp-surface samples per scene.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parsed = parser.parse_args()
     if parsed.workers < 1:
@@ -113,4 +128,6 @@ if __name__ == "__main__":
         parser.error("--limit must be at least 1")
     if parsed.color_max_distance < 0:
         parser.error("--color-max-distance must be non-negative")
+    if parsed.sample_num < 1:
+        parser.error("--sample-num must be positive")
     main(parsed)

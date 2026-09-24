@@ -41,6 +41,7 @@ class MeshOptions:
     smooth_borders: bool
     fourier: bool
     vertex_batch_size: int
+    rgb_vertex_batch_size: int
     bounds_padding: float
     bounds: np.ndarray | None
     surface_threshold: float | None
@@ -58,6 +59,7 @@ class MeshOptions:
             smooth_borders=bool(cfg.get("smooth_borders", False)),
             fourier=bool(cfg.get("mesh_fourier", False)),
             vertex_batch_size=int(cfg.get("mesh_udf_vertex_batch_size", 65536)),
+            rgb_vertex_batch_size=int(cfg.get("mesh_rgb_vertex_batch_size", 65536)),
             bounds_padding=float(cfg.get("mesh_bounds_padding", 0.1)),
             bounds=cls._validate_bounds(cfg.get("mesh_bounds")),
             surface_threshold=None if threshold is None else float(threshold),

@@ -272,11 +272,6 @@ class Nova3rImgCond(nn.Module, PyTorchModelHubMixin):
         batch = kwargs.get("batch") or {}
         if "image_features" in batch:
             scene_tokens = batch["image_features"]
-            if scene_tokens.ndim != 3:
-                raise ValueError(
-                    "image_features must have shape [B, patches, channels], got "
-                    f"{tuple(scene_tokens.shape)}"
-                )
             scene_tokens = scene_tokens.to(
                 device=self.img_token_proj.weight.device,
                 dtype=self.img_token_proj.weight.dtype,

@@ -25,7 +25,9 @@ import pytorch_lightning as pl
 
 def parse_args():
     parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
-    parser.add_argument("--config", default="checkpoints/dinov3/config_dinov3_panorama_visible_latent_conditioned_cube.yaml", help="Model and training config")
+    parser.add_argument(
+        "--config", default="checkpoints/dinov3/config_dinov3_panorama_visible_latent_conditioned_cube.yaml", help="Model and training config"
+    )
     parser.add_argument("--device", default="gpu", help="Device (default: cuda)")
     parser.add_argument("--devices", type=int, default=None, help="Number of devices; defaults to experiment.gpus")
     parser.add_argument("--ddp-timeout-seconds", type=int, default=600)

@@ -109,6 +109,53 @@ def export_to_trimesh(mesh_output):
         return mesh_output
 
 
+def colorize_trimesh_vertices(mesh, decoder, decoded_latents, batch_size=65536):
+    """Decode optional RGB values at final mesh vertices.
+
+    Geometry-only decoders have no ``rgb_decoder``; returning the mesh unchanged
+    keeps old models and checkpoints on their existing reconstruction path.
+    Vertex queries must be in the decoder's normalized coordinate frame.
+    """
+    if (
+        mesh is None
+        or len(mesh.vertices) == 0
+        or getattr(decoder, "rgb_decoder", None) is None
+    ):
+        return mesh
+    if decoded_latents.ndim != 3 or decoded_latents.shape[0] != 1:
+        raise ValueError(
+            "Vertex color decoding expects one latent sample shaped [1, N, C], "
+            f"got {tuple(decoded_latents.shape)}"
+        )
+    if batch_size < 1:
+        raise ValueError("RGB vertex batch size must be positive")
+
+    vertices = torch.as_tensor(
+        np.asarray(mesh.vertices),
+        device=decoded_latents.device,
+        dtype=decoded_latents.dtype,
+    ).unsqueeze(0)
+    rgb_parts = []
+    with torch.inference_mode():
+        for start in range(0, vertices.shape[1], batch_size):
+            rgb_parts.append(
+                decoder.decode_rgb(
+                    vertices[:, start : start + batch_size],
+                    decoded_latents,
+                )
+            )
+    rgb = torch.cat(rgb_parts, dim=1)[0].float().clamp(0, 1).cpu().numpy()
+    rgba = np.concatenate(
+        (
+            np.rint(rgb * 255.0).astype(np.uint8),
+            np.full((len(rgb), 1), 255, dtype=np.uint8),
+        ),
+        axis=1,
+    )
+    mesh.visual = trimesh.visual.ColorVisuals(mesh=mesh, vertex_colors=rgba)
+    return mesh
+
+
 def get_obj_from_str(string, reload=False):
     module, cls = string.rsplit(".", 1)
     if reload:

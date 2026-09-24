@@ -5,7 +5,6 @@ import argparse
 import numpy as np
 import torch
 
-from pytorch3d.io import load_ply
 from pytorch3d.ops import estimate_pointcloud_normals
 from pytorch3d.structures import Pointclouds
 from pytorch3d.renderer import (
@@ -71,15 +70,27 @@ def load_ply_pointcloud(
     generally spatially ordered. This is deterministic and avoids allocating a
     multi-million-element random permutation for dense validation meshes.
     """
-    verts, faces = load_ply(ply_path)
+    # PyTorch3D's ``load_ply`` returns geometry only, so loading a colored mesh
+    # through it silently drops the vertex RGB stored in the PLY.  Open3D is
+    # already required for outlier removal here and preserves those colors.
+    import open3d as o3d
+
+    pcd = o3d.io.read_point_cloud(ply_path)
+    if not pcd.has_points():
+        raise ValueError(f"PLY contains no vertices: {ply_path}")
+
+    verts = torch.from_numpy(np.asarray(pcd.points)).to(torch.float32)
+    has_source_colors = pcd.has_colors()
+    if has_source_colors:
+        rgb = torch.from_numpy(np.asarray(pcd.colors)).to(torch.float32)
+    else:
+        rgb = torch.full((verts.shape[0], 3), 0.7, dtype=verts.dtype)
 
     if remove_outlier:
-        import open3d as o3d
-
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(np.ascontiguousarray(verts.cpu().numpy(), dtype=np.float64))
-        cl, ind = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
-        verts = torch.from_numpy(np.asarray(pcd.points)[ind]).to(verts.dtype)
+        _, ind = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+        ind = torch.as_tensor(ind, dtype=torch.long)
+        verts = verts[ind]
+        rgb = rgb[ind]
 
     if max_points is not None:
         if max_points <= 0:
@@ -90,12 +101,11 @@ def load_ply_pointcloud(
                 0, original_count - 1, steps=max_points, dtype=torch.float64
             ).to(torch.long)
             verts = verts[indices]
+            rgb = rgb[indices]
             print(f"Downsampled point cloud from {original_count:,} to {max_points:,} points")
 
     # verts = smooth_pointcloud_surface(verts, device=device, num_iterations=2, neighbor_size=20)
     #     from sklearn.neighbors import NearestNeighbors
-    rgb = torch.full((verts.shape[0], 3), 0.7).to(verts.dtype)
-
     verts = verts.to(device)
     rgb = rgb.to(device)
 
@@ -108,7 +118,14 @@ def load_ply_pointcloud(
     verts = verts / (max_abs + 1e-8)
     verts = verts * 0.7
 
-    return Pointclouds(points=[verts], features=[rgb])
+    point_cloud = Pointclouds(points=[verts], features=[rgb])
+    if not has_source_colors:
+        point_cloud = build_colored_pointcloud(
+            point_cloud,
+            device=device,
+            color_type="plasma",
+        )
+    return point_cloud
 
 
 def pca_align_pointcloud(point_cloud: Pointclouds) -> Pointclouds:
@@ -189,7 +206,9 @@ def build_colored_pointcloud(
     point_cloud: Pointclouds, device: torch.device, normal_neighbors: int = 60, color_type="normal"
 ) -> Pointclouds:
     # Estimate normals on CPU to avoid GPU OOM for large point clouds
-    if color_type == "normal":
+    if color_type in ("source", "rgb", None):
+        features = point_cloud.features_list()
+    elif color_type == "normal":
         pc_cpu = point_cloud.to("cpu")
         normals = estimate_pointcloud_normals(pc_cpu, neighborhood_size=normal_neighbors)
 
@@ -234,7 +253,10 @@ def build_colored_pointcloud(
         xyz_norm = (pts - xyz_min) / (xyz_max - xyz_min + 1e-8)
         features = [xyz_norm.clamp(0.0, 1.0).to(device)]
     else:
-        raise ValueError(f"Unknown color_type '{color_type}'. Use 'normal', 'plasma', 'viridis', or 'xyz'.")
+        raise ValueError(
+            f"Unknown color_type '{color_type}'. Use 'source', 'normal', "
+            "'plasma', 'viridis', or 'xyz'."
+        )
 
     return Pointclouds(points=point_cloud.points_list(), features=features)
 

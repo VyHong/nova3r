@@ -41,6 +41,7 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
         dataset_prefix="scannetpp",
         load_conditioning_latent=False,
         conditioning_latent_root=None,
+        image_feature_root=None,
         subseq_ids=None,
         load_visible_geometry_latent=False,
         visible_geometry_latent_root=None,
@@ -62,6 +63,13 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
         self.configure_visible_geometry_latents(
             load_visible_geometry_latent, visible_geometry_latent_root
         )
+        self.image_feature_root = (
+            Path(image_feature_root) if image_feature_root is not None else None
+        )
+        if self.image_feature_root is not None and not self.image_feature_root.is_dir():
+            raise ValueError(
+                f"Image feature root does not exist: {self.image_feature_root}"
+            )
 
         if samples_list_path is None:
             self.samples_list = self._discover_samples()
@@ -175,6 +183,20 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
         scanner_w2c = np.linalg.inv(scanner_c2w).astype(np.float32)
         basis = self.SCANNER_AXIS_CONVERSION
         return basis @ scanner_w2c @ basis.T
+
+    def _load_image_features(self, seq_name, frame_id):
+        feature_path = self.image_feature_root / seq_name / f"{int(frame_id):05d}.pt"
+        if not feature_path.is_file():
+            raise FileNotFoundError(f"Missing panorama image features: {feature_path}")
+        checkpoint = torch.load(feature_path, map_location="cpu", weights_only=True)
+        features = (
+            checkpoint.get("patch_features")
+            if isinstance(checkpoint, dict)
+            else checkpoint
+        )
+        return self._validate_single_latent(
+            features, feature_path, "panorama patch features"
+        )
 
     def _load_geometry(self, anno, rng, total_transform):
         surface_path = Path(anno["surface"])
@@ -299,6 +321,8 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
             batch["conditioning_latents"] = self._load_conditioning_latent(seq_name, ids)
         if self.load_visible_geometry_latent:
             batch["visible_geometry_latents"] = self._load_visible_geometry_latent(seq_name, ids)
+        if self.image_feature_root is not None:
+            batch["image_features"] = self._load_image_features(seq_name, ids[0])
         return batch
 
     def __getitem__(self, index):

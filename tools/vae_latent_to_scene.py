@@ -15,7 +15,10 @@ import numpy as np
 import torch
 
 from nova3r.heads.hunyuan_model.autoencoders.model import ShapeVAE
-from nova3r.heads.hunyuan_model.pipelines import export_to_trimesh
+from nova3r.heads.hunyuan_model.pipelines import (
+    colorize_trimesh_vertices,
+    export_to_trimesh,
+)
 from training.mesh2sdf.tools.infer_shape_vae import (
     checkpoint_state,
     find_shape_vae_config,
@@ -165,6 +168,7 @@ def main():
     mesh = meshes[0]
     if mesh is None or not len(mesh.vertices) or not len(mesh.faces):
         raise RuntimeError("The VAE decoder did not produce a surface")
+    mesh = colorize_trimesh_vertices(mesh, model, decoded)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     mesh.export(args.output)

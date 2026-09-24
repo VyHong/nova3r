@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import tempfile
 
@@ -51,6 +52,11 @@ def parse_args():
     parser.add_argument('--output', type=Path, help='Single-cubemap .pt output.')
     parser.add_argument('--output-root', type=Path,
                         help='Dataset output root; preserves relative cubemap paths.')
+    parser.add_argument('--dataset-layout', choices=('generic', 'scannetpp'),
+                        default='generic',
+                        help='Dataset discovery and output naming convention.')
+    parser.add_argument('--split-list', type=Path,
+                        help="Optional '<scene> <frame>' JSON list (ScanNet++ only).")
     parser.add_argument('--cubemap-glob', default='*cube*',
                         help='Directory glob for dataset discovery (default: *cube*).')
     parser.add_argument('--model', default='facebook/dinov3-vitl16-pretrain-lvd1689m',
@@ -187,21 +193,63 @@ def build_jobs(args):
     elif args.dataset_root:
         if not args.dataset_root.is_dir():
             raise FileNotFoundError(args.dataset_root)
-        directories = sorted(p for p in args.dataset_root.rglob(args.cubemap_glob)
-                             if p.is_dir() and any(
-                                 f.is_file() and f.stem.isdigit() and
-                                 f.suffix.lower() in IMAGE_SUFFIXES for f in p.iterdir()))
-        jobs = [(p, args.output_root / p.relative_to(args.dataset_root) / 'dinov3_features.pt')
-                for p in directories]
+        if args.dataset_layout == 'scannetpp':
+            selected = None
+            if args.split_list is not None:
+                selected = {
+                    (scene, f'{int(frame):05d}')
+                    for scene, frame in (
+                        sample.split()
+                        for sample in json.loads(args.split_list.read_text())
+                    )
+                }
+            directories = []
+            for directory in sorted(args.dataset_root.glob('*/panocam/images/*_cube_95')):
+                scene = directory.parts[-4]
+                frame = f'{int(directory.name.removesuffix("_cube_95")):05d}'
+                if selected is None or (scene, frame) in selected:
+                    directories.append((directory, scene, frame))
+            jobs = [
+                (directory, args.output_root / scene / f'{frame}.pt')
+                for directory, scene, frame in directories
+            ]
+        else:
+            directories = sorted(p for p in args.dataset_root.rglob(args.cubemap_glob)
+                                 if p.is_dir() and any(
+                                     f.is_file() and f.stem.isdigit() and
+                                     f.suffix.lower() in IMAGE_SUFFIXES for f in p.iterdir()))
+            jobs = [(p, args.output_root / p.relative_to(args.dataset_root) / 'dinov3_features.pt')
+                    for p in directories]
     else:
         if not args.panorama_root.is_dir():
             raise FileNotFoundError(args.panorama_root)
-        images = sorted(p for p in args.panorama_root.rglob('*')
-                        if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES)
-        jobs = [
-            (p, args.output_root / p.relative_to(args.panorama_root).parent / f'{p.stem}.pt')
-            for p in images
-        ]
+        if args.dataset_layout == 'scannetpp':
+            selected = None
+            if args.split_list is not None:
+                selected = {
+                    (scene, f'{int(frame):05d}')
+                    for scene, frame in (
+                        sample.split()
+                        for sample in json.loads(args.split_list.read_text())
+                    )
+                }
+            images = sorted(
+                p for p in args.panorama_root.glob('*/panocam/images/*.*')
+                if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES and p.stem.isdigit()
+            )
+            jobs = []
+            for path in images:
+                scene = path.relative_to(args.panorama_root).parts[0]
+                frame = f'{int(path.stem):05d}'
+                if selected is None or (scene, frame) in selected:
+                    jobs.append((path, args.output_root / scene / f'{frame}.pt'))
+        else:
+            images = sorted(p for p in args.panorama_root.rglob('*')
+                            if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES)
+            jobs = [
+                (p, args.output_root / p.relative_to(args.panorama_root).parent / f'{p.stem}.pt')
+                for p in images
+            ]
     if args.limit is not None:
         jobs = jobs[:args.limit]
     return jobs[args.shard_index::args.num_shards]

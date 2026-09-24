@@ -167,7 +167,7 @@ def render_360_video(
     ply_path,
     output_dir,
     flip_axis="y",
-    color_type="plasma",
+    color_type="source",
     num_frames=180,
     fps=30,
     elevation=20,
