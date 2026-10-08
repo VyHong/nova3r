@@ -1,0 +1,76 @@
+# Inference-only architecture paired with the official wrchen530/nova3r
+# scene_n2/checkpoint-last.pth release. Dataset and training-only fields from
+# the published Hydra config are intentionally omitted.
+experiment:
+  exp_name: nova3r_scene_n2_official
+  resolution: 518
+  fm_step_size: 0.04
+  fm_sampling: euler
+  amp_dtype: bf16
+  model:
+    name: Nova3rImgCond
+    params:
+      img_size: 518
+      patch_size: 14
+      embed_dim: 1024
+      num_3d_tokens: 768
+      cfg:
+        aggregator:
+          name: AggregatorPts3D
+          params:
+            img_size: 518
+            patch_size: 14
+            embed_dim: 1024
+            depth: 16
+            num_heads: 16
+            mlp_ratio: 4.0
+            num_register_tokens: 4
+            qkv_bias: true
+            proj_bias: true
+            ffn_bias: true
+            patch_embed: dinov2_vitl14_reg
+            aa_order: [frame, global, pts3d]
+            aa_block_size: 1
+            qk_norm: true
+            rope_freq: 100
+            init_values: 0.01
+            num_3d_tokens: 768
+            token_dim_3d: 1024
+            pos_3d_embed_type: None
+            token_3d_embed_config:
+              name: Token3DEmbedMLP
+              params:
+                dim: 1024
+                mlp_ratio: 2.0
+                use_cond_embed: first
+            share_3d_attn: true
+            depth_3d_stride: 2
+            token_dim: 128
+            detach_vit_token: true
+            use_image_token: true
+        point_head:
+          name: DPTHead
+        pts3d_head:
+          name: PointJointFMDecoderV2
+          params:
+            output_dim: 3
+            num_3d_tokens: 768
+            has_conf: true
+            conf_activation: expp1
+            rgb_activation: sigmoid
+            pts_activation: linear
+            use_sdpa: true
+            cross_depth: 3
+            self_depth: 3
+            dim_model: 128
+            num_virtual_tracks: 512
+            dim_in: 128
+            token_reduce_dim: 128
+            share_t: true
+            norm_mode: median_3
+            target_source: src_complete
+            query_source: src_complete
+            sample_size: 8192
+            down_resolution: 224
+            target_sampling: fps_edge_fast
+            use_filter: false

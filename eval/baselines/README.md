@@ -16,6 +16,26 @@ used by `eval/evaluate_pcd.py`. The baseline defaults to `300` iterations and a
 learning rate of `0.1`. Distances are Euclidean, unsquared, and reported in scene
 units:
 
+The default checkpoint is the refreshed metric-scale nested model
+`depth-anything/DA3NESTED-GIANT-LARGE-1.1`. Override it with `--da3-model` when
+comparing another DA3 checkpoint.
+With `--save-predictions`, DA3 additionally writes exact 2D arrays to
+`predictions_2d/*_da3_2d.npz` and percentile-normalized PNG previews of its raw
+depth, spherical range, confidence, and sky maps. By default, ERP depth is
+converted from camera-plane Z-depth to range using DA3's predicted pinhole
+intrinsics. This deliberately extends one pinhole image plane across the full
+ERP and is therefore an approximation outside the forward field of view.
+For ERP inputs it writes three unaligned world-space diagnostic clouds under
+`predictions_diagnostic/`: `*_erp_pinhole_adjusted.ply` is the evaluated result,
+`*_erp_direct_depth_as_range.ply` skips adjustment, and
+`*_erp_cubemap_adjusted.ply` uses the bounded nearest-face cubemap correction.
+For ScanNet++, zero-valued anonymization-mask pixels are removed from every DA3
+ERP and cubemap point cloud after nearest-neighbor resizing to the prediction
+resolution. The raw depth remains in the diagnostic NPZ together with
+`valid_mask`, so masking can be audited independently.
+PaGeR applies the same ScanNet++ ERP validity mask in addition to its native sky
+and depth-discontinuity filtering, including removal of the padded bottom band.
+
 - `chamfer_forward`: prediction to nearest scene point (accuracy)
 - `chamfer_backward`: scene to nearest prediction (completeness)
 - `chamfer_mean`: arithmetic mean of the two directions
@@ -35,6 +55,50 @@ such as `..._layout_deadbeef` is matched to
 The F-score thresholds default to those in `evaluate_pcd.py` and can be changed
 with `--fscore-thresholds`.
 
+DA3, GenRecon, and Nova3R can instead consume the original ERP as one image. Pass
+`--input-projection erp --erp-root ROOT`. Nova3R receives no intrinsics. DA3 also
+receives no camera parameters: it predicts a 2D depth map, which is lifted through
+the ERP's spherical rays and then placed in the world using the panorama pose.
+The ERP path applies the predicted-intrinsics pinhole correction described
+above. The direct and nearest-face cubemap interpretations remain available as
+saved diagnostics.
+For GenRecon ERP input, scene-wide `cond_3D` features use a true spherical
+longitude/latitude lookup, including the rear hemisphere and horizontal seam.
+The direct per-chunk `cond_2D` tokens remain the unchanged square-resized ERP
+tokens. Cubemap mode remains the default and continues to use pinhole projection.
+
+Nova3R follows the official demo contract: inputs are resized to 518×392 and
+normalized to `[-1, 1]`; a one-view input is duplicated before complete DUSt3R
+pairs are built; flow matching uses the checkpoint Hydra configuration; and the
+predicted first-camera-frame points are lifted into evaluator world coordinates.
+Cubemap inference defaults to all six faces in `--face-order` and presents them
+jointly to the model in one call. ERP inference requires
+`--nova3r-num-views 1`; that single image is duplicated to preserve the official
+single-view demo behavior.
+
+PaGeR is the exception to the pinhole ERP ablation. Its official model is
+panoramic, so `--model pager` requires `--input-projection erp` and runs the
+official spherical ERP→cubemap→ERP depth path. The resulting spherical cloud is
+converted from PaGeR axes into the SAGE/OpenCV world frame before evaluation.
+
+Use `--dataset-layout scannetpp` for ScanNet++. This selects
+`data/scannetpp/test_list.json` and the repository's standard ScanNet++ cubemap,
+scanner-pose, and aligned-surface paths. It reads scanner camera-to-world poses
+from `<pose-root>/<scene>/scans/scanner_poses.json`, converts camera axes to
+OpenCV, and leaves reconstructed points in the raw aligned-scene coordinate
+frame used by `<scene-root>/<scene>/scans/mesh_aligned_0.05_surface.npz`.
+
+For example, run DA3 on ScanNet++ ERPs with:
+
+```bash
+python -m eval.baselines.run \
+  --model da3 \
+  --dataset-layout scannetpp \
+  --input-projection erp \
+  --erp-root /tmp/datasets/scannetpp/scannetpp_panorama \
+  --split-list data/scannetpp/test_25_scenes_list.json
+```
+
 Run a one-sample smoke test first:
 
 ```bash
@@ -53,6 +117,18 @@ python -m eval.baselines.run \
   --output-dir eval_results/baselines/da3/sage10k_test
 ```
 
+Run DA3 without camera inputs and spherically lift its predicted ERP depth:
+
+```bash
+python -m eval.baselines.run \
+  --model da3 \
+  --input-projection erp \
+  --erp-root /tmp/datasets/sage-10k/rendered \
+  --split-list data/sage-10k/test_list.json \
+  --scene-root /tmp/datasets/sage-10k/udf \
+  --pose-root /mnt/projects/theses/vyhong/sage-10k/poses
+```
+
 Run GenRecon from an environment containing its compiled CUDA dependencies:
 
 ```bash
@@ -66,22 +142,65 @@ python -m eval.baselines.run \
   --fail-fast
 ```
 
+The same `--input-projection erp --erp-root ROOT` options apply to GenRecon. In
+ERP mode the single image supplies spherical scene-wide `cond_3D` features and
+is also the unchanged direct `cond_2D` input for every chunk.
+
+Run Nova3R with the released two-view checkpoint and two cubemap faces:
+
+```bash
+python -m eval.baselines.run \
+  --model nova3r \
+  --nova3r-checkpoint checkpoints/scene_n2/checkpoint-last.pth \
+  --nova3r-config eval/baselines/configs/nova3r_scene_n2_official.yaml \
+  --nova3r-num-views 2 \
+  --split-list data/sage-10k/test_25_images_seed0.json \
+  --cubemap-root /tmp/datasets/sage-10k/cubemap_data/cubemaps \
+  --scene-root /tmp/datasets/sage-10k/udf \
+  --pose-root /mnt/projects/theses/vyhong/sage-10k/poses
+```
+
+Run PaGeR on the original panoramas with its indoor scale head:
+
+```bash
+python -m eval.baselines.run \
+  --model pager \
+  --input-projection erp \
+  --erp-root /tmp/datasets/sage-10k/rendered \
+  --pager-checkpoint pager \
+  --pager-scene-mode indoor \
+  --split-list data/sage-10k/test_25_images_seed0.json \
+  --scene-root /tmp/datasets/sage-10k/udf \
+  --pose-root /mnt/projects/theses/vyhong/sage-10k/poses
+```
+
 `--genrecon-data-root` is optional. If it contains
 `rooms_raw/<room-id>/layout_<room-id>.json`, that metadata is preferred;
 otherwise, the chunk footprint is inferred from `scene_surface.npz`. The source
 used for each sample is written to `genrecon_work/<sample>/chunk_source.json`.
+SAGE surfaces are converted from their evaluator Y-up frame back to GenRecon's
+Z-up room frame. ScanNet++ surfaces instead use their native aligned Z-up frame:
+X/Y define the floor plan, Z defines floor and ceiling, and no SAGE axis
+conversion is applied.
 `--genrecon-surface-points` defaults to `--eval-points`. The adapter retains the
 loaded GenRecon pipeline across samples. Per-sample camera/chunk diagnostics are
 written below `<output-dir>/genrecon_work`; reduce projection memory with
 `--genrecon-proj-batch-voxels` if necessary.
 
 Use `--save-predictions` to retain an aligned prediction and its sampled GT
-reference as `<sample>_pred_aligned.ply` and `<sample>_gt.ply`. `results.json` is
-checkpointed after every sample; `results.csv` and `summary.json` are written at
-the end. A failed sample is recorded and evaluation continues unless
-`--fail-fast` is supplied. Each result records the fitted `alignment_scale` and
-`alignment_shift`. The optimizer settings can be changed with
-`--alignment-iterations` and `--alignment-lr`.
+reference. Point-cloud baselines write `<sample>_pred_aligned.ply`; mesh-capable
+baselines write the native `<sample>_pred_aligned_mesh.ply` instead. Both write
+`<sample>_gt.ply`. `results.json` is checkpointed after every sample;
+`results.csv` and `summary.json` are written at the end. A failed sample is
+recorded and evaluation continues unless `--fail-fast` is supplied. Each result
+records the fitted `alignment_scale` and `alignment_shift`. The optimizer
+settings can be changed with `--alignment-iterations` and `--alignment-lr`.
+
+For GenRecon, the saved prediction retains the model's native triangle
+topology. Its vertices receive the same fitted scale and translation as the
+sampled evaluation points. Those points are still used internally for metrics
+but are not saved as a redundant prediction PLY. The baseline uses GenRecon's
+geometry-only path, so the mesh contains geometry but no generated PBR textures.
 
 To add another baseline, create `adapters/<name>.py` with a class exposing
 `predict(sample) -> np.ndarray[N, 3]`, then register its name and constructor in

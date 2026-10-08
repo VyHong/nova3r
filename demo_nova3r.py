@@ -22,6 +22,7 @@ from nova3r.models.nova3r_img_cond import Nova3rImgCond
 from nova3r.models.nova3r_pts_cond import Nova3rPtsCond  # noqa: F401 — needed by load_model's eval()
 from nova3r.heads.hunyuan_model.autoencoders.model import ShapeVAE  # noqa: F401 — needed by load_model's eval()
 from nova3r.heads.pts3d_decoder.latent_flowm_decoder import DiT  # noqa: F401 — needed by load_model's eval()
+from nova3r.models.hy3dshape.models.denoisers.hunyuandit import HunYuanDiTPlain  # noqa: F401 — needed by load_model's eval()
 from nova3r.inference import inference_nova3r
 
 

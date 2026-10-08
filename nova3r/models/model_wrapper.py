@@ -27,3 +27,18 @@ class BatchModelWrapper(nn.Module):
 
         output = self._model._decode(tokens=encoder_data['tokens'], images=images, query_points=x, timestep=t, **extras)
         return output['pts3d_xyz']
+
+
+def make_model_wrapper(
+    model: nn.Module,
+    path=None,
+    prediction_type: str = "velocity",
+    t_eps: float = 1e-3,
+):
+    """Build the official velocity wrapper while preserving local decoder kwargs."""
+    del path, t_eps
+    if prediction_type != "velocity":
+        raise ValueError(
+            f"Only prediction_type='velocity' is supported, got {prediction_type!r}"
+        )
+    return BatchModelWrapper(model)

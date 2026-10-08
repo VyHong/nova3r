@@ -101,6 +101,19 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         self.model = model
         self.optimizer_options = OptimizerOptions.from_config(cfg)
         self.first_stage = build_frozen_shape_decoder(cfg, model)
+        if (
+            self.first_stage is not None
+            and hasattr(model, "input_size")
+            and hasattr(model, "in_channels")
+        ):
+            denoiser_shape = (int(model.input_size), int(model.in_channels))
+            decoder_shape = tuple(self.first_stage.latent_shape)
+            if decoder_shape != denoiser_shape:
+                raise ValueError(
+                    "Denoiser/ShapeVAE latent shape mismatch: "
+                    f"denoiser expects {denoiser_shape}, decoder expects "
+                    f"{decoder_shape}"
+                )
         self.kl_weight = float(cfg.kl_weight)
 
         FlowTrainingOptions.from_config(cfg).apply_to(model)
@@ -113,6 +126,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         self.validation_options = ValidationOptions.from_config(cfg)
         self.mesh_options = MeshOptions.from_config(cfg)
         self.evaluation_options = EvaluationOptions.from_config(cfg)
+        self._validation_lpips_evaluator = None
         self._init_flow_metrics()
 
     def _init_flow_metrics(self):
@@ -169,11 +183,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
             # Applying the cube transform and then translating its transformed
             # camera center back to zero is equivalent to scaling around the
             # camera center.
-            center = (
-                camera_center
-                if self.validation_options.use_camera_translation
-                else cube_center
-            )
+            center = camera_center if self.validation_options.use_camera_translation else cube_center
         else:
             target_median = self._median_normalization_target(mode)
             if self.validation_options.use_camera_translation:
@@ -199,9 +209,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                 min=-1000.0,
                 max=1000.0,
             )
-            normalized_geo_points[..., 3:4] = (
-                normalized_geo_points[..., 3:4] * coord_scale
-            )
+            normalized_geo_points[..., 3:4] = normalized_geo_points[..., 3:4] * coord_scale
             normalized_batch["geo_points"] = normalized_geo_points
         normalized_batch["surface_geo_norm_center"] = center
         normalized_batch["surface_geo_norm_factor"] = norm_factor
@@ -352,6 +360,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
             # )
 
             meshes_to_render = []
+            colored_meshes_to_evaluate = []
             validation_evaluations = []
             for sample_idx in range(latents.shape[0]):
                 bounds = self._reconstruction_bounds(surface[sample_idx])
@@ -372,6 +381,13 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                     glb_path = os.path.join(mesh_dir, "val_mesh.ply")
                     mesh.export(glb_path)
                     meshes_to_render.append((glb_path, mesh_dir))
+                    if (
+                        self.validation_options.rgb_lpips
+                        and getattr(decoder, "rgb_decoder", None) is not None
+                    ):
+                        colored_meshes_to_evaluate.append(
+                            (mesh, Path(mesh_dir), sample_idx)
+                        )
 
                     sample_name = f"validation_sample_{sample_idx}"
                     try:
@@ -390,9 +406,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                             self.evaluation_options.points,
                             seed,
                         )
-                        target = val_batch_to_log["surface"][
-                            sample_idx, :, :3
-                        ].detach().float().cpu().numpy()
+                        target = val_batch_to_log["surface"][sample_idx, :, :3].detach().float().cpu().numpy()
                         target = sample_points(
                             target * world_scale,
                             self.evaluation_options.points,
@@ -413,12 +427,13 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                             )
                         validation_evaluations.append(evaluation)
                     except Exception as exc:
-                        self.print(
-                            f"Validation metric calculation failed for "
-                            f"{sample_name}: {exc}"
-                        )
+                        self.print(f"Validation metric calculation failed for " f"{sample_name}: {exc}")
 
         self._log_validation_reconstruction_metrics(validation_evaluations)
+        self._log_validation_lpips(
+            colored_meshes_to_evaluate,
+            val_batch_to_log,
+        )
 
         for glb_path, mesh_dir in meshes_to_render:
             try:
@@ -427,6 +442,63 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                 self.print(f"Validation preview rendering failed for {glb_path}: {exc}")
 
         self.val_batch_to_log = None
+
+    def _log_validation_lpips(self, meshes, batch):
+        """Render colored validation meshes in their input cameras and log LPIPS."""
+        if not meshes:
+            return
+        required = ("images", "intrinsics", "extrinsics")
+        missing = [name for name in required if name not in batch]
+        if missing:
+            self.print(
+                "Skipping validation LPIPS because the validation batch is missing "
+                + ", ".join(missing)
+            )
+            return
+
+        try:
+            if self._validation_lpips_evaluator is None:
+                from training.mesh2sdf.validation_rgb import ValidationLPIPSEvaluator
+
+                self._validation_lpips_evaluator = ValidationLPIPSEvaluator(
+                    self.validation_options.rgb_lpips_net,
+                    self.device,
+                    self.validation_options.rgb_ray_chunk_size,
+                )
+
+            sample_scores = []
+            for mesh, mesh_dir, sample_idx in meshes:
+                scores = self._validation_lpips_evaluator.evaluate(
+                    mesh,
+                    batch,
+                    sample_idx,
+                    mesh_dir / "rgb_views",
+                )
+                sample_score = float(np.mean(scores))
+                sample_scores.append(sample_score)
+                (mesh_dir / "lpips.json").write_text(
+                    json.dumps(
+                        {
+                            "mean": sample_score,
+                            "views": scores,
+                            "net": self.validation_options.rgb_lpips_net,
+                        },
+                        indent=2,
+                    )
+                    + "\n"
+                )
+
+            self.log(
+                "val_lpips",
+                float(np.mean(sample_scores)),
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                sync_dist=False,
+            )
+        except Exception as exc:
+            self.print(f"Validation LPIPS calculation failed: {exc}")
+            traceback.print_exc()
 
     def _log_validation_reconstruction_metrics(self, evaluations):
         """Log means over the meshes reconstructed for validation previews."""
@@ -437,10 +509,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
             "chamfer_forward",
             "chamfer_backward",
             "chamfer_mean",
-            *(
-                f"f_score_{threshold}_full"
-                for threshold in self.evaluation_options.fscore_thresholds
-            ),
+            *(f"f_score_{threshold}_full" for threshold in self.evaluation_options.fscore_thresholds),
         )
         for name in metric_names:
             values = [evaluation[name] for evaluation in evaluations if name in evaluation]
@@ -473,7 +542,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
             return decoder.decode(latents)
         return latents
 
-    def mesh_from_latents(self, latent_batch, sample_idx, bounds, decoder, method=None):
+    def mesh_from_latents(self, latent_batch, sample_idx, bounds, decoder, method=None, artifact_dir=None, world_scale=1.0):
         method = self.mesh_options.method if method is None else method
         mesh = None
         if method == "latent2mesh":
@@ -500,9 +569,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
             with torch.inference_mode(False), torch.enable_grad():
                 latent_target = latent_batch[sample_idx : sample_idx + 1].float().detach().clone()
                 udf_decoder = UDFGeoDecoderAdapter(decoder.geo_decoder, latent_target, bounds)
-                grid_bounds, grid_resolution = udf_decoder.mesh_udf_grid(
-                    self.mesh_options.udf_resolution
-                )
+                grid_bounds, grid_resolution = udf_decoder.mesh_udf_grid(self.mesh_options.udf_resolution)
                 _, _, mesh = get_mesh_udf_fast(
                     udf_decoder,
                     None,
@@ -517,6 +584,53 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                 )
                 if mesh is not None:
                     mesh = udf_decoder.mesh_to_world(mesh)
+        elif method == "mind":
+            try:
+                from mind import MIND
+            except ImportError as exc:
+                raise ImportError("MIND must be installed in the test environment (pip install -e third_party/MIND)") from exc
+            with torch.inference_mode(False), torch.enable_grad():
+                latent_target = latent_batch[sample_idx : sample_idx + 1].float().detach().clone()
+                udf_decoder = UDFGeoDecoderAdapter(decoder.geo_decoder, latent_target, bounds)
+
+                def query_udf(points):
+                    return udf_decoder(points)
+
+                half_extents = udf_decoder.grid_half_extents.detach().cpu().numpy()
+                extractor = MIND(
+                    query_udf,
+                    self.mesh_options.mind_resolution,
+                    r2=self.mesh_options.mind_r2,
+                    sample_pc_iter=self.mesh_options.mind_sample_iterations,
+                    max_iter=self.mesh_options.mind_mesh_iterations,
+                    bound_min=-half_extents,
+                    bound_max=half_extents,
+                )
+                try:
+                    point_cloud = extractor.generate_pointcloud_mesh_op(sample_num=self.mesh_options.mind_sample_points)
+                except AttributeError as exc:
+                    if "'NoneType' object has no attribute 'sample'" not in str(exc) or extractor.u is None:
+                        raise
+                    field_min = float(np.min(extractor.u))
+                    field_max = float(np.max(extractor.u))
+                    raise ValueError(
+                        f"MIND found no initial isosurface at mesh_mind_r2={self.mesh_options.mind_r2:g}; "
+                        f"sampled UDF range is [{field_min:.6g}, {field_max:.6g}]. "
+                        "Choose a cutoff strictly inside this range."
+                    ) from exc
+                mesh, face_label = extractor.extract_mesh(point_cloud)
+                if artifact_dir is not None:
+                    raw_mesh = udf_decoder.mesh_to_world(mesh.copy())
+                    raw_mesh.vertices = np.asarray(raw_mesh.vertices) * world_scale
+                    raw_mesh.export(Path(artifact_dir) / "mind_before_postprocess.ply")
+                self.print(f"MIND extracted {len(mesh.vertices)} vertices and {len(mesh.faces)} faces")
+                mesh, face_label = extractor.postprocess_mesh(mesh, face_label)
+                if artifact_dir is not None:
+                    post_mesh = udf_decoder.mesh_to_world(mesh.copy())
+                    post_mesh.vertices = np.asarray(post_mesh.vertices) * world_scale
+                    post_mesh.export(Path(artifact_dir) / "mind_after_postprocess.ply")
+                self.print(f"MIND postprocessing kept {len(mesh.vertices)} vertices and {len(mesh.faces)} faces")
+                mesh = udf_decoder.mesh_to_world(extractor.op_msdf_mesh(mesh, face_label))
         else:
             raise ValueError(f"Unknown mesh extraction method: {method}")
 
@@ -601,6 +715,43 @@ class Mesh2SDFLightningModule(pl.LightningModule):
     def on_test_epoch_start(self):
         self.test_results = []
 
+    def _evaluate_test_lpips(self, mesh, batch, sample_idx, sample_dir):
+        """Render one colored test mesh and return its mean/per-view LPIPS."""
+        if not self.validation_options.rgb_lpips:
+            return None
+
+        required = ("images", "intrinsics", "extrinsics")
+        missing = [name for name in required if name not in batch]
+        if missing:
+            raise ValueError(
+                "the test batch is missing " + ", ".join(missing)
+            )
+
+        if self._validation_lpips_evaluator is None:
+            from training.mesh2sdf.validation_rgb import ValidationLPIPSEvaluator
+
+            self._validation_lpips_evaluator = ValidationLPIPSEvaluator(
+                self.validation_options.rgb_lpips_net,
+                self.device,
+                self.validation_options.rgb_ray_chunk_size,
+            )
+
+        scores = self._validation_lpips_evaluator.evaluate(
+            mesh,
+            batch,
+            sample_idx,
+            sample_dir / "rgb_views",
+        )
+        result = {
+            "mean": float(np.mean(scores)),
+            "views": scores,
+            "net": self.validation_options.rgb_lpips_net,
+        }
+        (sample_dir / "lpips.json").write_text(
+            json.dumps(result, indent=2) + "\n"
+        )
+        return result
+
     def test_step(self, batch, batch_idx):
         batch = self.normalize_surface_and_geo_points(
             batch,
@@ -620,10 +771,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
             raise RuntimeError("The model did not return reconstruction latents during testing")
         decoder = self._latent_decoder()
         if decoder is None:
-            raise RuntimeError(
-                "Testing generated latents requires a VAE decoder. Configure "
-                "experiment.vae and experiment.vae_ckpt."
-            )
+            raise RuntimeError("Testing generated latents requires a VAE decoder. Configure " "experiment.vae and experiment.vae_ckpt.")
         latents = self._decode_latents_for_geometry(latents, decoder)
         output_dir = Path(self.current_log_dir) / "test"
         mesh_root = output_dir / "meshes"
@@ -634,28 +782,50 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         records = []
         for sample_idx in range(latents.shape[0]):
             sample_name = self._test_sample_name(batch, sample_idx)
+            if self.cfg.get("test_sample") and sample_name != self.cfg.test_sample:
+                continue
             sample_dir = mesh_root / sample_name
             sample_dir.mkdir(parents=True, exist_ok=True)
             record = {"sample": sample_name, "rank": self.global_rank}
 
             try:
                 bounds = self._reconstruction_bounds(batch["surface"][sample_idx])
+                world_scale = self._surface_world_scale(batch, sample_idx)
 
                 mesh = self.mesh_from_latents(
                     latents,
                     sample_idx,
                     bounds,
                     decoder,
-                    method="mesh_udf",
+                    method=self.mesh_options.method,
+                    artifact_dir=sample_dir,
+                    world_scale=world_scale,
                 )
                 if mesh is None or len(mesh.vertices) == 0 or len(mesh.faces) == 0:
-                    raise ValueError("MeshUDF did not produce a non-empty mesh")
+                    raise ValueError(f"{self.mesh_options.method} did not produce a non-empty mesh")
 
-                world_scale = self._surface_world_scale(batch, sample_idx)
                 world_mesh = mesh.copy()
                 world_mesh.vertices = np.asarray(world_mesh.vertices) * world_scale
                 mesh_path = sample_dir / "test_mesh.ply"
                 world_mesh.export(mesh_path)
+
+                if getattr(decoder, "rgb_decoder", None) is not None:
+                    try:
+                        lpips = self._evaluate_test_lpips(
+                            mesh,
+                            batch,
+                            sample_idx,
+                            sample_dir,
+                        )
+                        if lpips is not None:
+                            record["lpips"] = lpips["mean"]
+                            record["lpips_views"] = lpips["views"]
+                    except Exception as exc:
+                        record["lpips_error"] = str(exc)
+                        self.print(
+                            f"Test LPIPS calculation failed for {sample_name}: {exc}"
+                        )
+                        traceback.print_exc()
 
                 seed = self._test_sample_seed(sample_name)
                 pred = sample_mesh_surface(
@@ -688,7 +858,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                 )
             except Exception as exc:
                 record.update({"status": "error", "error": str(exc)})
-                self.print(f"MeshUDF test failed for {sample_name}: {exc}")
+                self.print(f"{self.mesh_options.method} test failed for {sample_name}: {exc}")
                 traceback.print_exc()
 
             records.append(record)
@@ -717,6 +887,15 @@ class Mesh2SDFLightningModule(pl.LightningModule):
             alignment_iterations=self.evaluation_options.alignment_iterations,
             alignment_lr=self.evaluation_options.alignment_lr,
         )
+        lpips_values = [
+            record["lpips"]
+            for record in results
+            if record.get("status") == "ok" and "lpips" in record
+        ]
+        if lpips_values:
+            summary["lpips"] = float(np.mean(lpips_values))
+            summary["lpips_net"] = self.validation_options.rgb_lpips_net
+            summary["lpips_samples"] = len(lpips_values)
         write_evaluation_results(results, summary, output_dir)
         self.print(json.dumps(summary, indent=2))
 
@@ -728,7 +907,9 @@ class Mesh2SDFLightningModule(pl.LightningModule):
 
     def configure_optimizers(self):
         options = self.optimizer_options
-        optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, self.parameters()), lr=options.learning_rate, weight_decay=self.cfg.weight_decay)
+        optimizer = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, self.parameters()), lr=options.learning_rate, weight_decay=self.cfg.weight_decay
+        )
 
         scheduler_epochs = max(1, int(self.trainer.max_epochs) - options.warmup_epochs)
         eta_min_factor = min(1.0, max(1e-12, options.eta_min / max(options.learning_rate, 1e-12)))

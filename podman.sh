@@ -53,7 +53,7 @@ podman run -v /mnt:/mnt:rw \
     --device=nvidia.com/gpu=all \
     --network=host -e USER=root \
     -e PORT=$(python -c "import random; print(random.randint(20000,30000))") \
-    --name=nova3r \
+    --name=nova3r2 \
     --shm-size=1024gb \
     -e CUDA_VISIBLE_DEVICES \
     -e PYTHONPATH="\$PYTHONPATH:/absolute/path/to/nova3r" \
@@ -64,10 +64,10 @@ podman run -v /mnt:/mnt:rw \
 
 sleep 1m
 
-podman logs nova3r
+podman logs nova3r2
 
 # Run commands inside container
-alias RUN='podman exec nova3r'
+alias RUN='podman exec nova3r2'
 RUN nvidia-smi
 RUN python3 -c 'import torch; print(f"Num GPUs: {torch.cuda.device_count()}")'
 

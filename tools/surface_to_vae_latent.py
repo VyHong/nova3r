@@ -11,6 +11,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import time
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -363,10 +364,9 @@ def make_surface(
 ):
     rng = np.random.default_rng(seed)
     with np.load(surface_path, allow_pickle=False) as data:
-        groups = (
-            (choose_rows(rng, data["random_surface"], random_count), 0.0),
-            (choose_rows(rng, data["sharp_surface"], sharp_count), 1.0),
-        )
+        groups = [(choose_rows(rng, data["random_surface"], random_count), 0.0)]
+        if sharp_count > 0:
+            groups.append((choose_rows(rng, data["sharp_surface"], sharp_count), 1.0))
 
     samples = []
     for rows, label in groups:
@@ -542,6 +542,18 @@ def prepare_job(
 def batched(items, batch_size):
     for start in range(0, len(items), batch_size):
         yield items[start : start + batch_size]
+
+
+def format_duration(seconds: float) -> str:
+    """Format a duration compactly for progress messages."""
+    seconds = max(0, round(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}h {minutes:02d}m {seconds:02d}s"
+    if minutes:
+        return f"{minutes:d}m {seconds:02d}s"
+    return f"{seconds:d}s"
 
 
 def prepared_batches(jobs, batch_size, prepare, num_workers):
@@ -797,6 +809,7 @@ def encode_jobs_on_device(args, pending, device, worker_rank=0, world_size=1):
         prepare,
         args.num_workers,
     )
+    started_at = time.monotonic()
     for batch_start, prepared_batch in enumerate(batches):
         inputs, latents, means, logvars = encode_prepared_batch(
             vae,
@@ -807,6 +820,7 @@ def encode_jobs_on_device(args, pending, device, worker_rank=0, world_size=1):
             args.only_save_latent_before_sampling,
         )
         for index, item in enumerate(prepared_batch):
+            completed = batch_start * args.batch_size + index + 1
             save_outputs(
                 item,
                 index,
@@ -816,9 +830,21 @@ def encode_jobs_on_device(args, pending, device, worker_rank=0, world_size=1):
                 logvars,
                 args=args,
                 normalization=normalization,
-                completed=batch_start * args.batch_size + index + 1,
+                completed=completed,
                 total=len(pending),
             )
+        completed = min((batch_start + 1) * args.batch_size, len(pending))
+        elapsed = time.monotonic() - started_at
+        samples_per_second = completed / elapsed if elapsed else 0.0
+        remaining = len(pending) - completed
+        eta = remaining / samples_per_second if samples_per_second else 0.0
+        print(
+            f"{prefix}Progress {completed}/{len(pending)} "
+            f"({100 * completed / len(pending):.1f}%), "
+            f"elapsed {format_duration(elapsed)}, ETA {format_duration(eta)}, "
+            f"{samples_per_second:.2f} samples/s",
+            flush=True,
+        )
 
 
 def multi_device_worker(rank, args, pending, device_names):

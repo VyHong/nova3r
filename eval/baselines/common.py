@@ -6,6 +6,7 @@ import csv
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from PIL import Image
@@ -17,6 +18,12 @@ DEFAULT_EVAL_POINTS = 100_000
 DEFAULT_FSCORE_THRESHOLDS = (0.1, 0.05, 0.02)
 DEFAULT_ALIGNMENT_ITERATIONS = 300
 DEFAULT_ALIGNMENT_LR = 0.1
+InputProjection = Literal["cubemap", "erp"]
+DatasetLayout = Literal["sage10k", "scannetpp"]
+SCANNETPP_SCANNER_TO_OPENCV = np.asarray(
+    [[0, 1, 0, 0], [0, 0, -1, 0], [-1, 0, 0, 0], [0, 0, 0, 1]],
+    dtype=np.float32,
+)
 
 
 @dataclass(frozen=True)
@@ -27,6 +34,7 @@ class SageSample:
     cubemap_dir: Path
     pose_path: Path
     surface_path: Path
+    dataset_layout: DatasetLayout = "sage10k"
 
 
 def read_manifest(path: Path) -> list[tuple[str, int]]:
@@ -49,7 +57,20 @@ def resolve_sample(
     cubemap_root: Path,
     pose_root: Path,
     scene_root: Path,
+    dataset_layout: DatasetLayout = "sage10k",
 ) -> SageSample:
+    if dataset_layout == "scannetpp":
+        return SageSample(
+            key=f"{scene} {frame:05d}",
+            scene=scene,
+            frame=frame,
+            cubemap_dir=cubemap_root / scene / "panocam" / "images" / f"{frame}_cube_95",
+            pose_path=pose_root / scene / "scans" / "scanner_poses.json",
+            surface_path=scene_root / scene / "scans" / "mesh_aligned_0.05_surface.npz",
+            dataset_layout=dataset_layout,
+        )
+    if dataset_layout != "sage10k":
+        raise ValueError(f"Unsupported dataset layout: {dataset_layout!r}")
     prefix = f"{scene}_panorama_{frame:03d}"
     candidates = (
         cubemap_root / scene / f"{prefix}_cube_95",
@@ -81,11 +102,7 @@ def load_cameras(sample: SageSample, face_order: list[int]):
     if missing:
         raise FileNotFoundError("Missing SAGE sample inputs:\n  " + "\n  ".join(missing))
     metadata = json.loads(metadata_path.read_text())
-    poses = json.loads(sample.pose_path.read_text())
-    panorama_name = f"{sample.scene}_panorama_{sample.frame:03d}.png"
-    if panorama_name not in poses:
-        raise KeyError(f"Pose {panorama_name!r} is absent from {sample.pose_path}")
-    panorama_w2c = PANORAMA_TO_OPENCV @ np.asarray(poses[panorama_name], np.float32)
+    panorama_w2c = _panorama_pose(sample)
 
     paths, intrinsics, extrinsics = [], [], []
     for face_id in face_order:
@@ -108,6 +125,256 @@ def load_cameras(sample: SageSample, face_order: list[int]):
         intrinsics.append(intrinsic)
         extrinsics.append(np.asarray(face["extrinsics"], np.float32) @ panorama_w2c)
     return paths, np.stack(intrinsics), np.stack(extrinsics)
+
+
+def resolve_erp_path(sample: SageSample, erp_root: Path) -> Path:
+    """Find the source equirectangular RGB panorama for a SAGE sample."""
+    prefix = f"{sample.scene}_panorama_{sample.frame:03d}"
+    candidates = (
+        erp_root / sample.scene / f"{prefix}.png",
+        erp_root / sample.scene / f"{prefix}.jpg",
+        erp_root / sample.scene / "panocam" / "images" / f"{sample.frame}.jpg",
+        erp_root / sample.scene / "panocam" / "images" / f"{sample.frame}.png",
+    )
+    path = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if path is None:
+        raise FileNotFoundError(
+            "Missing ERP image; checked:\n  " + "\n  ".join(str(candidate) for candidate in candidates)
+        )
+    return path
+
+
+def resolve_scannetpp_mask_path(image_path: Path) -> Path:
+    """Resolve an ERP or cubemap anonymization mask from a ScanNet++ RGB path."""
+    image_path = Path(image_path)
+    parts = list(image_path.parts)
+    image_dir_index = next(
+        (
+            index
+            for index in range(len(parts) - 1, -1, -1)
+            if parts[index] in ("images", "resized_images")
+        ),
+        None,
+    )
+    if image_dir_index is None:
+        raise ValueError(f"Cannot derive ScanNet++ mask path from {image_path}")
+    parts[image_dir_index] = (
+        "resized_anon_mask"
+        if parts[image_dir_index] == "resized_images"
+        else "anon_mask"
+    )
+    return Path(*parts).with_suffix(".png")
+
+
+def load_scannetpp_valid_mask(
+    sample: SageSample,
+    image_path: Path,
+    width: int,
+    height: int,
+) -> np.ndarray:
+    """Load a ScanNet++ mask at prediction resolution; other layouts are all valid."""
+    if sample.dataset_layout != "scannetpp":
+        return np.ones((height, width), dtype=bool)
+    mask_path = resolve_scannetpp_mask_path(image_path)
+    if not mask_path.is_file():
+        raise FileNotFoundError(f"Missing ScanNet++ anonymization mask: {mask_path}")
+    with Image.open(mask_path) as opened:
+        mask = opened.convert("L").resize((width, height), Image.Resampling.NEAREST)
+        return np.asarray(mask, dtype=np.uint8) > 0
+
+
+def _panorama_pose(sample: SageSample) -> np.ndarray:
+    if not sample.pose_path.is_file():
+        raise FileNotFoundError(f"Missing panorama poses: {sample.pose_path}")
+    poses = json.loads(sample.pose_path.read_text())
+    if sample.dataset_layout == "scannetpp":
+        if not isinstance(poses, list):
+            raise ValueError(f"Expected a pose list in {sample.pose_path}")
+        if sample.frame >= len(poses):
+            raise IndexError(
+                f"Pose index {sample.frame} is out of range for {sample.pose_path} "
+                f"with {len(poses)} poses"
+            )
+        scanner_c2w = np.asarray(poses[sample.frame], dtype=np.float32)
+        if scanner_c2w.shape != (4, 4):
+            raise ValueError(
+                f"Expected a 4x4 scanner pose at index {sample.frame}, got {scanner_c2w.shape}"
+            )
+        return SCANNETPP_SCANNER_TO_OPENCV @ np.linalg.inv(scanner_c2w)
+
+    panorama_name = f"{sample.scene}_panorama_{sample.frame:03d}.png"
+    if panorama_name not in poses:
+        raise KeyError(f"Pose {panorama_name!r} is absent from {sample.pose_path}")
+    pose = np.asarray(poses[panorama_name], dtype=np.float32)
+    if pose.shape != (4, 4):
+        raise ValueError(f"Expected a 4x4 panorama pose for {panorama_name}, got {pose.shape}")
+    return PANORAMA_TO_OPENCV @ pose
+
+
+def load_erp_input(sample: SageSample, erp_root: Path):
+    """Load an ERP image and its pose without inventing pinhole intrinsics."""
+    erp_path = resolve_erp_path(sample, erp_root)
+    return erp_path, _panorama_pose(sample)
+
+
+def load_erp_cameras(
+    sample: SageSample,
+    erp_root: Path,
+    horizontal_fov: float,
+):
+    """Load one ERP and intentionally model it as a single pinhole camera."""
+    if not 0 < horizontal_fov < 180:
+        raise ValueError("ERP pinhole horizontal FOV must be between 0 and 180 degrees")
+    erp_path = resolve_erp_path(sample, erp_root)
+    with Image.open(erp_path) as opened:
+        width, height = opened.size
+    focal = 0.5 * width / np.tan(np.deg2rad(horizontal_fov) / 2)
+    intrinsic = np.asarray(
+        [[focal, 0, width / 2], [0, focal, height / 2], [0, 0, 1]],
+        dtype=np.float32,
+    )
+    return [erp_path], intrinsic[None], _panorama_pose(sample)[None], erp_path
+
+
+def pinhole_z_to_range(depth: np.ndarray, intrinsics: np.ndarray) -> np.ndarray:
+    """Convert one pinhole camera-plane Z-depth map to Euclidean ray distance."""
+    depth = np.asarray(depth, dtype=np.float32)
+    if depth.ndim == 3:
+        if depth.shape[0] != 1:
+            raise ValueError(f"Expected one ERP depth map, got {depth.shape}")
+        depth = depth[0]
+    if depth.ndim != 2:
+        raise ValueError(f"Expected ERP depth shaped [H, W] or [1, H, W], got {depth.shape}")
+
+    height, width = depth.shape
+    intrinsic = np.asarray(intrinsics, dtype=np.float32)
+    while intrinsic.ndim > 2 and intrinsic.shape[0] == 1:
+        intrinsic = intrinsic[0]
+    if intrinsic.shape != (3, 3):
+        raise ValueError(f"Expected one 3x3 intrinsic matrix, got {intrinsic.shape}")
+
+    # DA3 predicts distance along the pinhole optical axis. Convert it to the
+    # Euclidean distance along each predicted pinhole ray before assigning that
+    # distance to the corresponding spherical ERP ray.
+    pixel_x, pixel_y = np.meshgrid(
+        np.arange(width, dtype=np.float32),
+        np.arange(height, dtype=np.float32),
+    )
+    homogeneous_pixels = np.stack(
+        (pixel_x, pixel_y, np.ones_like(pixel_x)), axis=-1
+    )
+    pinhole_rays = homogeneous_pixels @ np.linalg.inv(intrinsic).T
+    return depth * np.linalg.norm(pinhole_rays, axis=-1)
+
+
+def cubemap_z_to_range(depth: np.ndarray) -> np.ndarray:
+    """Convert nearest-face cubemap Z-depth on an ERP grid to radial distance."""
+    depth = np.asarray(depth, dtype=np.float32)
+    if depth.ndim == 3:
+        if depth.shape[0] != 1:
+            raise ValueError(f"Expected one ERP depth map, got {depth.shape}")
+        depth = depth[0]
+    if depth.ndim != 2:
+        raise ValueError(f"Expected ERP depth shaped [H, W] or [1, H, W], got {depth.shape}")
+
+    height, width = depth.shape
+    longitude = (
+        (np.arange(width, dtype=np.float32) + 0.5) / width - 0.5
+    ) * (2 * np.pi)
+    latitude = (
+        (np.arange(height, dtype=np.float32) + 0.5) / height - 0.5
+    ) * np.pi
+    longitude, latitude = np.meshgrid(longitude, latitude)
+    cos_latitude = np.cos(latitude)
+    rays = np.stack(
+        (
+            np.sin(longitude) * cos_latitude,
+            np.sin(latitude),
+            np.cos(longitude) * cos_latitude,
+        ),
+        axis=-1,
+    )
+    face_forward_component = np.max(np.abs(rays), axis=-1)
+    return depth / face_forward_component
+
+
+def unproject_erp_depth(
+    depth: np.ndarray,
+    intrinsics: np.ndarray,
+    world_to_camera: np.ndarray,
+) -> np.ndarray:
+    """Convert pinhole z-depth to range, then lift it through spherical ERP rays."""
+    return unproject_erp_range(
+        pinhole_z_to_range(depth, intrinsics), world_to_camera
+    )
+
+
+def unproject_erp_range(
+    radial_depth: np.ndarray,
+    world_to_camera: np.ndarray,
+) -> np.ndarray:
+    """Lift an ERP radial-distance map through spherical rays into world space."""
+    radial_depth = np.asarray(radial_depth, dtype=np.float32)
+    if radial_depth.ndim == 3:
+        if radial_depth.shape[0] != 1:
+            raise ValueError(f"Expected one ERP range map, got {radial_depth.shape}")
+        radial_depth = radial_depth[0]
+    if radial_depth.ndim != 2:
+        raise ValueError(
+            f"Expected ERP range shaped [H, W] or [1, H, W], got {radial_depth.shape}"
+        )
+
+    height, width = radial_depth.shape
+    u = (np.arange(width, dtype=np.float32) + 0.5) / width
+    v = (np.arange(height, dtype=np.float32) + 0.5) / height
+    longitude = (u - 0.5) * (2 * np.pi)
+    latitude = (v - 0.5) * np.pi
+    longitude, latitude = np.meshgrid(longitude, latitude)
+    cos_latitude = np.cos(latitude)
+    rays = np.stack(
+        (
+            np.sin(longitude) * cos_latitude,
+            np.sin(latitude),
+            np.cos(longitude) * cos_latitude,
+        ),
+        axis=-1,
+    )
+    points_camera = rays * radial_depth[..., None]
+
+    w2c = np.asarray(world_to_camera, dtype=np.float32)
+    if w2c.shape == (3, 4):
+        w2c = np.vstack((w2c, np.asarray([0, 0, 0, 1], dtype=np.float32)))
+    if w2c.shape != (4, 4):
+        raise ValueError(f"Expected a 3x4 or 4x4 camera extrinsic, got {w2c.shape}")
+    c2w = np.linalg.inv(w2c)
+    flat = points_camera.reshape(-1, 3)
+    range_flat = radial_depth.reshape(-1)
+    valid = np.isfinite(flat).all(axis=1) & np.isfinite(range_flat) & (range_flat > 0)
+    flat = flat[valid]
+    return flat @ c2w[:3, :3].T + c2w[:3, 3]
+
+
+def load_input_cameras(
+    sample: SageSample,
+    projection: InputProjection,
+    face_order: list[int],
+    *,
+    erp_root: Path | None = None,
+    erp_fov: float = 95.0,
+):
+    """Load cube faces or one ERP intentionally interpreted as a pinhole image."""
+    if projection == "cubemap":
+        images, intrinsics, extrinsics = load_cameras(sample, face_order)
+        return images, intrinsics, extrinsics, None
+    if projection == "erp":
+        if erp_root is None:
+            raise ValueError("erp_root is required when input projection is 'erp'")
+        return load_erp_cameras(
+            sample,
+            erp_root,
+            horizontal_fov=erp_fov,
+        )
+    raise ValueError(f"Unsupported input projection: {projection!r}")
 
 
 def load_scene_points(path: Path) -> np.ndarray:

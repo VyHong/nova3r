@@ -19,7 +19,7 @@ from PIL import Image
 import torch
 from torch import nn
 
-from tools.cubemap_to_dinov3_features import extract_features, load_model as load_dinov3
+from tools.panorama_to_dinov3_features import extract_features, load_model as load_dinov3
 from tools.unconditional_dit_noise_sweep import mesh_level, save_latent, save_mesh
 
 

@@ -18,7 +18,7 @@ from dust3r.utils.geometry import geotrf, inv
 from nova3r.flow_matching.path.scheduler import CosineScheduler
 from nova3r.flow_matching.path import AffineProbPath
 from nova3r.flow_matching.solver import ODESolver
-from nova3r.models.model_wrapper import BatchModelWrapper
+from nova3r.models.model_wrapper import BatchModelWrapper, make_model_wrapper
 from nova3r.utils.sampling import sampling_train_gen_target
 from einops import rearrange
 import numpy as np
@@ -281,7 +281,12 @@ def loss_of_one_batch_lari(args, batch, model, criterion, device, use_amp=False,
         if model_wrapper is not None:
             wrapped_vf = model_wrapper
         else:
-            wrapped_vf = BatchModelWrapper(model=model)
+            wrapped_vf = make_model_wrapper(
+                model,
+                path,
+                prediction_type=getattr(args, "prediction_type", "velocity"),
+                t_eps=float(getattr(args, "fm_t_eps", 1e-3)),
+            )
         wrapped_vf.eval()
 
         model.eval()
@@ -385,7 +390,12 @@ def loss_of_one_batch_demo(
         if model_wrapper is not None:
             wrapped_vf = model_wrapper
         else:
-            wrapped_vf = BatchModelWrapper(model=model)
+            wrapped_vf = make_model_wrapper(
+                model,
+                path,
+                prediction_type=getattr(args, "prediction_type", "velocity"),
+                t_eps=float(getattr(args, "fm_t_eps", 1e-3)),
+            )
         wrapped_vf.eval()
 
         model.eval()
@@ -461,8 +471,42 @@ def inference_nova3r(
     return result
 
 
+@torch.no_grad()
+def inference_nova3r_views(
+    args,
+    views,
+    model,
+    device,
+    *,
+    num_queries=20000,
+    method="euler",
+    pointmaps=None,
+):
+    """Run one joint Nova3R inference call over an ordered list of image views."""
+    if not views:
+        raise ValueError("Nova3R requires at least one view")
+    tensors = []
+    for view in views:
+        tensor = view["img"] if isinstance(view, dict) else view
+        # Official demo inputs arrive normalized to [-1, 1], while the model's
+        # image encoder receives [0, 1] tensors after view-label processing.
+        tensor = tensor * 0.5 + 0.5
+        tensors.append(tensor.to(device, non_blocking=True))
+    result = loss_of_one_batch_demo(
+        args,
+        tensors,
+        model,
+        None,
+        device,
+        num_queries=num_queries,
+        n_views=len(tensors),
+        method=method,
+        pointmaps=pointmaps,
+    )
+    return to_cpu(result)
+
+
 def check_if_same_size(pairs):
-    return True
     shapes1 = [img1["img"].shape[-2:] for img1, img2 in pairs]
     shapes2 = [img2["img"].shape[-2:] for img1, img2 in pairs]
     return all(shapes1[0] == s for s in shapes1) and all(shapes2[0] == s for s in shapes2)

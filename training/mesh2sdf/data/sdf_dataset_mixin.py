@@ -32,9 +32,12 @@ class SDFDatasetMixin(Dataset):
         self.return_color = bool(getattr(common_conf, "return_color", False))
         self.sharpedge_label = common_conf.sharpedge_label
         self.sdf_size = common_conf.sdf_size
+        self.sdf_surface_size = int(getattr(common_conf, "sdf_surface_size", 0))
         self.sdf_near_size = common_conf.sdf_near_size
         self.sdf_sharpedge_size = common_conf.sdf_sharpedge_size
         self.sdf_label = common_conf.sdf_label
+        if self.sdf_surface_size < 0:
+            raise ValueError("sdf_surface_size must be non-negative")
 
     def configure_conditioning_latents(self, enabled, root):
         self.load_conditioning_latent = bool(enabled)
@@ -328,7 +331,11 @@ class SDFDatasetMixin(Dataset):
     def surface_rgb_kwargs(self, data):
         if not self.return_color:
             return {}
-        color_keys = ("random_surface_rgb", "sharp_surface_rgb")
+        color_keys = (
+            ("random_surface_rgb", "sharp_surface_rgb")
+            if self.pc_sharpedge_size > 0
+            else ("random_surface_rgb",)
+        )
         present = [key in data.files for key in color_keys]
         if any(present) and not all(present):
             missing = [key for key, exists in zip(color_keys, present) if not exists]
@@ -337,10 +344,10 @@ class SDFDatasetMixin(Dataset):
             )
         if not all(present):
             return {}
-        return {
-            "random_surface_rgb": data["random_surface_rgb"],
-            "sharpedge_surface_rgb": data["sharp_surface_rgb"],
-        }
+        result = {"random_surface_rgb": data["random_surface_rgb"]}
+        if self.pc_sharpedge_size > 0:
+            result["sharpedge_surface_rgb"] = data["sharp_surface_rgb"]
+        return result
 
     def load_sdf_points(
         self,
@@ -410,6 +417,47 @@ class SDFDatasetMixin(Dataset):
             raise ValueError("At least one SDF sample count must be positive.")
 
         return torch.from_numpy(np.concatenate(sample_groups, axis=0)).float()
+
+    def add_exact_surface_points(self, rng, surface, geo_points):
+        """Append configurable, exactly-on-surface UDF/RGB supervision."""
+        if self.sdf_surface_size == 0:
+            return geo_points
+        if surface is None or geo_points is None:
+            raise ValueError(
+                "sdf_surface_size > 0 requires both surface and geo_points modalities"
+            )
+        if not self.return_color:
+            raise ValueError("sdf_surface_size > 0 requires return_color=true")
+        if self.sdf_surface_size > len(surface):
+            raise ValueError(
+                f"sdf_surface_size={self.sdf_surface_size} exceeds the "
+                f"{len(surface)} loaded surface points"
+            )
+
+        indices = torch.from_numpy(
+            rng.choice(len(surface), self.sdf_surface_size, replace=False)
+        ).long()
+        selected = surface[indices]
+        exact = torch.cat(
+            (
+                selected[:, :3],
+                selected.new_zeros((len(selected), 1)),
+                selected[:, -3:],
+                selected.new_ones((len(selected), 1)),
+            ),
+            dim=1,
+        )
+        if self.sdf_label:
+            exact = torch.cat(
+                (exact, exact.new_full((len(exact), 1), 3.0)),
+                dim=1,
+            )
+        if exact.shape[1] != geo_points.shape[1]:
+            raise ValueError(
+                "Exact-surface and UDF point layouts do not match: "
+                f"{exact.shape[1]} vs {geo_points.shape[1]} columns"
+            )
+        return torch.cat((geo_points, exact), dim=0)
 
     @staticmethod
     def sdf_rgb_kwargs(data):

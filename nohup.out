@@ -1,0 +1,220 @@
+Seed set to 40
+PointCrossAttentionEncoder INFO: pc_sharpedge_size is not given, using pc_size as pc_sharpedge_size
+Loaded Hunyuan weights with 0 missing keys and 0 unexpected keys.
+CUDA setup: requested=1, visible=1, CUDA_VISIBLE_DEVICES=0, NCCL_P2P_DISABLE=0
+Using bfloat16 Automatic Mixed Precision (AMP)
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+💡 Tip: For seamless cloud logging and experiment tracking, try installing [litlogger](https://pypi.org/project/litlogger/) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Experiments platform.
+`Trainer(val_check_interval=1.0)` was configured so validation will run at the end of the training epoch..
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/callbacks/model_checkpoint.py:881: Checkpoint directory /mnt/home/vyhong/projects/nova3r/exp_output/hunyuan_colored_vae/checkpoints exists and is not empty.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/utilities/model_summary/model_summary.py:242: Precision bf16-mixed is not supported by the model summary.  Estimated model size in MB will not be accurate. Using 32 bits instead.
+┏━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃   ┃ Name                           ┃ Type           ┃ Params ┃ Mode  ┃ FLOPs ┃
+┡━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ 0 │ model                          │ ShapeVAE       │  340 M │ train │     0 │
+│ 1 │ train_criterion                │ SDFReconstruc… │      0 │ train │     0 │
+│ 2 │ val_criterion                  │ SDFReconstruc… │      0 │ train │     0 │
+│ 3 │ flow_bucket_velocity_mse       │ ModuleDict     │      0 │ train │     0 │
+│ 4 │ flow_bucket_reconstruction_mse │ ModuleDict     │      0 │ train │     0 │
+│ 5 │ flow_bucket_sample_count       │ ModuleDict     │      0 │ train │     0 │
+└───┴────────────────────────────────┴────────────────┴────────┴───────┴───────┘
+Trainable params: 340 M                                                         
+Non-trainable params: 0                                                         
+Total params: 340 M                                                             
+Total estimated model params size (MB): 1.4 K                                   
+Modules in train mode: 449                                                      
+Modules in eval mode: 0                                                         
+Total FLOPs: 0                                                                  
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/utilities/_pytree.py:21: `isinstance(treespec, LeafSpec)` is deprecated, use `isinstance(treespec, TreeSpec) and treespec.is_leaf()` instead.
+Seed set to 40
+PointCrossAttentionEncoder INFO: pc_sharpedge_size is not given, using pc_size as pc_sharpedge_size
+Loaded Hunyuan weights with 0 missing keys and 0 unexpected keys.
+CUDA setup: requested=1, visible=1, CUDA_VISIBLE_DEVICES=0, NCCL_P2P_DISABLE=0
+Using bfloat16 Automatic Mixed Precision (AMP)
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+💡 Tip: For seamless cloud logging and experiment tracking, try installing [litlogger](https://pypi.org/project/litlogger/) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Experiments platform.
+`Trainer(val_check_interval=1.0)` was configured so validation will run at the end of the training epoch..
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/callbacks/model_checkpoint.py:881: Checkpoint directory /mnt/home/vyhong/projects/nova3r/exp_output/hunyuan_colored_vae/checkpoints exists and is not empty.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/utilities/model_summary/model_summary.py:242: Precision bf16-mixed is not supported by the model summary.  Estimated model size in MB will not be accurate. Using 32 bits instead.
+┏━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃   ┃ Name                           ┃ Type           ┃ Params ┃ Mode  ┃ FLOPs ┃
+┡━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ 0 │ model                          │ ShapeVAE       │  340 M │ train │     0 │
+│ 1 │ train_criterion                │ SDFReconstruc… │      0 │ train │     0 │
+│ 2 │ val_criterion                  │ SDFReconstruc… │      0 │ train │     0 │
+│ 3 │ flow_bucket_velocity_mse       │ ModuleDict     │      0 │ train │     0 │
+│ 4 │ flow_bucket_reconstruction_mse │ ModuleDict     │      0 │ train │     0 │
+│ 5 │ flow_bucket_sample_count       │ ModuleDict     │      0 │ train │     0 │
+└───┴────────────────────────────────┴────────────────┴────────┴───────┴───────┘
+Trainable params: 340 M                                                         
+Non-trainable params: 0                                                         
+Total params: 340 M                                                             
+Total estimated model params size (MB): 1.4 K                                   
+Modules in train mode: 449                                                      
+Modules in eval mode: 0                                                         
+Total FLOPs: 0                                                                  
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/utilities/_pytree.py:21: `isinstance(treespec, LeafSpec)` is deprecated, use `isinstance(treespec, TreeSpec) and treespec.is_leaf()` instead.
+Volume Decoding:   0%|          | 0/6751 [00:00<?, ?it/s]Volume Decoding:   1%|          | 43/6751 [00:00<00:15, 424.68it/s]Volume Decoding:   1%|▏         | 86/6751 [00:00<00:18, 362.73it/s]Volume Decoding:   2%|▏         | 123/6751 [00:00<00:19, 347.71it/s]Volume Decoding:   2%|▏         | 159/6751 [00:00<00:19, 340.47it/s]Volume Decoding:   3%|▎         | 194/6751 [00:00<00:19, 336.18it/s]Volume Decoding:   3%|▎         | 228/6751 [00:00<00:19, 333.75it/s]Volume Decoding:   4%|▍         | 262/6751 [00:00<00:19, 332.24it/s]Volume Decoding:   4%|▍         | 296/6751 [00:00<00:19, 330.91it/s]Volume Decoding:   5%|▍         | 330/6751 [00:00<00:19, 330.27it/s]Volume Decoding:   5%|▌         | 364/6751 [00:01<00:19, 329.92it/s]Volume Decoding:   6%|▌         | 397/6751 [00:01<00:19, 329.38it/s]Volume Decoding:   6%|▋         | 430/6751 [00:01<00:19, 329.21it/s]Volume Decoding:   7%|▋         | 463/6751 [00:01<00:19, 329.21it/s]Volume Decoding:   7%|▋         | 496/6751 [00:01<00:19, 328.85it/s]Volume Decoding:   8%|▊         | 529/6751 [00:01<00:18, 328.81it/s]Volume Decoding:   8%|▊         | 562/6751 [00:01<00:18, 329.11it/s]Volume Decoding:   9%|▉         | 595/6751 [00:01<00:18, 328.75it/s]Volume Decoding:   9%|▉         | 628/6751 [00:01<00:18, 328.72it/s]Volume Decoding:  10%|▉         | 661/6751 [00:01<00:18, 328.47it/s]Volume Decoding:  10%|█         | 694/6751 [00:02<00:18, 328.49it/s]Volume Decoding:  11%|█         | 727/6751 [00:02<00:18, 328.54it/s]Volume Decoding:  11%|█▏        | 760/6751 [00:02<00:18, 328.40it/s]Volume Decoding:  12%|█▏        | 793/6751 [00:02<00:18, 328.52it/s]Volume Decoding:  12%|█▏        | 826/6751 [00:02<00:18, 328.60it/s]Volume Decoding:  13%|█▎        | 859/6751 [00:02<00:17, 328.47it/s]Volume Decoding:  13%|█▎        | 892/6751 [00:02<00:17, 328.60it/s]Volume Decoding:  14%|█▎        | 925/6751 [00:02<00:17, 328.68it/s]Volume Decoding:  14%|█▍        | 958/6751 [00:02<00:17, 328.51it/s]Volume Decoding:  15%|█▍        | 991/6751 [00:02<00:17, 328.60it/s]Volume Decoding:  15%|█▌        | 1024/6751 [00:03<00:17, 328.64it/s]Volume Decoding:  16%|█▌        | 1057/6751 [00:03<00:17, 328.43it/s]Volume Decoding:  16%|█▌        | 1090/6751 [00:03<00:17, 328.55it/s]Volume Decoding:  17%|█▋        | 1123/6751 [00:03<00:17, 328.54it/s]Volume Decoding:  17%|█▋        | 1156/6751 [00:03<00:17, 328.36it/s]Volume Decoding:  18%|█▊        | 1189/6751 [00:03<00:16, 328.33it/s]Volume Decoding:  18%|█▊        | 1222/6751 [00:03<00:16, 328.10it/s]Volume Decoding:  19%|█▊        | 1255/6751 [00:03<00:16, 328.35it/s]Volume Decoding:  19%|█▉        | 1288/6751 [00:03<00:16, 328.46it/s]Volume Decoding:  20%|█▉        | 1321/6751 [00:03<00:16, 328.41it/s]Volume Decoding:  20%|██        | 1354/6751 [00:04<00:16, 328.56it/s]Volume Decoding:  21%|██        | 1387/6751 [00:04<00:16, 328.47it/s]Volume Decoding:  21%|██        | 1420/6751 [00:04<00:16, 328.44it/s]Volume Decoding:  22%|██▏       | 1453/6751 [00:04<00:16, 328.39it/s]Volume Decoding:  22%|██▏       | 1486/6751 [00:04<00:16, 328.54it/s]Volume Decoding:  23%|██▎       | 1519/6751 [00:04<00:15, 328.56it/s]Volume Decoding:  23%|██▎       | 1552/6751 [00:04<00:15, 328.69it/s]Volume Decoding:  23%|██▎       | 1585/6751 [00:04<00:15, 328.56it/s]Volume Decoding:  24%|██▍       | 1618/6751 [00:04<00:15, 328.51it/s]Volume Decoding:  24%|██▍       | 1651/6751 [00:04<00:15, 328.46it/s]Volume Decoding:  25%|██▍       | 1684/6751 [00:05<00:15, 328.66it/s]Volume Decoding:  25%|██▌       | 1717/6751 [00:05<00:15, 328.75it/s]Volume Decoding:  26%|██▌       | 1750/6751 [00:05<00:15, 328.67it/s]Volume Decoding:  26%|██▋       | 1783/6751 [00:05<00:15, 328.73it/s]Volume Decoding:  27%|██▋       | 1816/6751 [00:05<00:15, 328.64it/s]Volume Decoding:  27%|██▋       | 1849/6751 [00:05<00:14, 328.77it/s]Volume Decoding:  28%|██▊       | 1882/6751 [00:05<00:14, 328.65it/s]Volume Decoding:  28%|██▊       | 1915/6751 [00:05<00:14, 328.72it/s]Volume Decoding:  29%|██▉       | 1948/6751 [00:05<00:14, 328.65it/s]Volume Decoding:  29%|██▉       | 1981/6751 [00:05<00:14, 328.74it/s]Volume Decoding:  30%|██▉       | 2014/6751 [00:06<00:14, 328.64it/s]Volume Decoding:  30%|███       | 2047/6751 [00:06<00:14, 328.73it/s]Volume Decoding:  31%|███       | 2080/6751 [00:06<00:14, 328.80it/s]Volume Decoding:  31%|███▏      | 2113/6751 [00:06<00:14, 328.65it/s]Volume Decoding:  32%|███▏      | 2146/6751 [00:06<00:14, 328.78it/s]Volume Decoding:  32%|███▏      | 2179/6751 [00:06<00:13, 328.79it/s]Volume Decoding:  33%|███▎      | 2212/6751 [00:06<00:13, 328.70it/s]Volume Decoding:  33%|███▎      | 2245/6751 [00:06<00:13, 328.76it/s]Volume Decoding:  34%|███▎      | 2278/6751 [00:06<00:13, 328.82it/s]Volume Decoding:  34%|███▍      | 2311/6751 [00:07<00:13, 328.63it/s]Volume Decoding:  35%|███▍      | 2344/6751 [00:07<00:13, 328.55it/s]Volume Decoding:  35%|███▌      | 2377/6751 [00:07<00:13, 328.59it/s]Volume Decoding:  36%|███▌      | 2410/6751 [00:07<00:13, 328.55it/s]Volume Decoding:  36%|███▌      | 2443/6751 [00:07<00:13, 328.61it/s]Volume Decoding:  37%|███▋      | 2476/6751 [00:07<00:13, 328.55it/s]Volume Decoding:  37%|███▋      | 2509/6751 [00:07<00:12, 328.59it/s]Volume Decoding:  38%|███▊      | 2542/6751 [00:07<00:12, 328.48it/s]Volume Decoding:  38%|███▊      | 2575/6751 [00:07<00:12, 328.57it/s]Volume Decoding:  39%|███▊      | 2608/6751 [00:07<00:12, 328.52it/s]Volume Decoding:  39%|███▉      | 2641/6751 [00:08<00:12, 328.61it/s]Volume Decoding:  40%|███▉      | 2674/6751 [00:08<00:12, 328.52it/s]Volume Decoding:  40%|████      | 2707/6751 [00:08<00:12, 328.59it/s]Volume Decoding:  41%|████      | 2740/6751 [00:08<00:12, 328.55it/s]Volume Decoding:  41%|████      | 2773/6751 [00:08<00:12, 328.63it/s]Volume Decoding:  42%|████▏     | 2806/6751 [00:08<00:12, 328.51it/s]Volume Decoding:  42%|████▏     | 2839/6751 [00:08<00:11, 328.37it/s]Volume Decoding:  43%|████▎     | 2872/6751 [00:08<00:11, 328.38it/s]Volume Decoding:  43%|████▎     | 2905/6751 [00:08<00:11, 328.49it/s]Volume Decoding:  44%|████▎     | 2938/6751 [00:08<00:11, 328.44it/s]Volume Decoding:  44%|████▍     | 2971/6751 [00:09<00:11, 328.50it/s]Volume Decoding:  44%|████▍     | 3004/6751 [00:09<00:11, 328.50it/s]Volume Decoding:  45%|████▍     | 3037/6751 [00:09<00:11, 328.55it/s]Volume Decoding:  45%|████▌     | 3070/6751 [00:09<00:11, 328.54it/s]Volume Decoding:  46%|████▌     | 3103/6751 [00:09<00:11, 328.58it/s]Volume Decoding:  46%|████▋     | 3136/6751 [00:09<00:11, 328.55it/s]Volume Decoding:  47%|████▋     | 3169/6751 [00:09<00:10, 328.57it/s]Volume Decoding:  47%|████▋     | 3202/6751 [00:09<00:10, 328.56it/s]Volume Decoding:  48%|████▊     | 3235/6751 [00:09<00:10, 328.59it/s]Volume Decoding:  48%|████▊     | 3268/6751 [00:09<00:10, 328.56it/s]Volume Decoding:  49%|████▉     | 3301/6751 [00:10<00:10, 328.59it/s]Volume Decoding:  49%|████▉     | 3334/6751 [00:10<00:10, 328.57it/s]Volume Decoding:  50%|████▉     | 3367/6751 [00:10<00:10, 328.62it/s]Volume Decoding:  50%|█████     | 3400/6751 [00:10<00:10, 328.58it/s]Volume Decoding:  51%|█████     | 3433/6751 [00:10<00:10, 328.58it/s]Volume Decoding:  51%|█████▏    | 3466/6751 [00:10<00:09, 328.54it/s]Volume Decoding:  52%|█████▏    | 3499/6751 [00:10<00:09, 328.57it/s]Volume Decoding:  52%|█████▏    | 3532/6751 [00:10<00:09, 328.55it/s]Volume Decoding:  53%|█████▎    | 3565/6751 [00:10<00:09, 328.57it/s]Volume Decoding:  53%|█████▎    | 3598/6751 [00:10<00:09, 328.46it/s]Volume Decoding:  54%|█████▍    | 3631/6751 [00:11<00:09, 328.33it/s]Volume Decoding:  54%|█████▍    | 3664/6751 [00:11<00:09, 328.36it/s]Volume Decoding:  55%|█████▍    | 3697/6751 [00:11<00:09, 328.41it/s]Volume Decoding:  55%|█████▌    | 3730/6751 [00:11<00:09, 328.41it/s]Volume Decoding:  56%|█████▌    | 3763/6751 [00:11<00:09, 328.46it/s]Volume Decoding:  56%|█████▌    | 3796/6751 [00:11<00:08, 328.45it/s]Volume Decoding:  57%|█████▋    | 3829/6751 [00:11<00:08, 328.49it/s]Volume Decoding:  57%|█████▋    | 3862/6751 [00:11<00:08, 328.47it/s]Volume Decoding:  58%|█████▊    | 3895/6751 [00:11<00:08, 328.49it/s]Volume Decoding:  58%|█████▊    | 3928/6751 [00:11<00:08, 328.51it/s]Volume Decoding:  59%|█████▊    | 3961/6751 [00:12<00:08, 328.54it/s]Volume Decoding:  59%|█████▉    | 3994/6751 [00:12<00:08, 328.55it/s]Volume Decoding:  60%|█████▉    | 4027/6751 [00:12<00:08, 328.59it/s]Volume Decoding:  60%|██████    | 4060/6751 [00:12<00:08, 328.55it/s]Volume Decoding:  61%|██████    | 4093/6751 [00:12<00:08, 328.56it/s]Volume Decoding:  61%|██████    | 4126/6751 [00:12<00:07, 328.55it/s]Volume Decoding:  62%|██████▏   | 4159/6751 [00:12<00:07, 328.55it/s]Volume Decoding:  62%|██████▏   | 4192/6751 [00:12<00:07, 328.54it/s]Volume Decoding:  63%|██████▎   | 4225/6751 [00:12<00:07, 328.56it/s]Volume Decoding:  63%|██████▎   | 4258/6751 [00:12<00:07, 328.43it/s]Volume Decoding:  64%|██████▎   | 4291/6751 [00:13<00:07, 328.37it/s]Volume Decoding:  64%|██████▍   | 4324/6751 [00:13<00:07, 328.40it/s]Volume Decoding:  65%|██████▍   | 4357/6751 [00:13<00:07, 328.45it/s]Volume Decoding:  65%|██████▌   | 4390/6751 [00:13<00:07, 328.33it/s]Volume Decoding:  66%|██████▌   | 4423/6751 [00:13<00:07, 328.25it/s]Volume Decoding:  66%|██████▌   | 4456/6751 [00:13<00:06, 328.36it/s]Volume Decoding:  66%|██████▋   | 4489/6751 [00:13<00:06, 328.41it/s]Volume Decoding:  67%|██████▋   | 4522/6751 [00:13<00:06, 328.46it/s]Volume Decoding:  67%|██████▋   | 4555/6751 [00:13<00:06, 328.52it/s]Volume Decoding:  68%|██████▊   | 4588/6751 [00:13<00:06, 328.48it/s]Volume Decoding:  68%|██████▊   | 4621/6751 [00:14<00:06, 328.42it/s]Volume Decoding:  69%|██████▉   | 4654/6751 [00:14<00:06, 328.37it/s]Volume Decoding:  69%|██████▉   | 4687/6751 [00:14<00:06, 328.47it/s]Volume Decoding:  70%|██████▉   | 4720/6751 [00:14<00:06, 328.48it/s]Volume Decoding:  70%|███████   | 4753/6751 [00:14<00:06, 328.40it/s]Volume Decoding:  71%|███████   | 4786/6751 [00:14<00:05, 328.36it/s]Volume Decoding:  71%|███████▏  | 4819/6751 [00:14<00:05, 328.43it/s]Volume Decoding:  72%|███████▏  | 4852/6751 [00:14<00:05, 328.42it/s]Volume Decoding:  72%|███████▏  | 4885/6751 [00:14<00:05, 328.51it/s]Volume Decoding:  73%|███████▎  | 4918/6751 [00:14<00:05, 328.52it/s]Volume Decoding:  73%|███████▎  | 4951/6751 [00:15<00:05, 328.46it/s]Volume Decoding:  74%|███████▍  | 4984/6751 [00:15<00:05, 328.22it/s]Volume Decoding:  74%|███████▍  | 5017/6751 [00:15<00:05, 328.09it/s]Volume Decoding:  75%|███████▍  | 5050/6751 [00:15<00:05, 328.28it/s]Volume Decoding:  75%|███████▌  | 5083/6751 [00:15<00:05, 328.30it/s]Volume Decoding:  76%|███████▌  | 5116/6751 [00:15<00:04, 328.38it/s]Volume Decoding:  76%|███████▋  | 5149/6751 [00:15<00:04, 328.42it/s]Volume Decoding:  77%|███████▋  | 5182/6751 [00:15<00:04, 328.49it/s]Volume Decoding:  77%|███████▋  | 5215/6751 [00:15<00:04, 328.47it/s]Volume Decoding:  78%|███████▊  | 5248/6751 [00:15<00:04, 328.49it/s]Volume Decoding:  78%|███████▊  | 5281/6751 [00:16<00:04, 328.50it/s]Volume Decoding:  79%|███████▊  | 5314/6751 [00:16<00:04, 328.40it/s]Volume Decoding:  79%|███████▉  | 5347/6751 [00:16<00:04, 328.32it/s]Volume Decoding:  80%|███████▉  | 5380/6751 [00:16<00:04, 328.41it/s]Volume Decoding:  80%|████████  | 5413/6751 [00:16<00:04, 328.41it/s]Volume Decoding:  81%|████████  | 5446/6751 [00:16<00:03, 328.32it/s]Volume Decoding:  81%|████████  | 5479/6751 [00:16<00:03, 328.23it/s]Volume Decoding:  82%|████████▏ | 5512/6751 [00:16<00:03, 328.30it/s]Volume Decoding:  82%|████████▏ | 5545/6751 [00:16<00:03, 328.28it/s]Volume Decoding:  83%|████████▎ | 5578/6751 [00:16<00:03, 328.35it/s]Volume Decoding:  83%|████████▎ | 5611/6751 [00:17<00:03, 328.31it/s]Volume Decoding:  84%|████████▎ | 5644/6751 [00:17<00:03, 328.37it/s]Volume Decoding:  84%|████████▍ | 5677/6751 [00:17<00:03, 328.29it/s]Volume Decoding:  85%|████████▍ | 5710/6751 [00:17<00:03, 328.40it/s]Volume Decoding:  85%|████████▌ | 5743/6751 [00:17<00:03, 328.42it/s]Volume Decoding:  86%|████████▌ | 5776/6751 [00:17<00:02, 328.34it/s]Volume Decoding:  86%|████████▌ | 5809/6751 [00:17<00:02, 328.15it/s]Volume Decoding:  87%|████████▋ | 5842/6751 [00:17<00:02, 328.12it/s]Volume Decoding:  87%|████████▋ | 5875/6751 [00:17<00:02, 328.23it/s]Volume Decoding:  88%|████████▊ | 5908/6751 [00:17<00:02, 328.27it/s]Volume Decoding:  88%|████████▊ | 5941/6751 [00:18<00:02, 328.36it/s]Volume Decoding:  88%|████████▊ | 5974/6751 [00:18<00:02, 328.37it/s]Volume Decoding:  89%|████████▉ | 6007/6751 [00:18<00:02, 328.39it/s]Volume Decoding:  89%|████████▉ | 6040/6751 [00:18<00:02, 328.40it/s]Volume Decoding:  90%|████████▉ | 6073/6751 [00:18<00:02, 328.40it/s]Volume Decoding:  90%|█████████ | 6106/6751 [00:18<00:01, 328.42it/s]Volume Decoding:  91%|█████████ | 6139/6751 [00:18<00:01, 328.39it/s]Volume Decoding:  91%|█████████▏| 6172/6751 [00:18<00:01, 328.40it/s]Volume Decoding:  92%|█████████▏| 6205/6751 [00:18<00:01, 328.55it/s]Volume Decoding:  92%|█████████▏| 6238/6751 [00:18<00:01, 328.71it/s]Volume Decoding:  93%|█████████▎| 6271/6751 [00:19<00:01, 328.62it/s]Volume Decoding:  93%|█████████▎| 6304/6751 [00:19<00:01, 328.72it/s]Volume Decoding:  94%|█████████▍| 6337/6751 [00:19<00:01, 328.88it/s]Volume Decoding:  94%|█████████▍| 6370/6751 [00:19<00:01, 328.98it/s]Volume Decoding:  95%|█████████▍| 6403/6751 [00:19<00:01, 329.07it/s]Volume Decoding:  95%|█████████▌| 6436/6751 [00:19<00:00, 329.13it/s]Volume Decoding:  96%|█████████▌| 6469/6751 [00:19<00:00, 329.17it/s]Volume Decoding:  96%|█████████▋| 6502/6751 [00:19<00:00, 329.23it/s]Volume Decoding:  97%|█████████▋| 6535/6751 [00:19<00:00, 329.21it/s]Volume Decoding:  97%|█████████▋| 6568/6751 [00:19<00:00, 329.22it/s]Volume Decoding:  98%|█████████▊| 6601/6751 [00:20<00:00, 329.18it/s]Volume Decoding:  98%|█████████▊| 6634/6751 [00:20<00:00, 329.22it/s]Volume Decoding:  99%|█████████▉| 6667/6751 [00:20<00:00, 329.15it/s]Volume Decoding:  99%|█████████▉| 6700/6751 [00:20<00:00, 329.16it/s]Volume Decoding: 100%|█████████▉| 6733/6751 [00:20<00:00, 328.96it/s]Volume Decoding: 100%|██████████| 6751/6751 [00:20<00:00, 327.10it/s]
+Downloading: "https://download.pytorch.org/models/alexnet-owt-7be5be79.pth" to /root/.cache/torch/hub/checkpoints/alexnet-owt-7be5be79.pth
+  0%|          | 0.00/233M [00:00<?, ?B/s]  9%|▉         | 20.6M/233M [00:00<00:01, 216MB/s] 27%|██▋       | 64.0M/233M [00:00<00:00, 356MB/s] 46%|████▌     | 107M/233M [00:00<00:00, 400MB/s]  64%|██████▍   | 150M/233M [00:00<00:00, 420MB/s] 83%|████████▎ | 193M/233M [00:00<00:00, 430MB/s]100%|██████████| 233M/233M [00:00<00:00, 412MB/s]
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/torchmetrics/utilities/prints.py:43: UserWarning: The ``compute`` method of metric MeanMetric was called before the ``update`` method which may lead to errors, as metric states have not yet been updated.
+  warnings.warn(*args, **kwargs)
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/torchmetrics/utilities/prints.py:43: UserWarning: The ``compute`` method of metric SumMetric was called before the ``update`` method which may lead to errors, as metric states have not yet been updated.
+  warnings.warn(*args, **kwargs)
+Downsampled point cloud from 3,544,937 to 1,000,000 points
+Saved video to /mnt/home/vyhong/projects/nova3r/exp_output/hunyuan_colored_vae/nova3r_training/version_5/val_points/epoch_0/sage10k_20251224_184831_layout_93ab497d_00001_0/pointcloud.mp4
+Epoch 1/9  ━━━━━━━          3655/8303 2:12:31 •       0.45it/s v_num: 5.000     
+                                      2:52:01                  train_loss_step: 
+                                                               0.034            
+                                                               val_loss_step:   
+                                                               0.048            
+                                                               val_loss_epoch:  
+                                                               0.034            
+                                                               train_loss_epoch:
+                                                               0.037            
+Traceback (most recent call last):
+  File "/mnt/home/vyhong/projects/nova3r/training/change_train.py", line 109, in <module>
+    main()
+  File "/mnt/home/vyhong/projects/nova3r/training/change_train.py", line 105, in main
+    trainer.fit(module, datamodule=datamodule)
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/trainer/trainer.py", line 584, in fit
+    call._call_and_handle_interrupt(
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/trainer/call.py", line 49, in _call_and_handle_interrupt
+    return trainer_fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/trainer/trainer.py", line 630, in _fit_impl
+    self._run(model, ckpt_path=ckpt_path, weights_only=weights_only)
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/trainer/trainer.py", line 1079, in _run
+    results = self._run_stage()
+              ^^^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/trainer/trainer.py", line 1123, in _run_stage
+    self.fit_loop.run()
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/loops/fit_loop.py", line 217, in run
+    self.advance()
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/loops/fit_loop.py", line 465, in advance
+    self.epoch_loop.run(self._data_fetcher)
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/loops/training_epoch_loop.py", line 153, in run
+    self.advance(data_fetcher)
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/loops/training_epoch_loop.py", line 352, in advance
+    batch_output = self.automatic_optimization.run(trainer.optimizers[0], batch_idx, kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 192, in run
+    self._optimizer_step(batch_idx, closure)
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 270, in _optimizer_step
+    call._call_lightning_module_hook(
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/trainer/call.py", line 177, in _call_lightning_module_hook
+    output = fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/core/module.py", line 1368, in optimizer_step
+    optimizer.step(closure=optimizer_closure)
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/core/optimizer.py", line 154, in step
+    step_output = self._strategy.optimizer_step(self._optimizer, closure, **kwargs)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/strategies/strategy.py", line 239, in optimizer_step
+    return self.precision_plugin.optimizer_step(optimizer, model=model, closure=closure, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/plugins/precision/amp.py", line 76, in optimizer_step
+    return super().optimizer_step(optimizer, model=model, closure=closure, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/plugins/precision/precision.py", line 123, in optimizer_step
+    return optimizer.step(closure=closure, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/torch/optim/lr_scheduler.py", line 166, in wrapper
+    return func.__get__(opt, opt.__class__)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/torch/optim/optimizer.py", line 533, in wrapper
+    out = func(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/torch/optim/optimizer.py", line 81, in _use_grad
+    ret = func(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/torch/optim/adam.py", line 227, in step
+    loss = closure()
+           ^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/plugins/precision/precision.py", line 109, in _wrap_closure
+    closure_result = closure()
+                     ^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 146, in __call__
+    self._result = self.closure(*args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 131, in closure
+    step_output = self._step_fn()
+                  ^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 319, in _training_step
+    training_step_output = call._call_strategy_hook(trainer, "training_step", *kwargs.values())
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/trainer/call.py", line 329, in _call_strategy_hook
+    output = fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/strategies/strategy.py", line 391, in training_step
+    return self.lightning_module.training_step(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/home/vyhong/projects/nova3r/training/mesh2sdf/lightning_module.py", line 210, in training_step
+    loss, details, _ = self.model.lightning_forward(
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/home/vyhong/projects/nova3r/nova3r/heads/hunyuan_model/autoencoders/model.py", line 437, in lightning_forward
+    rgb_pred = self.decode_rgb(geo_points_coords, latents)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/home/vyhong/projects/nova3r/nova3r/heads/hunyuan_model/autoencoders/model.py", line 361, in decode_rgb
+    return torch.sigmoid(self.rgb_decoder(queries=queries, latents=latents))
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/home/vyhong/projects/nova3r/nova3r/heads/hunyuan_model/autoencoders/attention_blocks.py", line 492, in forward
+    x = self.ln_post(x)
+        ^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/torch/nn/modules/normalization.py", line 229, in forward
+    return F.layer_norm(
+           ^^^^^^^^^^^^^
+  File "/opt/conda/envs/nova3r/lib/python3.12/site-packages/torch/nn/functional.py", line 2935, in layer_norm
+    return torch.layer_norm(
+           ^^^^^^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 3.12 GiB. GPU 0 has a total capacity of 139.80 GiB of which 2.48 GiB is free. Process 2339687 has 135.86 GiB memory in use. Process 2390003 has 1.36 GiB memory in use. Of the allocated memory 134.82 GiB is allocated by PyTorch, and 91.54 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+Seed set to 43
+PointCrossAttentionEncoder INFO: pc_sharpedge_size is not given, using pc_size as pc_sharpedge_size
+CUDA setup: requested=1, visible=1, CUDA_VISIBLE_DEVICES=0, NCCL_P2P_DISABLE=0
+Using bfloat16 Automatic Mixed Precision (AMP)
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+💡 Tip: For seamless cloud logging and experiment tracking, try installing [litlogger](https://pypi.org/project/litlogger/) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Experiments platform.
+`Trainer(val_check_interval=1.0)` was configured so validation will run at the end of the training epoch..
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/callbacks/model_checkpoint.py:881: Checkpoint directory /mnt/home/vyhong/projects/nova3r/exp_output/hunyuan_colored_vae/checkpoints exists and is not empty.
+Restoring states from the checkpoint path at exp_output/hunyuan_colored_vae/checkpoints/last-v1.ckpt
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/utilities/model_summary/model_summary.py:242: Precision bf16-mixed is not supported by the model summary.  Estimated model size in MB will not be accurate. Using 32 bits instead.
+┏━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃   ┃ Name                           ┃ Type           ┃ Params ┃ Mode  ┃ FLOPs ┃
+┡━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ 0 │ model                          │ ShapeVAE       │  340 M │ train │     0 │
+│ 1 │ train_criterion                │ SDFReconstruc… │      0 │ train │     0 │
+│ 2 │ val_criterion                  │ SDFReconstruc… │      0 │ train │     0 │
+│ 3 │ flow_bucket_velocity_mse       │ ModuleDict     │      0 │ train │     0 │
+│ 4 │ flow_bucket_reconstruction_mse │ ModuleDict     │      0 │ train │     0 │
+│ 5 │ flow_bucket_sample_count       │ ModuleDict     │      0 │ train │     0 │
+└───┴────────────────────────────────┴────────────────┴────────┴───────┴───────┘
+Trainable params: 340 M                                                         
+Non-trainable params: 0                                                         
+Total params: 340 M                                                             
+Total estimated model params size (MB): 1.4 K                                   
+Modules in train mode: 449                                                      
+Modules in eval mode: 0                                                         
+Total FLOPs: 0                                                                  
+Restored all states from the checkpoint at exp_output/hunyuan_colored_vae/checkpoints/last-v1.ckpt
+/opt/conda/envs/nova3r/lib/python3.12/site-packages/pytorch_lightning/utilities/_pytree.py:21: `isinstance(treespec, LeafSpec)` is deprecated, use `isinstance(treespec, TreeSpec) and treespec.is_leaf()` instead.

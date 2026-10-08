@@ -26,6 +26,13 @@ def parse_args():
     parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
     parser.add_argument("--devices", type=int, default=CONFIGURED_DEVICES, help="Number of GPUs; defaults to experiment.gpus")
     parser.add_argument("--ddp-timeout-seconds", type=int, default=1800)
+    parser.add_argument("--mesh-method", choices=("mesh_udf", "latent2mesh", "mind"), default="mesh_udf", help="Surface meshing method (default: mesh_udf)")
+    parser.add_argument("--mesh-mind-resolution", type=int, default=None, help="MIND grid resolution (default: 256)")
+    parser.add_argument("--mesh-mind-r2", type=float, default=None, help="MIND UDF distance cutoff (default: 0.01)")
+    parser.add_argument("--mesh-mind-sample-points", type=int, default=None, help="MIND point samples (default: 250000)")
+    parser.add_argument("--mesh-mind-sample-iterations", type=int, default=None, help="MIND point refinement steps (default: 25)")
+    parser.add_argument("--mesh-mind-mesh-iterations", type=int, default=None, help="MIND final mesh refinement steps (default: 50)")
+    parser.add_argument("--test-sample", default=None, help="Mesh only the named test sample")
     args = parser.parse_args()
 
     return args
@@ -44,6 +51,18 @@ def main():
     else:
         model_device = args.device
     model, cfg = load_model(device=model_device, config_path=args.config, stage="test")
+    if args.mesh_method is not None:
+        cfg.mesh_method = args.mesh_method
+    if args.mesh_mind_resolution is not None:
+        cfg.mesh_mind_resolution = args.mesh_mind_resolution
+    if args.mesh_mind_r2 is not None:
+        cfg.mesh_mind_r2 = args.mesh_mind_r2
+    for key in ("mesh_mind_sample_points", "mesh_mind_sample_iterations", "mesh_mind_mesh_iterations"):
+        value = getattr(args, key)
+        if value is not None:
+            cfg[key] = value
+    if args.test_sample is not None:
+        cfg.test_sample = args.test_sample
     data_cfg = cfg.data
     devices = args.devices if args.devices is not None else int(cfg.gpus)
     validate(torch, devices, args.device)

@@ -15,7 +15,23 @@ from PIL import Image, ImageDraw
 import torch
 import torch.nn.functional as F
 
-from tools.cubemap_to_dinov3_features import FACE_ORDER, face_paths, load_model
+from tools.panorama_to_dinov3_features import load_model
+
+
+FACE_ORDER = (4, 0, 5, 1, 3, 2)
+IMAGE_SUFFIXES = {'.png', '.jpg', '.jpeg', '.webp'}
+
+
+def face_paths(directory, order):
+    by_index = {
+        int(path.stem): path
+        for path in sorted(directory.iterdir())
+        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES and path.stem.isdigit()
+    }
+    missing = set(order) - by_index.keys()
+    if missing:
+        raise ValueError(f'Missing faces {sorted(missing)} in {directory}')
+    return [by_index[index] for index in order]
 
 
 def parse_args():

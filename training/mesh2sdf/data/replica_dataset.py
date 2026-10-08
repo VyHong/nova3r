@@ -262,6 +262,9 @@ class ReplicaPanoSDFDataset(SDFDatasetMixin):
                         sharpedge_label=geo_points["sharp_near_label"],
                         **self.sdf_rgb_kwargs(geo_points),
                     )
+                    geo_points = self.add_exact_surface_points(
+                        rng, surface, geo_points
+                    )
                     surface[:, :3] = (total_transform[:3, :3] @ surface[:, :3].T).T + total_transform[:3, 3]
                     surface[:, 3:6] = (total_transform[:3, :3] @ surface[:, 3:6].T).T
                     geo_points[:, :3] = (total_transform[:3, :3] @ geo_points[:, :3].T).T + total_transform[:3, 3]

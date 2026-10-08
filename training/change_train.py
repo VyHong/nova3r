@@ -25,7 +25,11 @@ from demo_nova3r import load_model
 
 def parse_args():
     parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
-    parser.add_argument("--config", default="checkpoints/unconditional_dit/.hydra/config.yaml", help="Model and training config")
+    parser.add_argument(
+        "--config",
+        default="checkpoints/dinov3/config_dinov3_panorama_visible_latent_conditioned_cube_with_vae.yaml",
+        help="Model and training config",
+    )
     parser.add_argument("--device", default="gpu", help="Device (default: gpu)")
     parser.add_argument("--devices", type=int, default=None, help="Number of devices; defaults to experiment.gpus")
     parser.add_argument("--ddp-timeout-seconds", type=int, default=600)
@@ -78,10 +82,14 @@ def main():
         max_epochs=cfg.epochs,
         accelerator=args.device,
         devices=devices,
-        strategy=DDPStrategy(
-            timeout=timedelta(seconds=args.ddp_timeout_seconds),
-            find_unused_parameters=True,
-        ) if devices > 1 else "auto",
+        strategy=(
+            DDPStrategy(
+                timeout=timedelta(seconds=args.ddp_timeout_seconds),
+                find_unused_parameters=True,
+            )
+            if devices > 1
+            else "auto"
+        ),
         logger=logger,
         callbacks=[checkpoint_callback, last_checkpoint, lr_monitor],
         precision=cfg.amp_dtype,
@@ -89,6 +97,7 @@ def main():
         gradient_clip_algorithm="norm",
         accumulate_grad_batches=cfg.accum_iter,
         log_every_n_steps=1,
+        num_sanity_val_steps=0,
         check_val_every_n_epoch=check_val_every_n_epoch,
         val_check_interval=val_check_interval,
     )

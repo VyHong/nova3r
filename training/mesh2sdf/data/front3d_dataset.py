@@ -136,6 +136,8 @@ class Front3DSDFDataset(SDFDatasetMixin):
                 **self.sdf_rgb_kwargs(sdf_data),
             )
 
+        geo_points = self.add_exact_surface_points(rng, surface, geo_points)
+
         T = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
         total_transform = torch.from_numpy(T).float()
         surface[:, :3] = (total_transform[:3, :3] @ surface[:, :3].T).T + total_transform[:3, 3]

@@ -435,7 +435,7 @@ class ShapeVAE(VectsetVAE):
             rgb_target = geo_points[:, :, 4:7].clamp(0.0, 1.0)
             rgb_valid = geo_points[:, :, 7:8] > 0.5
             rgb_pred = self.decode_rgb(geo_points_coords, latents)
-            rgb_error = F.smooth_l1_loss(
+            rgb_error = F.l1_loss(
                 rgb_pred, rgb_target, reduction="none"
             )
             valid_values = rgb_valid.expand_as(rgb_error)

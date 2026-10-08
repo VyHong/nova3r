@@ -68,7 +68,7 @@ def build_frozen_shape_decoder(cfg, model):
 
     decoder = ShapeVAEDecoder(**cfg.vae.params)
     decoder.load_state_dict(
-        _load_checkpoint_state_dict(str(checkpoint)),
+        _load_checkpoint_state_dict(str(checkpoint), component="vae"),
         strict=True,
     )
     decoder.requires_grad_(False)

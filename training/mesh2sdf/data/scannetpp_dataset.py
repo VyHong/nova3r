@@ -21,6 +21,11 @@ from nova3r.utils.batch_debug import save_batch_debug
 class ScanNetPPSDFDataset(SDFDatasetMixin):
     """Load ScanNet++ cubemap panoramas with scanner poses and UDF samples."""
 
+    AVAILABLE_MODALITIES = frozenset({
+        "images", "cameras", "surface", "geo_points", "conditioning_latent",
+        "visible_geometry_latent", "image_features", "gt_latent",
+    })
+
     SCANNER_AXIS_CONVERSION = np.asarray(
         [[0, 1, 0, 0], [0, 0, -1, 0], [-1, 0, 0, 0], [0, 0, 0, 1]],
         dtype=np.float32,
@@ -45,6 +50,9 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
         subseq_ids=None,
         load_visible_geometry_latent=False,
         visible_geometry_latent_root=None,
+        modalities=None,
+        gt_latent_root=None,
+        gt_latent_source="latent",
     ):
         super().__init__(common_conf)
         self.allow_duplicate_img = common_conf.allow_duplicate_img
@@ -59,14 +67,36 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
         self.split = split
         self.format = format
         self.configure_subseq_ids(subseq_ids)
-        self.configure_conditioning_latents(load_conditioning_latent, conditioning_latent_root)
+        if modalities is None:
+            self.modalities = {"images", "cameras", "surface", "geo_points"}
+            if load_conditioning_latent:
+                self.modalities.add("conditioning_latent")
+            if load_visible_geometry_latent:
+                self.modalities.add("visible_geometry_latent")
+            if image_feature_root is not None:
+                self.modalities.add("image_features")
+        else:
+            self.modalities = {str(modality) for modality in modalities}
+            unknown = self.modalities - self.AVAILABLE_MODALITIES
+            if unknown:
+                raise ValueError(f"Unknown ScanNet++ modalities: {sorted(unknown)}")
+        if gt_latent_root is not None:
+            self.modalities.add("gt_latent")
+        if "gt_latent" in self.modalities and gt_latent_root is None:
+            raise ValueError("gt_latent_root is required for the gt_latent modality")
+        self.configure_gt_latents(gt_latent_root, gt_latent_source)
+        self.configure_conditioning_latents(
+            "conditioning_latent" in self.modalities, conditioning_latent_root
+        )
         self.configure_visible_geometry_latents(
-            load_visible_geometry_latent, visible_geometry_latent_root
+            "visible_geometry_latent" in self.modalities, visible_geometry_latent_root
         )
         self.image_feature_root = (
             Path(image_feature_root) if image_feature_root is not None else None
         )
-        if self.image_feature_root is not None and not self.image_feature_root.is_dir():
+        if "image_features" in self.modalities and (
+            self.image_feature_root is None or not self.image_feature_root.is_dir()
+        ):
             raise ValueError(
                 f"Image feature root does not exist: {self.image_feature_root}"
             )
@@ -189,52 +219,65 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
         if not feature_path.is_file():
             raise FileNotFoundError(f"Missing panorama image features: {feature_path}")
         checkpoint = torch.load(feature_path, map_location="cpu", weights_only=True)
-        features = (
-            checkpoint.get("patch_features")
-            if isinstance(checkpoint, dict)
-            else checkpoint
+        if not isinstance(checkpoint, dict):
+            raise ValueError(
+                f"Panorama feature file must include grid metadata: {feature_path}"
+            )
+        if checkpoint.get("projection") != "equirectangular":
+            raise ValueError(
+                f"Expected equirectangular panorama features in {feature_path}"
+            )
+        features = self._validate_single_latent(
+            checkpoint.get("patch_features"), feature_path, "panorama patch features"
         )
-        return self._validate_single_latent(
-            features, feature_path, "panorama patch features"
-        )
+        return features
 
-    def _load_geometry(self, anno, rng, total_transform):
+    def _load_geometry(self, anno, rng, total_transform, *, load_surface=True, load_geo_points=True):
         surface_path = Path(anno["surface"])
         geo_points_path = Path(anno["geo_points"])
-        if not surface_path.is_file() or not geo_points_path.is_file():
+        if (load_surface and not surface_path.is_file()) or (load_geo_points and not geo_points_path.is_file()):
             raise FileNotFoundError(
                 "Missing ScanNet++ UDF files. Expected "
                 f"surface={surface_path} and geo_points={geo_points_path}. "
                 "Generate them or pass sdf_data_root/surface_filename/geo_points_filename in the dataset config."
             )
 
-        with np.load(surface_path, allow_pickle=True) as surface_data:
-            surface = self.load_surface_points(
-                rng,
-                random_surface=surface_data["random_surface"],
-                sharpedge_surface=surface_data["sharp_surface"],
-                **self.surface_rgb_kwargs(surface_data),
-            )
+        surface = geo_points = None
+        if load_surface:
+            with np.load(surface_path, allow_pickle=True) as surface_data:
+                surface = self.load_surface_points(
+                    rng,
+                    random_surface=surface_data["random_surface"],
+                    sharpedge_surface=(
+                        surface_data["sharp_surface"] if self.pc_sharpedge_size > 0 else None
+                    ),
+                    **self.surface_rgb_kwargs(surface_data),
+                )
 
-        with np.load(geo_points_path, allow_pickle=True) as geo_points_data:
-            geo_points = self.load_sdf_points(
-                rng,
-                vol_points=geo_points_data["vol_points"],
-                vol_label=geo_points_data["vol_label"],
-                near_points=geo_points_data["random_near_points"],
-                near_label=geo_points_data["random_near_label"],
-                sharpedge_points=geo_points_data["sharp_near_points"],
-                sharpedge_label=geo_points_data["sharp_near_label"],
-                **self.sdf_rgb_kwargs(geo_points_data),
-            )
+        if load_geo_points:
+            with np.load(geo_points_path, allow_pickle=True) as geo_points_data:
+                geo_points = self.load_sdf_points(
+                    rng,
+                    vol_points=geo_points_data["vol_points"],
+                    vol_label=geo_points_data["vol_label"],
+                    near_points=geo_points_data["random_near_points"],
+                    near_label=geo_points_data["random_near_label"],
+                    sharpedge_points=geo_points_data["sharp_near_points"],
+                    sharpedge_label=geo_points_data["sharp_near_label"],
+                    **self.sdf_rgb_kwargs(geo_points_data),
+                )
+
+        geo_points = self.add_exact_surface_points(rng, surface, geo_points)
 
         total_transform = torch.from_numpy(total_transform).float()
         pointcloud_axis_conversion = torch.from_numpy(self.SCANNER_AXIS_CONVERSION).float()
         total_transform = total_transform @ pointcloud_axis_conversion
-        surface[:, :3] = (total_transform[:3, :3] @ surface[:, :3].T).T + total_transform[:3, 3]
-        if surface.shape[1] >= 6:
-            surface[:, 3:6] = (total_transform[:3, :3] @ surface[:, 3:6].T).T
-        geo_points[:, :3] = (total_transform[:3, :3] @ geo_points[:, :3].T).T + total_transform[:3, 3]
+        if surface is not None:
+            surface[:, :3] = (total_transform[:3, :3] @ surface[:, :3].T).T + total_transform[:3, 3]
+            if surface.shape[1] >= 6:
+                surface[:, 3:6] = (total_transform[:3, :3] @ surface[:, 3:6].T).T
+        if geo_points is not None:
+            geo_points[:, :3] = (total_transform[:3, :3] @ geo_points[:, :3].T).T + total_transform[:3, 3]
         return surface, geo_points
 
     def get_data(
@@ -260,69 +303,89 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
         surface = None
         geo_points = None
 
-        for anno in annos:
-            with open(anno["camera_data"], "r") as file:
-                camera_data = json.load(file)
+        load_images = "images" in self.modalities
+        load_cameras = "cameras" in self.modalities
+        load_surface = "surface" in self.modalities
+        load_geo_points = "geo_points" in self.modalities
+        load_geometry = load_surface or load_geo_points
+        need_camera_transform = load_cameras or load_geometry
 
-            scanner_w2c = self._load_scanner_w2c(anno["pose_path"], anno["frame_idx"])
+        for anno in annos:
+            if need_camera_transform:
+                with open(anno["camera_data"], "r") as file:
+                    camera_data = json.load(file)
+                scanner_w2c = self._load_scanner_w2c(anno["pose_path"], anno["frame_idx"])
+
             for subseq_order, subseq_id in enumerate(subseq_ids):
                 face_key = f"{int(subseq_id):04d}"
                 image_path = anno["subsequence_images"][int(subseq_id)]
-                image = read_image_cv2(str(image_path))
-                orig_size_hw = image.shape[:2]
-                image = self.resize_image(image, cv2.INTER_LANCZOS4)
-                new_size_hw = image.shape[:2]
-                image = self._image_to_tensor(image)
+                orig_size_hw = None
+                if load_images:
+                    image = read_image_cv2(str(image_path))
+                    orig_size_hw = image.shape[:2]
+                    image = self.resize_image(image, cv2.INTER_LANCZOS4)
+                    image = self._image_to_tensor(image)
 
-                anon_mask_path = anno["subsequence_anon_masks"][int(subseq_id)]
-                anon_mask = cv2.imread(str(anon_mask_path), cv2.IMREAD_GRAYSCALE)
-                if anon_mask is None:
-                    raise FileNotFoundError(f"Missing ScanNet++ anonymization mask: {anon_mask_path}")
-                anon_mask = self.resize_image(anon_mask, cv2.INTER_NEAREST)
-                invalid_mask = torch.from_numpy(np.ascontiguousarray(anon_mask == 0))
-                image[:, invalid_mask] = 0.0
+                    anon_mask_path = anno["subsequence_anon_masks"][int(subseq_id)]
+                    anon_mask = cv2.imread(str(anon_mask_path), cv2.IMREAD_GRAYSCALE)
+                    if anon_mask is None:
+                        raise FileNotFoundError(f"Missing ScanNet++ anonymization mask: {anon_mask_path}")
+                    anon_mask = self.resize_image(anon_mask, cv2.INTER_NEAREST)
+                    invalid_mask = torch.from_numpy(np.ascontiguousarray(anon_mask == 0))
+                    image[:, invalid_mask] = 0.0
+                    images.append(image)
 
-                subseq_intrinsics = np.asarray(camera_data[face_key]["intrinsics"], dtype=np.float32)
-                subseq_intrinsics = self._intrinsics_to_resized_pixels(
-                    subseq_intrinsics,
-                    orig_size_hw=orig_size_hw,
-                    new_size_hw=new_size_hw,
-                )
+                if not need_camera_transform:
+                    continue
 
                 face_w2c = np.asarray(camera_data[face_key]["extrinsics"], dtype=np.float32)
                 image_extrinsics = face_w2c @ scanner_w2c
-
-                if subseq_order == 0:
+                if subseq_order == 0 and load_geometry:
                     rng = self._pointcloud_rng(seq_name, ids[0], int(subseq_ids[0]))
-                    surface, geo_points = self._load_geometry(anno, rng, image_extrinsics)
+                    surface, geo_points = self._load_geometry(
+                        anno, rng, image_extrinsics,
+                        load_surface=load_surface, load_geo_points=load_geo_points,
+                    )
 
-                images.append(image)
-                extrinsics.append(torch.from_numpy(image_extrinsics).float())
-                intrinsics.append(subseq_intrinsics)
-
-        ex_t_batched = torch.stack(extrinsics).unsqueeze(0)
-        normalized_extrinsics = self._normalize_extrinsics(
-            ex_t_batched,
-            translation_scale=camera_translation_scale,
-        ).squeeze(0)
-        intrinsics = torch.from_numpy(np.asarray(intrinsics))
+                if load_cameras:
+                    if orig_size_hw is None:
+                        orig_size_hw = read_image_cv2(str(image_path)).shape[:2]
+                    intrinsics.append(self._intrinsics_to_resized_pixels(
+                        np.asarray(camera_data[face_key]["intrinsics"], dtype=np.float32),
+                        orig_size_hw=orig_size_hw,
+                        new_size_hw=(self.img_size, self.img_size),
+                    ))
+                    extrinsics.append(torch.from_numpy(image_extrinsics).float())
 
         batch = {
             "seq_name": f"{self.dataset_prefix}_{seq_name}",
             "id": ids[0] if len(ids) == 1 else ids,
             "subseq_ids": torch.as_tensor(subseq_ids, dtype=torch.long),
-            "images": images,
-            "extrinsics": normalized_extrinsics,
-            "intrinsics": intrinsics,
-            "surface": surface,
-            "geo_points": geo_points,
         }
+        if load_images:
+            batch["images"] = images
+        if load_cameras:
+            batch["extrinsics"] = self._normalize_extrinsics(
+                torch.stack(extrinsics).unsqueeze(0),
+                translation_scale=camera_translation_scale,
+            ).squeeze(0)
+            batch["intrinsics"] = torch.from_numpy(np.asarray(intrinsics))
+        if surface is not None:
+            batch["surface"] = surface
+        if geo_points is not None:
+            batch["geo_points"] = geo_points
         if self.load_conditioning_latent:
             batch["conditioning_latents"] = self._load_conditioning_latent(seq_name, ids)
         if self.load_visible_geometry_latent:
             batch["visible_geometry_latents"] = self._load_visible_geometry_latent(seq_name, ids)
-        if self.image_feature_root is not None:
+        if "image_features" in self.modalities:
             batch["image_features"] = self._load_image_features(seq_name, ids[0])
+        if self.load_gt_latent:
+            gt_latent = self._load_gt_latent(seq_name, ids)
+            if isinstance(gt_latent, dict):
+                batch.update(gt_latent)
+            else:
+                batch["gt_latents"] = gt_latent
         return batch
 
     def __getitem__(self, index):

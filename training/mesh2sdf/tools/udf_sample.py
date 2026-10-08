@@ -236,6 +236,7 @@ def sample_udf(
     sampling_scale=1.0,
     vertex_rgb=None,
     color_max_distance=0.05,
+    batch_size=None,
 ):
     n_volume_points = sharp_surface.shape[0] * 2
 
@@ -304,10 +305,22 @@ def sample_udf(
         axis=0,
     ).astype(np.float64)
 
-    squared_distance, face_indices, closest_points = igl.point_mesh_squared_distance(
-        all_points, V_np, F_np
-    )
-    udf = np.sqrt(np.maximum(squared_distance, 0.0))
+    if batch_size is None:
+        batch_size = len(all_points)
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    udf = np.empty(len(all_points), dtype=np.float64)
+    all_rgb = np.empty((len(all_points), 3), dtype=np.uint8) if vertex_rgb is not None else None
+    for start in range(0, len(all_points), batch_size):
+        stop = min(start + batch_size, len(all_points))
+        squared_distance, face_indices, closest_points = igl.point_mesh_squared_distance(
+            all_points[start:stop], V_np, F_np
+        )
+        udf[start:stop] = np.sqrt(np.maximum(squared_distance, 0.0))
+        if all_rgb is not None:
+            all_rgb[start:stop] = closest_surface_rgb(
+                closest_points, face_indices, V_np, F_np, vertex_rgb
+            )
 
     idx1 = len(vol_points)
     idx2 = idx1 + len(random_near_points)
@@ -328,9 +341,6 @@ def sample_udf(
     }
 
     if vertex_rgb is not None:
-        all_rgb = closest_surface_rgb(
-            closest_points, face_indices, V_np, F_np, vertex_rgb
-        )
         vol_rgb_valid = vol_udf <= color_max_distance * sampling_scale
         vol_rgb = all_rgb[:idx1].copy()
         vol_rgb[~vol_rgb_valid] = 0
@@ -349,7 +359,7 @@ def sample_udf(
     return data
 
 
-def sample_mesh_udf(mesh, color_max_distance=0.05, sample_num=524288):
+def sample_mesh_udf(mesh, color_max_distance=0.05, sample_num=524288, include_sharp_surface=True, progress=None, batch_size=None):
     V = np.asarray(mesh.vertices, dtype=np.float64)
     vertex_rgb = mesh_vertex_rgb(mesh)
     sampling_scale = mesh_radius_scale(V)
@@ -383,17 +393,17 @@ def sample_mesh_udf(mesh, color_max_distance=0.05, sample_num=524288):
 
     surface_data = {
         "random_surface": np.concatenate((random_surface, random_normal), axis=1).astype(np.float16),
-        "sharp_surface": np.concatenate((sharp_surface, sharp_normal), axis=1).astype(np.float16),
         "bounds": np.concatenate((volume_bounds[0], volume_bounds[1])).astype(np.float32),
         "sampling_scale": np.float32(sampling_scale),
     }
+    if include_sharp_surface:
+        surface_data["sharp_surface"] = np.concatenate((sharp_surface, sharp_normal), axis=1).astype(np.float16)
     if vertex_rgb is not None:
-        surface_data.update(
-            {
-                "random_surface_rgb": random_surface_rgb,
-                "sharp_surface_rgb": sharp_surface_rgb,
-            }
-        )
+        surface_data["random_surface_rgb"] = random_surface_rgb
+        if include_sharp_surface:
+            surface_data["sharp_surface_rgb"] = sharp_surface_rgb
+    if progress is not None:
+        progress()
 
     udf_data = sample_udf(
         mesh,
@@ -402,7 +412,10 @@ def sample_mesh_udf(mesh, color_max_distance=0.05, sample_num=524288):
         sampling_scale=sampling_scale,
         vertex_rgb=vertex_rgb,
         color_max_distance=color_max_distance,
+        batch_size=batch_size,
     )
+    if progress is not None:
+        progress()
 
     return surface_data, udf_data
 
@@ -444,12 +457,21 @@ if __name__ == "__main__":
         default=524288,
         help="Number of random-surface and sharp-surface samples (default: 524288).",
     )
+    parser.add_argument(
+        "--omit_sharp_surface",
+        action="store_true",
+        help="Omit sharp_surface and sharp_surface_rgb from the surface NPZ; keep sharp-near UDF samples.",
+    )
+    parser.add_argument("--progress_events", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--batch_size", type=int, default=None, help="Maximum UDF distance queries per batch (default: all points).")
 
     args = parser.parse_args()
     if args.color_max_distance < 0:
         parser.error("--color_max_distance must be non-negative")
     if args.sample_num < 1:
         parser.error("--sample_num must be positive")
+    if args.batch_size is not None and args.batch_size < 1:
+        parser.error("--batch_size must be positive")
 
     mesh = load_mesh(args.input_obj)
 
@@ -478,10 +500,17 @@ if __name__ == "__main__":
             f"{len(V)} vertices/{len(F)} faces."
         )
 
+    progress = (lambda: print("SAGE_UDF_PROGRESS", flush=True)) if args.progress_events else None
+    if progress is not None:
+        progress()
+
     surface_data, udf_data = sample_mesh_udf(
         mesh,
         color_max_distance=args.color_max_distance,
         sample_num=args.sample_num,
+        include_sharp_surface=not args.omit_sharp_surface,
+        progress=progress,
+        batch_size=args.batch_size,
     )
 
     parent_folder = os.path.dirname(args.output_prefix)
@@ -493,6 +522,8 @@ if __name__ == "__main__":
 
     export_udf = f"{args.output_prefix}_udf.npz"
     np.savez(export_udf, **udf_data)
+    if progress is not None:
+        progress()
 
     print(f"Saved surface samples to: {export_surface}")
     print(f"Saved UDF samples to: {export_udf}")

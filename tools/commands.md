@@ -21,15 +21,11 @@ python tools/unconditional_dit_noise_sweep.py /tmp/datasets/sage-10k/median_late
 CUDA_VISIBLE_DEVICES=0,1 python tools/surface_to_vae_latent.py --output-root /tmp/sage10k_surface_vae_latents_unit_box --batch-size 96 --sample-posterior --normalization unit_box --devices cuda:0 cuda:1 --only-save-latent-before-sampling --split-list data/sage-10k/full_list.json
 
 # dino commands
-CUDA_VISIBLE_DEVICES=0 python -u tools/cubemap_to_dinov3_features.py \
-  --panorama-root /tmp/datasets/sage-10k/panorama-scenes \
-  --output-root /tmp/datasets/sage-10k/dinov3_panorama_features \
-  --resolution 512 \
+CUDA_VISIBLE_DEVICES=0 python -u tools/panorama_to_dinov3_features.py \
+  /tmp/datasets/sage-10k/panorama-scenes \
+  /tmp/datasets/sage-10k/dinov3_panorama_features \
   --batch-size 64 \
-  --num-workers 8 \
-  --prefetch-factor 2 \
-  --inference-dtype bfloat16 \
-  --save-dtype float16
+  --num-workers 8
 
 pip install "transformers>=4.56.0" torchvision
 
@@ -66,3 +62,5 @@ for gpu in 0 1; do
     --output-root "$latent_output" \
     > "$latent_output/gpu${gpu}.log" 2>&1 &
 done
+
+pip install "transformers>=4.56.0" torchvision

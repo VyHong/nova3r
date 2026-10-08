@@ -256,7 +256,7 @@ class SiTBlock(nn.Module):
         if use_cross_attention:
             cond = self.norm_cond(cond)
             cross, _ = self.cross_attn(self.norm_cross(x), cond, cond, need_weights=False)
-            x = x + cross #* gate_cross.unsqueeze(1)
+            x = x + cross  # * gate_cross.unsqueeze(1)
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
@@ -379,8 +379,14 @@ class DiT(nn.Module):
         return super().load_state_dict(state_dict, strict=strict, **kwargs)
 
     def _load_from_state_dict(
-        self, state_dict, prefix, local_metadata, strict,
-        missing_keys, unexpected_keys, error_msgs,
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
     ):
         # Parent modules load children through this hook, bypassing the child's
         # load_state_dict override. Support both standalone and embedded DiTs.
@@ -392,8 +398,13 @@ class DiT(nn.Module):
             state_dict[weight_key] = torch.zeros_like(self.visible_geometry_embedder.weight)
             state_dict[bias_key] = torch.zeros_like(self.visible_geometry_embedder.bias)
         super()._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict,
-            missing_keys, unexpected_keys, error_msgs,
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
         )
 
     def initialize_weights(self):
@@ -473,9 +484,7 @@ class DiT(nn.Module):
         x = noised_latents
         visible_geometry_latents = kwargs.get("visible_geometry_latents")
         if visible_geometry_latents is not None:
-            visible_geometry_latents = visible_geometry_latents.to(
-                device=x.device, dtype=x.dtype
-            )
+            visible_geometry_latents = visible_geometry_latents.to(device=x.device, dtype=x.dtype)
             if visible_geometry_latents.shape[:2] != x.shape[:2]:
                 raise ValueError(
                     "visible_geometry_latents must have the same batch and token "
@@ -489,17 +498,12 @@ class DiT(nn.Module):
         elif t.dim() == 0:
             t = t.reshape(1).expand(x.shape[0])
 
-        if x.shape[1] != self.pos_embed.shape[1]:
-            raise ValueError(f"SiT expected {self.pos_embed.shape[1]} latent tokens, got {x.shape[1]}.")
-
         x = self.x_embedder(x) + self.pos_embed.to(dtype=x.dtype)  # (B, N, D)
 
         t = self.t_embedder(t)  # (B, D)
         use_conditioning = not self.unconditional_training
         cond = None
         if use_conditioning:
-            if decout is None or len(decout) == 0:
-                raise ValueError("Conditioned DiT requires condition tokens in decout.")
             cond = self._condition_tokens(decout[-1], kwargs.get("conditioning_latents", None), x)
         # As in DiT, adaLN is driven by the global conditioning vector. Here
         # that vector is time-only because token conditioning has its own

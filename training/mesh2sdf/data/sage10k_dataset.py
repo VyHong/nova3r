@@ -190,7 +190,15 @@ class SAGE10KSDFDataset(SDFDatasetMixin):
         if not feature_path.is_file():
             raise FileNotFoundError(f"Missing panorama image features: {feature_path}")
         checkpoint = torch.load(feature_path, map_location="cpu", weights_only=True)
-        features = checkpoint.get("patch_features") if isinstance(checkpoint, dict) else checkpoint
+        if not isinstance(checkpoint, dict):
+            raise ValueError(
+                f"Panorama feature file must include grid metadata: {feature_path}"
+            )
+        if checkpoint.get("projection") != "equirectangular":
+            raise ValueError(
+                f"Expected equirectangular panorama features in {feature_path}"
+            )
+        features = checkpoint.get("patch_features")
         features = self._validate_single_latent(
             features, feature_path, "panorama patch features"
         )
@@ -211,7 +219,9 @@ class SAGE10KSDFDataset(SDFDatasetMixin):
                 surface = self.load_surface_points(
                     rng,
                     random_surface=data["random_surface"],
-                    sharpedge_surface=data["sharp_surface"],
+                    sharpedge_surface=(
+                        data["sharp_surface"] if self.pc_sharpedge_size > 0 else None
+                    ),
                     **self.surface_rgb_kwargs(data),
                 )
 
@@ -228,6 +238,8 @@ class SAGE10KSDFDataset(SDFDatasetMixin):
                     sharpedge_label=data["sharp_near_label"],
                     **self.sdf_rgb_kwargs(data),
                 )
+
+        geo_points = self.add_exact_surface_points(rng, surface, geo_points)
 
         # The UDF points and panorama poses both use the exported glTF scene
         # coordinates, so image_w2c is already the complete geometry transform.
@@ -301,7 +313,12 @@ class SAGE10KSDFDataset(SDFDatasetMixin):
             )
             extrinsics.append(torch.from_numpy(image_extrinsics))
 
-        return images, extrinsics, intrinsics, first_image_extrinsics
+        return (
+            images,
+            extrinsics,
+            intrinsics,
+            first_image_extrinsics,
+        )
 
     def get_data(
         self,
@@ -328,7 +345,12 @@ class SAGE10KSDFDataset(SDFDatasetMixin):
         need_camera_transform = load_cameras or load_geometry
 
         anno = metadata[ids[0]]
-        images, extrinsics, intrinsics, first_image_extrinsics = self._load_views(
+        (
+            images,
+            extrinsics,
+            intrinsics,
+            first_image_extrinsics,
+        ) = self._load_views(
             anno,
             subseq_ids,
             load_images=load_images,

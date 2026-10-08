@@ -207,7 +207,7 @@ def main():
         log_every_n_steps=1,
         check_val_every_n_epoch=check_val_every_n_epoch,
         val_check_interval=val_check_interval,
-        #num_sanity_val_steps=0,
+        # num_sanity_val_steps=0,
         enable_progress_bar=False,
     )
 

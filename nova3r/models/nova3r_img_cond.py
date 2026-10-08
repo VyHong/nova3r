@@ -27,17 +27,35 @@ HEAD_TYPES = {
 FIRST_STAGE_TYPES = {"ShapeVAE": ShapeVAE}
 
 
-def _load_checkpoint_state_dict(path):
+def _load_checkpoint_state_dict(path, component=None):
     if path.endswith(".safetensors"):
-        state_dict = load_file(path)
+        checkpoint = load_file(path)
     else:
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-        if "state_dict" in checkpoint:
-            state_dict = checkpoint["state_dict"]
-        elif "model" in checkpoint:
-            state_dict = checkpoint["model"]
-        else:
-            state_dict = checkpoint
+
+    if (
+        component is not None
+        and isinstance(checkpoint, dict)
+        and component in checkpoint
+        and isinstance(checkpoint[component], dict)
+    ):
+        state_dict = checkpoint[component]
+    elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        state_dict = checkpoint["state_dict"]
+    elif isinstance(checkpoint, dict) and "model" in checkpoint:
+        state_dict = checkpoint["model"]
+    else:
+        state_dict = checkpoint
+
+    if component is not None:
+        prefix = f"{component}."
+        component_state = {
+            key[len(prefix) :]: value
+            for key, value in state_dict.items()
+            if key.startswith(prefix)
+        }
+        if component_state:
+            state_dict = component_state
 
     # remove model.
     if state_dict and all(key.startswith("model.") for key in state_dict):

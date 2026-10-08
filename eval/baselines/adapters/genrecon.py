@@ -12,7 +12,13 @@ import numpy as np
 from PIL import Image
 import torch
 
-from eval.baselines.common import SageSample, load_cameras, load_scene_points, sample_mesh_surface
+from eval.baselines.common import (
+    InputProjection,
+    SageSample,
+    load_input_cameras,
+    load_scene_points,
+    sample_mesh_surface,
+)
 
 
 # GenRecon builds SAGE rooms in Blender's Z-up frame. The evaluator's exported
@@ -72,6 +78,29 @@ def infer_sage_floorplan(surface_path: Path) -> tuple[float, float, float, float
     return 0.0, width, 0.0, length
 
 
+def infer_scannetpp_room_bounds(
+    surface_path: Path,
+) -> tuple[float, float, float, float, float, float]:
+    """Return ScanNet++ XYZ bounds in its native aligned, Z-up frame."""
+    points = load_scene_points(surface_path)
+    if not len(points):
+        raise ValueError(f"Cannot infer room bounds from an empty surface: {surface_path}")
+    lower = points.min(axis=0)
+    upper = points.max(axis=0)
+    if not np.isfinite(lower).all() or not np.isfinite(upper).all():
+        raise ValueError(f"Surface has non-finite bounds: {surface_path}")
+    if np.any(upper <= lower):
+        raise ValueError(f"Surface has degenerate bounds {lower.tolist()}..{upper.tolist()}: {surface_path}")
+    return (
+        float(lower[0]),
+        float(upper[0]),
+        float(lower[1]),
+        float(upper[1]),
+        float(lower[2]),
+        float(upper[2]),
+    )
+
+
 def normalize_intrinsics(intrinsics: np.ndarray, image_sizes: list[tuple[int, int]]) -> torch.Tensor:
     """Convert pixel-space OpenCV intrinsics to GenRecon's normalized convention."""
     normalized = torch.as_tensor(intrinsics, dtype=torch.float32).clone()
@@ -105,8 +134,17 @@ def _transform_points(points: torch.Tensor, transform: torch.Tensor) -> np.ndarr
 def chunk_transforms_to_eval_frame(
     original_to_chunk: list[torch.Tensor],
     chunk_to_original: list[torch.Tensor],
+    dataset_layout: str = "sage10k",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-    """Express GenRecon's Blender-room chunk transforms in evaluator coordinates."""
+    """Express chunk transforms in the selected dataset's evaluator frame."""
+    if dataset_layout == "scannetpp":
+        # ScanNet++ aligned scenes and GenRecon chunks are both native Z-up.
+        return (
+            [transform.float() for transform in original_to_chunk],
+            [transform.float() for transform in chunk_to_original],
+        )
+    if dataset_layout != "sage10k":
+        raise ValueError(f"Unsupported dataset layout: {dataset_layout!r}")
     eval_to_room = torch.linalg.inv(SAGE_ROOM_TO_EVAL)
     return (
         [transform.float() @ eval_to_room for transform in original_to_chunk],
@@ -115,7 +153,7 @@ def chunk_transforms_to_eval_frame(
 
 
 class GenReconAdapter:
-    """Run GenRecon on the six perspective faces belonging to one SAGE panorama."""
+    """Run GenRecon on posed cubemap faces or one spherical ERP observation."""
 
     def __init__(
         self,
@@ -133,6 +171,9 @@ class GenReconAdapter:
         occ_threshold: float = -1.0,
         boundary_width: int = 1,
         proj_batch_voxels: int | None = None,
+        input_projection: InputProjection = "cubemap",
+        erp_root: Path | None = None,
+        erp_fov: float = 95.0,
     ):
         repo = repo.resolve()
         stage_config_files = {
@@ -170,6 +211,7 @@ class GenReconAdapter:
         components_module = importlib.import_module("genrecon.datasets.components")
 
         self.SageGtChunker = chunks_module.SageGtChunker
+        self.ScannetGtChunker = chunks_module.ScannetGtChunker
         self.SelectedImages = images_module.SelectedImages
         self.chunk_visible_in_camera = components_module.chunk_visible_in_camera
         self.data_root = data_root.resolve()
@@ -182,6 +224,10 @@ class GenReconAdapter:
         self.seed = seed
         self.occ_threshold = occ_threshold
         self.boundary_width = boundary_width
+        self.input_projection = input_projection
+        self.erp_root = erp_root
+        self.erp_fov = erp_fov
+        self.last_prediction_mesh: tuple[np.ndarray, np.ndarray] | None = None
 
         stage_models = {
             "sparse_structure_flow_model": str(ss_ckpt.resolve()),
@@ -199,6 +245,43 @@ class GenReconAdapter:
 
     def _get_chunks(self, sample: SageSample, sample_work: Path):
         """Build GenRecon chunks from a layout JSON or the evaluation surface."""
+        if sample.dataset_layout == "scannetpp":
+            chunker = self.ScannetGtChunker()
+            x_min, x_max, y_min, y_max, z_floor, z_ceiling = infer_scannetpp_room_bounds(
+                sample.surface_path
+            )
+            delta_z = z_ceiling - z_floor
+            chunk_size = delta_z * chunker.chunk_size_factor
+            centers = chunker._define_centers(
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+                z_floor,
+                chunk_size,
+                sample_work,
+            )
+            m_o2c, m_c2o, relative_translations = chunker._get_transforms(
+                centers,
+                chunk_size,
+                sample_work,
+            )
+            source = {
+                "type": "scannetpp_evaluation_surface_bounds",
+                "surface_path": str(sample.surface_path),
+                "bounds": {
+                    "x_min": x_min,
+                    "x_max": x_max,
+                    "y_min": y_min,
+                    "y_max": y_max,
+                    "z_floor": z_floor,
+                    "z_ceiling": z_ceiling,
+                },
+                "chunk_size": chunk_size,
+                "coordinate_frame": "scannetpp_aligned_z_up",
+            }
+            return centers, m_o2c, m_c2o, relative_translations, source
+
         chunker = self.SageGtChunker()
         try:
             room_id = resolve_room_id(sample.scene, self.rooms_raw_root)
@@ -317,6 +400,7 @@ class GenReconAdapter:
         return selected, selected_indices
 
     def predict(self, sample: SageSample) -> np.ndarray:
+        self.last_prediction_mesh = None
         sample_seed = self.seed + sample.frame
         sample_work = self.work_root / f"{sample.scene}_{sample.frame:05d}"
         sample_work.mkdir(parents=True, exist_ok=True)
@@ -326,8 +410,18 @@ class GenReconAdapter:
             sample_work,
         )
         (sample_work / "chunk_source.json").write_text(json.dumps(chunk_source, indent=2))
-        m_o2c, m_c2o = chunk_transforms_to_eval_frame(m_o2c_room, m_c2o_room)
-        paths, intrinsics, extrinsics = load_cameras(sample, self.face_order)
+        m_o2c, m_c2o = chunk_transforms_to_eval_frame(
+            m_o2c_room,
+            m_c2o_room,
+            sample.dataset_layout,
+        )
+        paths, intrinsics, extrinsics, erp_path = load_input_cameras(
+            sample,
+            self.input_projection,
+            self.face_order,
+            erp_root=self.erp_root,
+            erp_fov=self.erp_fov,
+        )
         selected, selected_indices = self._select_images(
             paths,
             intrinsics,
@@ -336,16 +430,23 @@ class GenReconAdapter:
             m_c2o,
             sample_seed,
         )
-        (sample_work / "cubemap_selection.json").write_text(
-            json.dumps(
-                {
-                    "scene_faces": [str(path) for path in paths],
-                    "chunk_face_indices": selected_indices,
-                    "chunk_face_paths": [str(paths[index]) for index in selected_indices],
-                },
-                indent=2,
-            )
-        )
+        if self.input_projection == "cubemap":
+            selection_path = sample_work / "cubemap_selection.json"
+            selection = {
+                "scene_faces": [str(path) for path in paths],
+                "chunk_face_indices": selected_indices,
+                "chunk_face_paths": [str(paths[index]) for index in selected_indices],
+            }
+        else:
+            selection_path = sample_work / "erp_selection.json"
+            selection = {
+                "erp_path": str(erp_path),
+                "legacy_selection_pinhole_horizontal_fov": self.erp_fov,
+                "cond3d_camera_model": "equirectangular",
+                "chunk_image_indices": selected_indices,
+                "chunk_image_paths": [str(paths[index]) for index in selected_indices],
+            }
+        selection_path.write_text(json.dumps(selection, indent=2))
 
         slat_params = {"boundary_sensitive": True, "boundary_width": self.boundary_width}
         mesh, _ = self.pipeline.run(
@@ -358,11 +459,43 @@ class GenReconAdapter:
             tex_slat_sampler_params=slat_params,
             occ_threshold=self.occ_threshold,
             geometry_only=True,
+            cond3d_camera_model=(
+                "equirectangular" if self.input_projection == "erp" else "pinhole"
+            ),
         )
         vertices_world = _transform_points(mesh.vertices, m_c2o[0])
         faces = mesh.faces.detach().cpu().numpy()
+        # Keep the native triangle result on CPU so --save-predictions can
+        # export it after applying the same scale/shift used by the metrics.
+        self.last_prediction_mesh = (
+            vertices_world.astype(np.float32, copy=False),
+            faces.astype(np.int64, copy=False),
+        )
         points = sample_mesh_surface(vertices_world, faces, self.surface_points, sample_seed)
         del mesh
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
         return points
+
+    def save_aligned_mesh(
+        self,
+        path: Path,
+        alignment_scale: float,
+        alignment_shift: np.ndarray,
+    ) -> None:
+        """Export the most recent native GenRecon triangle mesh in eval space."""
+        if self.last_prediction_mesh is None:
+            raise RuntimeError("No GenRecon mesh is available; call predict() first")
+        import trimesh
+
+        vertices, faces = self.last_prediction_mesh
+        aligned_vertices = (
+            vertices * np.float32(alignment_scale)
+            + np.asarray(alignment_shift, dtype=np.float32).reshape(1, 3)
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        trimesh.Trimesh(
+            vertices=aligned_vertices,
+            faces=faces,
+            process=False,
+        ).export(path)
