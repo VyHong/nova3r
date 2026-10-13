@@ -6,12 +6,13 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from training.distributed_env import configure, validate
-from training.eval_freq import resolve_eval_freq
+from training.utils.distributed_env import configure, validate
+from training.utils.eval_freq import resolve_eval_freq
+from training.utils.checkpoint_callbacks import LatestCheckpoint
 
 configure()
 
-from demo_nova3r import load_model
+from scripts.inference.demo_nova3r import load_model
 from lightning_data import Nova3RDataModule
 from training.mesh2sdf.lightning_module import Mesh2SDFLightningModule
 from training.nova3r.lightning_module import Nova3RLightningModule
@@ -27,10 +28,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
     parser.add_argument(
         "--config",
-        default="checkpoints/dinov3/config_dinov3_panorama_visible_latent_conditioned_cube_spp_only.yaml",
+        default="checkpoints/dinov3/dit_L.yaml",
         help="Model and training config",
     )
     parser.add_argument("--device", default="gpu", help="Device (default: cuda)")
+    parser.add_argument("--ckpt", default=None, help="Full training checkpoint; overrides experiment.resume_checkpoint")
     parser.add_argument("--devices", type=int, default=None, help="Number of devices; defaults to experiment.gpus")
     parser.add_argument("--ddp-timeout-seconds", type=int, default=600)
     args = parser.parse_args()
@@ -57,6 +59,12 @@ def main():
     )
     module = eval(cfg.lightning_module)(cfg, model)
 
+    ckpt_path = args.ckpt or cfg.get("resume_checkpoint")
+    if not ckpt_path:
+        raise ValueError("Resume requires --ckpt or experiment.resume_checkpoint")
+    if not os.path.isfile(ckpt_path):
+        raise FileNotFoundError(f"Resume checkpoint not found: {ckpt_path}")
+
     os.makedirs(cfg.output_dir, exist_ok=True)
     logger = TensorBoardLogger(save_dir=cfg.output_dir, name="nova3r_training")
 
@@ -64,15 +72,12 @@ def main():
         dirpath=os.path.join(cfg.output_dir, "checkpoints"),
         filename="{epoch:02d}-{val_loss:.4f}",
         save_top_k=1,
+        save_weights_only=True,
         monitor="val_loss_epoch",
         mode="min",
     )
-    last_checkpoint = ModelCheckpoint(
+    last_checkpoint = LatestCheckpoint(
         dirpath=os.path.join(cfg.output_dir, "checkpoints"),
-        monitor="epoch",
-        mode="max",
-        save_top_k=1,
-        filename="last",
     )
     lr_monitor = LearningRateMonitor(logging_interval="step")
 
@@ -107,7 +112,7 @@ def main():
     trainer.fit(
         module,
         datamodule=datamodule,
-        ckpt_path=cfg.get("resume_checkpoint"),
+        ckpt_path=ckpt_path,
         weights_only=False,
     )
 

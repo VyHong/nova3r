@@ -8,7 +8,6 @@ import numpy as np
 from eval.baselines.common import (
     DEFAULT_ALIGNMENT_ITERATIONS,
     DEFAULT_ALIGNMENT_LR,
-    DEFAULT_EVAL_POINTS,
     DEFAULT_FSCORE_THRESHOLDS,
 )
 
@@ -110,7 +109,7 @@ class MeshOptions:
 
 @dataclass(frozen=True)
 class EvaluationOptions:
-    points: int
+    points: int | None
     fscore_thresholds: tuple[float, ...]
     alignment_iterations: int
     alignment_lr: float
@@ -119,7 +118,10 @@ class EvaluationOptions:
     @classmethod
     def from_config(cls, cfg):
         return cls(
-            points=int(cfg.get("test_eval_points", DEFAULT_EVAL_POINTS)),
+            points=(
+                None if cfg.get("test_eval_points") is None
+                else int(cfg["test_eval_points"])
+            ),
             fscore_thresholds=tuple(
                 float(value)
                 for value in cfg.get(

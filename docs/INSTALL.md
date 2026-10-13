@@ -78,5 +78,5 @@ bash scripts/download_checkpoints.sh
 ### 8. Verify
 
 ```bash
-python -c "from demo_nova3r import predict; print('OK')"
+python -c "from scripts.inference.demo_nova3r import predict; print('OK')"
 ```

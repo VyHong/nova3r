@@ -7,7 +7,8 @@
 set -uo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-renderer="$script_dir/render_panoramas.py"
+repo_root=$(cd -- "$script_dir/../../../.." && pwd)
+renderer="$repo_root/scripts/data/sage10k/rendering/render_panoramas.py"
 
 input_dir=""
 output_dir=""

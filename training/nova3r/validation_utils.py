@@ -1,7 +1,7 @@
 import sys
 import os
 
-from demo_nova3r import render_360_video, save_pointcloud
+from scripts.inference.demo_nova3r import render_360_video, save_pointcloud
 from eval.mv_recon.metric import scale_shift_alignment_chamfer
 from nova3r.inference import get_all_pts3d, inference_nova3r
 

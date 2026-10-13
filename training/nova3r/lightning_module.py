@@ -11,7 +11,7 @@ from training.nova3r.validation_utils import (
 )
 from nova3r.losses import L21, FMVelocity, Pts3D_Regr3D_CD_V4, ReconstructionLoss
 from eval.mv_recon.metric import SSI3DScore_Scene_Multi
-from training.module_setup import OptimizerOptions, freeze_layers
+from training.utils.module_setup import OptimizerOptions, freeze_layers
 
 
 class Nova3RLightningModule(pl.LightningModule):

@@ -5,7 +5,8 @@ runner owns dataset loading, deterministic point sampling, directional Chamfer
 metrics, and result files; adapters only turn one sample into world-space XYZ.
 
 DA3 uses all six SAGE-10K cubemap faces with their known cameras. It follows the
-raw preprocessing and model-forward path used by `tools/cubemap_to_vae_latent.py`,
+raw preprocessing and model-forward path used by
+`scripts/preprocessing/latents/cubemap_to_vae_latent.py`,
 then unprojects predicted z-depth through the processed input intrinsics and
 input world-to-camera extrinsics. This intentionally bypasses DA3's high-level
 postprocessing, which applies Umeyama pose/scale alignment. Ground truth defaults

@@ -19,6 +19,44 @@ from nova3r.flow_matching.path import AffineProbPath
 from nova3r.flow_matching.solver import ODESolver
 
 
+def make_equirectangular_plucker_grid(image_size, patch_size):
+    """Return patch-averaged camera-local ``(o x d, d)`` panorama rays."""
+    image_height, image_width = (int(value) for value in image_size)
+    patch_size = int(patch_size)
+    if min(image_height, image_width, patch_size) < 1:
+        raise ValueError("Panorama image and patch dimensions must be positive")
+    if image_height % patch_size or image_width % patch_size:
+        raise ValueError(
+            f"Panorama size {(image_height, image_width)} is not divisible by "
+            f"patch size {patch_size}"
+        )
+
+    u = (torch.arange(image_width, dtype=torch.float32) + 0.5) / image_width
+    v = (torch.arange(image_height, dtype=torch.float32) + 0.5) / image_height
+    latitude, longitude = torch.meshgrid(
+        (v - 0.5) * torch.pi,
+        (u - 0.5) * (2.0 * torch.pi),
+        indexing="ij",
+    )
+    cos_latitude = torch.cos(latitude)
+    directions = torch.stack(
+        (
+            torch.sin(longitude) * cos_latitude,
+            torch.sin(latitude),
+            torch.cos(longitude) * cos_latitude,
+        ),
+        dim=0,
+    )
+    # Camera-local panorama rays have a shared zero origin, so o x d is zero.
+    pixel_plucker = torch.cat((torch.zeros_like(directions), directions), dim=0)
+    pooled = F.avg_pool2d(
+        pixel_plucker.unsqueeze(0),
+        kernel_size=patch_size,
+        stride=patch_size,
+    )
+    return pooled.squeeze(0).permute(1, 2, 0).reshape(-1, 6).contiguous()
+
+
 def resolve_precomputed_gt_latents(
     batch,
     *,
@@ -286,7 +324,8 @@ class DiT(nn.Module):
     Relative to standard DiT, ``x_embedder`` is a Linear layer over each
     latent vector and every block has cross-attention over condition tokens.
     A visible-geometry latent can also be injected as a zero-initialized
-    residual into the noised latent before that input embedding.
+    residual into the embedded noised latent. Camera-local Plucker rays are
+    injected into the corresponding panorama condition tokens.
     There is deliberately no patchify/unpatchify path.
     """
 
@@ -311,6 +350,10 @@ class DiT(nn.Module):
         timestep_sigma=0.8,
         timestep_p_zero=0.1,
         visible_geometry_dim=None,
+        plucker_ray_dim=6,
+        panorama_input_size=(512, 1024),
+        panorama_patch_size=16,
+        use_panorama_plucker=False,
     ):
         super().__init__()
 
@@ -330,7 +373,30 @@ class DiT(nn.Module):
 
         self.x_embedder = nn.Linear(input_size, hidden_size)
         visible_geometry_dim = input_size if visible_geometry_dim is None else visible_geometry_dim
-        self.visible_geometry_embedder = nn.Linear(visible_geometry_dim, input_size)
+        self.visible_geometry_embedder = nn.Linear(visible_geometry_dim, hidden_size)
+        self.plucker_embedder = nn.Linear(plucker_ray_dim, cond_dim)
+        self.use_panorama_plucker = bool(use_panorama_plucker)
+        if len(panorama_input_size) != 2:
+            raise ValueError(
+                "panorama_input_size must contain [height, width], got "
+                f"{panorama_input_size!r}"
+            )
+        self.panorama_input_size = tuple(int(value) for value in panorama_input_size)
+        self.panorama_patch_size = int(panorama_patch_size)
+        panorama_plucker_rays = make_equirectangular_plucker_grid(
+            self.panorama_input_size,
+            self.panorama_patch_size,
+        )
+        if panorama_plucker_rays.shape[-1] != plucker_ray_dim:
+            raise ValueError(
+                f"Generated Plucker dimension is {panorama_plucker_rays.shape[-1]}, "
+                f"but plucker_ray_dim={plucker_ray_dim}"
+            )
+        self.register_buffer(
+            "panorama_plucker_rays",
+            panorama_plucker_rays.unsqueeze(0),
+            persistent=False,
+        )
         self.latent_cond_embedder = nn.Sequential(
             nn.LayerNorm(latent_cond_dim),
             nn.Linear(latent_cond_dim, hidden_size),
@@ -363,6 +429,7 @@ class DiT(nn.Module):
         """Keep conditional checkpoint keys without training the unused branch."""
         self.y_embedder.requires_grad_(False)
         self.latent_cond_embedder.requires_grad_(False)
+        self.plucker_embedder.requires_grad_(False)
         for block in self.blocks:
             block.norm_cond.requires_grad_(False)
             block.cross_attn.requires_grad_(False)
@@ -392,11 +459,38 @@ class DiT(nn.Module):
         # load_state_dict override. Support both standalone and embedded DiTs.
         weight_key = prefix + "visible_geometry_embedder.weight"
         bias_key = prefix + "visible_geometry_embedder.bias"
+        x_weight_key = prefix + "x_embedder.weight"
         if weight_key not in state_dict and bias_key not in state_dict:
             # Legacy checkpoints have no visible-geometry branch. Reset it to
             # zero even when loading into a previously trained model.
             state_dict[weight_key] = torch.zeros_like(self.visible_geometry_embedder.weight)
             state_dict[bias_key] = torch.zeros_like(self.visible_geometry_embedder.bias)
+        elif state_dict[weight_key].shape != self.visible_geometry_embedder.weight.shape:
+            # Older conditioned checkpoints projected visible geometry into
+            # input_size and added it before x_embedder. Fold that projection
+            # through the checkpoint's x_embedder to preserve the exact
+            # function while migrating it to the post-embedding residual:
+            # W_x(x + W_v v + b_v) == W_x x + (W_x W_v)v + W_x b_v + b_x.
+            old_weight = state_dict[weight_key]
+            old_bias = state_dict[bias_key]
+            x_weight = state_dict[x_weight_key]
+            if old_weight.shape[0] != x_weight.shape[1]:
+                error_msgs.append(
+                    f"Cannot migrate legacy {weight_key} shape {tuple(old_weight.shape)} "
+                    f"through {x_weight_key} shape {tuple(x_weight.shape)}"
+                )
+            else:
+                state_dict[weight_key] = x_weight @ old_weight
+                state_dict[bias_key] = x_weight @ old_bias
+
+        for name, parameter in (
+            ("plucker_embedder.weight", self.plucker_embedder.weight),
+            ("plucker_embedder.bias", self.plucker_embedder.bias),
+        ):
+            key = prefix + name
+            if key not in state_dict:
+                # Zero makes old checkpoints exactly ignore the new condition.
+                state_dict[key] = torch.zeros_like(parameter)
         super()._load_from_state_dict(
             state_dict,
             prefix,
@@ -440,6 +534,8 @@ class DiT(nn.Module):
         # learns a useful residual.
         nn.init.constant_(self.visible_geometry_embedder.weight, 0)
         nn.init.constant_(self.visible_geometry_embedder.bias, 0)
+        nn.init.constant_(self.plucker_embedder.weight, 0)
+        nn.init.constant_(self.plucker_embedder.bias, 0)
 
     def _condition_tokens(self, image_tokens, conditioning_latents, x):
         image_tokens = image_tokens.to(device=x.device, dtype=x.dtype)
@@ -449,6 +545,22 @@ class DiT(nn.Module):
             image_tokens = image_tokens[:, None, :]
         if image_tokens.dim() != 3:
             raise ValueError("condition tokens must have shape [B, M, C]")
+        if self.use_panorama_plucker:
+            rays = self.panorama_plucker_rays.to(
+                device=image_tokens.device,
+                dtype=image_tokens.dtype,
+            )
+            tokens_per_panorama = rays.shape[1]
+            if image_tokens.shape[1] % tokens_per_panorama:
+                raise ValueError(
+                    f"Condition token count {image_tokens.shape[1]} is not a multiple "
+                    f"of the panorama Plucker grid size {tokens_per_panorama} "
+                    f"({self.panorama_input_size}, patch {self.panorama_patch_size})"
+                )
+            num_panoramas = image_tokens.shape[1] // tokens_per_panorama
+            if num_panoramas != 1:
+                rays = rays.repeat(1, num_panoramas, 1)
+            image_tokens = image_tokens + self.plucker_embedder(rays)
         cond = self.y_embedder(image_tokens)
         if conditioning_latents is None:
             return cond
@@ -485,20 +597,16 @@ class DiT(nn.Module):
         visible_geometry_latents = kwargs.get("visible_geometry_latents")
         if visible_geometry_latents is not None:
             visible_geometry_latents = visible_geometry_latents.to(device=x.device, dtype=x.dtype)
-            if visible_geometry_latents.shape[:2] != x.shape[:2]:
-                raise ValueError(
-                    "visible_geometry_latents must have the same batch and token "
-                    f"dimensions as noised_latents; got {tuple(visible_geometry_latents.shape)} "
-                    f"and {tuple(x.shape)}"
-                )
-            x = x + self.visible_geometry_embedder(visible_geometry_latents)
         t = timestep
         if t.dim() == 2:
             t = t[:, 0]
         elif t.dim() == 0:
             t = t.reshape(1).expand(x.shape[0])
 
-        x = self.x_embedder(x) + self.pos_embed.to(dtype=x.dtype)  # (B, N, D)
+        x = self.x_embedder(x)
+        if visible_geometry_latents is not None:
+            x = x + self.visible_geometry_embedder(visible_geometry_latents)
+        x = x + self.pos_embed.to(dtype=x.dtype)  # (B, N, D)
 
         t = self.t_embedder(t)  # (B, D)
         use_conditioning = not self.unconditional_training

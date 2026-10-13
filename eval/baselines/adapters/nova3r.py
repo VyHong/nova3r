@@ -89,7 +89,7 @@ class Nova3RAdapter:
         # Import through the repository's supported loader. FP32 parameters plus
         # inference autocast matches the official release more closely than
         # permanently converting checkpoint weights to BF16.
-        from demo_nova3r import load_model
+        from scripts.inference.demo_nova3r import load_model
 
         self.device = torch.device(device)
         self.model, self.cfg = load_model(

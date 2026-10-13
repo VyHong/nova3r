@@ -7,7 +7,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from training.eval_freq import resolve_eval_freq
+from training.utils.eval_freq import resolve_eval_freq
+from training.utils.checkpoint_callbacks import LatestCheckpoint
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -66,7 +67,7 @@ def run_one_lr(args, base_data_cfg, lr):
     import pytorch_lightning as pl
     from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 
-    from demo_nova3r import load_model
+    from scripts.inference.demo_nova3r import load_model
     from training.lightning_data import Nova3RDataModule
     from training.mesh2sdf.lightning_module import Mesh2SDFLightningModule
     from training.nova3r.lightning_module import Nova3RLightningModule
@@ -110,15 +111,12 @@ def run_one_lr(args, base_data_cfg, lr):
             dirpath=os.path.join(cfg.output_dir, "checkpoints"),
             filename="{epoch:02d}-{val_loss:.4f}",
             save_top_k=1,
+            save_weights_only=True,
             monitor="val_loss_epoch",
             mode="min",
         ),
-        ModelCheckpoint(
+        LatestCheckpoint(
             dirpath=os.path.join(cfg.output_dir, "checkpoints"),
-            monitor="epoch",
-            mode="max",
-            save_top_k=1,
-            filename="last",
         ),
         LearningRateMonitor(logging_interval="step"),
     ]

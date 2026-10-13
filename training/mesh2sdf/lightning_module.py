@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchmetrics import MeanMetric, SumMetric
-from demo_nova3r import render_360_video
+from scripts.inference.demo_nova3r import render_360_video
 from nova3r.heads.hunyuan_model.autoencoders.model import DiagonalGaussianDistribution
 from nova3r.losses import L21, FMVelocity, Pts3D_Regr3D_CD_V4, ReconstructionLoss, SDFReconstructionLoss, MSE
 from eval.baselines.common import (
@@ -37,11 +37,16 @@ from training.mesh2sdf.module_options import (
     MeshOptions,
     ValidationOptions,
 )
-from training.module_setup import (
+from training.utils.module_setup import (
     FlowTrainingOptions,
     OptimizerOptions,
     build_frozen_shape_decoder,
     freeze_layers,
+)
+from training.utils.checkpoint_utils import (
+    cast_adam_moments,
+    remove_frozen_vae_state,
+    restore_frozen_vae_state,
 )
 
 
@@ -400,16 +405,16 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                             val_batch_to_log,
                             sample_idx,
                         )
-                        pred = sample_mesh_surface(
-                            np.asarray(mesh.vertices) * world_scale,
-                            mesh.faces,
-                            self.evaluation_options.points,
-                            seed,
-                        )
                         target = val_batch_to_log["surface"][sample_idx, :, :3].detach().float().cpu().numpy()
                         target = sample_points(
                             target * world_scale,
                             self.evaluation_options.points,
+                            seed,
+                        )
+                        pred = sample_mesh_surface(
+                            np.asarray(mesh.vertices) * world_scale,
+                            mesh.faces,
+                            self.evaluation_options.points or len(target),
                             seed,
                         )
                         with torch.autocast(
@@ -828,16 +833,16 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                         traceback.print_exc()
 
                 seed = self._test_sample_seed(sample_name)
-                pred = sample_mesh_surface(
-                    world_mesh.vertices,
-                    world_mesh.faces,
-                    self.evaluation_options.points,
-                    seed,
-                )
                 target = batch["surface"][sample_idx, :, :3].detach().float().cpu().numpy()
                 target = sample_points(
                     target * world_scale,
                     self.evaluation_options.points,
+                    seed,
+                )
+                pred = sample_mesh_surface(
+                    world_mesh.vertices,
+                    world_mesh.faces,
+                    self.evaluation_options.points or len(target),
                     seed,
                 )
                 _, evaluation = evaluate_point_clouds(
@@ -904,6 +909,25 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         if not self.logger:
             return "logs"
         return getattr(self.logger, "log_dir", self.logger.save_dir)
+
+    def on_save_checkpoint(self, checkpoint):
+        # The frozen ShapeVAE is loaded from cfg.vae_ckpt during construction,
+        # so embedding a second copy in every checkpoint is redundant.
+        remove_frozen_vae_state(checkpoint)
+
+        # Adam's moment buffers dominate resumable checkpoint size. Store only
+        # those buffers in BF16; model weights and optimizer step counters keep
+        # their original precision.
+        cast_adam_moments(checkpoint, torch.bfloat16)
+
+    def on_load_checkpoint(self, checkpoint):
+        # Lightning loads the module strictly after this hook. Reinsert the VAE
+        # that build_frozen_shape_decoder already loaded from cfg.vae_ckpt.
+        restore_frozen_vae_state(checkpoint, self.state_dict())
+
+        # AdamW expects its running statistics in parameter precision. Restore
+        # the lossy on-disk BF16 representation to FP32 before optimizer load.
+        cast_adam_moments(checkpoint, torch.float32)
 
     def configure_optimizers(self):
         options = self.optimizer_options

@@ -63,15 +63,21 @@ RUN bash -c "
   mount_dataset /mnt/projects/theses/vyhong/scannetpp/vis_latent.zip /tmp/datasets/scannetpp -o precache
   mount_dataset /mnt/home/vyhong/projects/nova3r/datasets/scannetpp/cube_trans_latent.zip /tmp/datasets/scannetpp -o precache
 
-  mount_dataset /mnt/projects/theses/vyhong/sage-10k/udf_colored.zip /tmp/datasets/sage-10k -o precache
-  mount_dataset /mnt/home/vyhong/projects/nova3r/datasets/sage-10k/cubemap_data.zip /tmp/datasets/sage-10k -o notrim -o precache
-  mount_dataset /mnt/projects/theses/vyhong/sage-10k/panorama_latents.zip /tmp/datasets/sage-10k -o precache
-  mount_dataset /mnt/home/vyhong/projects/nova3r/datasets/sage-10k/visible_latents.zip /tmp/datasets/sage-10k -o precache
-  mount_dataset /mnt/projects/theses/vyhong/sage-10k/gt_latents.zip /tmp/datasets/sage-10k -o precache
+  mount_dataset /mnt/projects/theses/vyhong/sage-10k/udf.zip /tmp/datasets/sage-10k
+  mount_dataset /mnt/home/vyhong/projects/nova3r/datasets/sage-10k/cubemap_data.zip /tmp/datasets/sage-10k -o notrim
+  mount_dataset /mnt/projects/theses/vyhong/sage-10k/pano_features.zip /tmp/datasets/sage-10k
+  mount_dataset /mnt/home/vyhong/projects/nova3r/datasets/sage-10k/visible_latents.zip /tmp/datasets/sage-10k
+  mount_dataset /mnt/projects/theses/vyhong/sage-10k/latents.zip /tmp/datasets/sage-10k
+
+  mount_dataset /mnt/projects/theses/vyhong/3dfront/panoramas.zip /tmp/datasets/3dfront
+  mount_dataset /mnt/projects/theses/vyhong/3dfront/udf.zip /tmp/datasets/3dfront
+  mount_dataset /mnt/projects/theses/vyhong/3dfront/gt_latents.zip /tmp/datasets/3dfront
+  mount_dataset /mnt/projects/theses/vyhong/3dfront/panorama_latents.zip /tmp/datasets/3dfront
+  mount_dataset /mnt/projects/theses/vyhong/3dfront/visible_latents.zip /tmp/datasets/3dfront
 
   # Keep the allocated GPU active while mount-zip populates its caches. This
   # process is stopped before training claims the GPU.
-  python -u tools/gpu_keepalive.py --memory-fraction 0.5 &
+  python -u scripts/training/gpu_keepalive.py --memory-fraction 0.5 &
   keepalive_pid=\$!
   stop_gpu_keepalive() {
     if kill -0 "\$keepalive_pid" 2>/dev/null; then
@@ -100,7 +106,7 @@ RUN bash -c "
   export PYTHONPATH=\${PYTHONPATH}:/mnt/home/vyhong/projects/nova3r
   
   echo 'Running training...'
-  python -u training/change_train.py
+  python -u training/resume_train.py
 "
 training_status=$?
 

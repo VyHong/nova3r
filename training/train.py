@@ -12,12 +12,13 @@ except ValueError:
     pass
 sys.path.insert(0, PROJECT_ROOT)
 
-from training.distributed_env import configure, validate
-from training.eval_freq import resolve_eval_freq
+from training.utils.distributed_env import configure, validate
+from training.utils.eval_freq import resolve_eval_freq
+from training.utils.checkpoint_callbacks import LatestCheckpoint
 
 configure()
 
-from demo_nova3r import load_model
+from scripts.inference.demo_nova3r import load_model
 from lightning_data import Nova3RDataModule
 from training.mesh2sdf.lightning_module import Mesh2SDFLightningModule
 from training.nova3r.lightning_module import Nova3RLightningModule
@@ -110,7 +111,9 @@ class BenchmarkReporter(pl.Callback):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
-    parser.add_argument("--config", default="checkpoints/hunyuan/.hydra/config.yaml", help="Model and training config")
+    parser.add_argument(
+        "--config", default="checkpoints/hunyuan_dit/config_hunyuandit_panorama_visible_latent.yaml", help="Model and training config"
+    )
     parser.add_argument("--device", default="gpu", help="Device (default: cuda)")
     parser.add_argument("--devices", type=int, default=None, help="Number of devices; defaults to experiment.gpus")
     parser.add_argument("--ddp-timeout-seconds", type=int, default=1800)
@@ -167,15 +170,12 @@ def main():
         dirpath=os.path.join(cfg.output_dir, "checkpoints"),
         filename="{epoch:02d}-{val_loss:.4f}",
         save_top_k=1,
+        save_weights_only=True,
         monitor="val_loss_epoch",
         mode="min",
     )
-    last_checkpoint = ModelCheckpoint(
+    last_checkpoint = LatestCheckpoint(
         dirpath=os.path.join(cfg.output_dir, "checkpoints"),
-        monitor="epoch",
-        mode="max",
-        save_top_k=1,
-        filename="last",
     )
     lr_monitor = LearningRateMonitor(logging_interval="step")
     callbacks = [checkpoint_callback, last_checkpoint, lr_monitor]
@@ -207,7 +207,7 @@ def main():
         log_every_n_steps=1,
         check_val_every_n_epoch=check_val_every_n_epoch,
         val_check_interval=val_check_interval,
-        # num_sanity_val_steps=0,
+        num_sanity_val_steps=0,
         enable_progress_bar=False,
     )
 

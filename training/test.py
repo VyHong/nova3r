@@ -6,7 +6,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from training.distributed_env import configure, validate
+from training.utils.distributed_env import configure, validate
 
 CONFIGURED_DEVICES = configure()
 
@@ -18,11 +18,12 @@ import torch
 from training.nova3r.lightning_module import Nova3RLightningModule
 from training.mesh2sdf.lightning_module import Mesh2SDFLightningModule
 from lightning_data import Nova3RDataModule
-from demo_nova3r import load_model
+from scripts.inference.demo_nova3r import load_model
 
 def parse_args():
     parser = argparse.ArgumentParser(description="NOVA3R: 3D reconstruction from images")
     parser.add_argument("--config", default="checkpoints/da3_large_hunyuan_mini/.hydra/config_agg.yaml", help="Model and evaluation config")
+    parser.add_argument("--ckpt", default=None, help="Checkpoint path; overrides experiment.resume_checkpoint")
     parser.add_argument("--device", default="cuda", help="Device (default: cuda)")
     parser.add_argument("--devices", type=int, default=CONFIGURED_DEVICES, help="Number of GPUs; defaults to experiment.gpus")
     parser.add_argument("--ddp-timeout-seconds", type=int, default=1800)
@@ -50,7 +51,7 @@ def main():
         model_device = f"cuda:{local_rank}"
     else:
         model_device = args.device
-    model, cfg = load_model(device=model_device, config_path=args.config, stage="test")
+    model, cfg = load_model(ckpt_path=args.ckpt, device=model_device, config_path=args.config, stage="test")
     if args.mesh_method is not None:
         cfg.mesh_method = args.mesh_method
     if args.mesh_mind_resolution is not None:
