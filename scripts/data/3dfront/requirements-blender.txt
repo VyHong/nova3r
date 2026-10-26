@@ -1,0 +1,9 @@
+# Install from the repository root; bpy/imageio/numpy come from requirements-panorama.txt.
+-e third_party/BlenderProc
+# BlenderProc's external-bpy mode skips its usual runtime dependency installer.
+opencv-python-headless>=4.8
+GitPython>=3.1.43
+scikit-image>=0.22
+python-dateutil>=2.8
+pypng>=0.20220715.0
+rich>=13

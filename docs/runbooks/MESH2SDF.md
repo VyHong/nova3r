@@ -26,9 +26,9 @@ conda run --no-capture-output -n nova3r python scripts/preprocessing/mesh2sdf/pr
 
 conda run --no-capture-output -n nova3r \
   python scripts/preprocessing/mesh2sdf/process_3dfront.py \
-  --data_root /tmp/datasets/3dfront/3D-FRONT-SCENE \
-  --output_root /tmp/datasets/3dfront/3D-FRONT-SCENE-UDF \
-  --room_id_json 3D-Front/midi_room_ids.json 3D-Front/valid_room_ids.json \
+  --data_root artifacts/3dfront_2100 \
+  --output_root /tmp/datasets/3dfront/udf \
+  --room_id_json artifacts/3dfront_2100_manifest.json \
   --workers 2 \
   --udf-only
 ```

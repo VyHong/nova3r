@@ -38,6 +38,9 @@ def parse_args():
     parser.add_argument("--normal-k", type=int, default=30)
     parser.add_argument("--sharp-k", type=int, default=16)
     parser.add_argument("--sharp-threshold", type=float, default=0.985)
+    parser.add_argument("--mesh-method", choices=("latent2mesh", "mesh_udf"), default="latent2mesh")
+    parser.add_argument("--mesh-udf-resolution", type=int, default=1024)
+    parser.add_argument("--mesh-udf-surface-threshold", type=float, default=0.006)
     parser.add_argument("--octree-resolution", type=int, default=256)
     parser.add_argument("--num-chunks", type=int, default=40000)
     parser.add_argument(
@@ -52,6 +55,15 @@ def parse_args():
     parser.add_argument("--frames", type=int, default=180)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--no-video", action="store_true")
+    parser.add_argument(
+        "--original-hunyuan",
+        action="store_true",
+        help=(
+            "Use the original Hunyuan signed-field meshing path and its "
+            "inference defaults (box_v=1.01, resolution=384, "
+            "mc_level=0.0, num_chunks=8000)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -126,7 +138,7 @@ def read_pointcloud(path, normal_k):
             normals = np.asarray(array[:, 3:6], dtype=np.float32)
     elif suffix == ".npz":
         data = np.load(path)
-        key = next((key for key in ("points", "pointcloud", "pts", "xyz", "vertices", "surface") if key in data), None)
+        key = next((key for key in ("points", "pointcloud", "pts", "xyz", "vertices", "surface", "random_surface") if key in data), None)
         if key is None:
             raise ValueError(f"Could not find a point array in {path}; keys: {list(data.keys())}")
         array = np.asarray(data[key])
@@ -234,7 +246,14 @@ def main():
         raise FileNotFoundError(f"Config not found: {config_path}; pass --config explicitly")
 
     params, training_normalization = find_shape_vae_config(config_path)
-    model = ShapeVAE(**params)
+    model_cls = ShapeVAE
+    if args.original_hunyuan:
+        from nova3r.models.hy3dshape.original_autoencoder import (
+            OriginalHunyuanShapeVAE,
+        )
+
+        model_cls = OriginalHunyuanShapeVAE
+    model = model_cls(**params)
     selected = select_vae_state(checkpoint_state(args.checkpoint), model)
     missing, unexpected = model.load_state_dict(selected, strict=False)
     if unexpected:
@@ -268,35 +287,64 @@ def main():
     surface = surface.unsqueeze(0).to(dtype=dtype)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    lower, upper = points.amin(0), points.amax(0)
-    padding = ((upper - lower) * 0.1).clamp_min(1e-3)
-    bounds = torch.cat((lower - padding, upper + padding)).float().cpu().numpy()
-    if args.mc_level == "auto":
-        voxel_size = float(np.max(bounds[3:] - bounds[:3])) / max(args.octree_resolution - 1, 1)
-        mc_level = float(np.clip(voxel_size * 128.0, 1e-4, 1.0))
+    if args.original_hunyuan:
+        bounds = 1.01
+        octree_resolution = 384
+        num_chunks = 8000
+        mc_level = 0.0
     else:
-        mc_level = float(args.mc_level)
-    print(f"Using mesh bounds {bounds.tolist()} and mc_level={mc_level:.6g}")
+        lower, upper = points.amin(0), points.amax(0)
+        padding = ((upper - lower) * 0.1).clamp_min(1e-3)
+        bounds = torch.cat((lower - padding, upper + padding)).float().cpu().numpy()
+        octree_resolution = args.octree_resolution
+        num_chunks = args.num_chunks
+        if args.mc_level == "auto":
+            voxel_size = float(np.max(bounds[3:] - bounds[:3])) / max(octree_resolution - 1, 1)
+            mc_level = float(np.clip(voxel_size * 128.0, 1e-4, 1.0))
+        else:
+            mc_level = float(args.mc_level)
+    bounds_display = bounds.tolist() if hasattr(bounds, "tolist") else bounds
+    print(f"Using mesh bounds {bounds_display} and mc_level={mc_level:.6g}")
 
     with torch.inference_mode():
         encoded = model.encode(surface, sample_posterior=False)
         latent_path = args.output_dir / "latent.pt"
         torch.save(encoded.detach().cpu(), latent_path)
         decoded = model.decode(encoded)
-        outputs = model.latents2mesh(
-            decoded,
-            output_type="trimesh",
-            bounds=bounds,
-            mc_level=mc_level,
-            num_chunks=args.num_chunks,
-            octree_resolution=args.octree_resolution,
-            mc_algo="mc",
-            enable_pbar=True,
-        )
+        if args.mesh_method == "latent2mesh":
+            outputs = model.latents2mesh(
+                decoded,
+                output_type="trimesh",
+                bounds=bounds,
+                mc_level=mc_level,
+                num_chunks=num_chunks,
+                octree_resolution=octree_resolution,
+                mc_algo="mc",
+                enable_pbar=True,
+            )
     print(f"Saved latent: {latent_path}")
 
-    meshes = export_to_trimesh(outputs)
-    mesh = meshes[0] if isinstance(meshes, list) else meshes
+    if args.mesh_method == "mesh_udf":
+        from training.mesh2sdf.lightning_module import UDFGeoDecoderAdapter
+        from training.mesh2sdf.tools.mesh_udf.mesh_udf import get_mesh_udf_fast
+
+        # MeshUDF computes spatial gradients, requiring ordinary FP32 tensors.
+        with torch.inference_mode(False), torch.enable_grad():
+            model.float().requires_grad_(False)
+            decoded = decoded.float().detach().clone()
+            adapter = UDFGeoDecoderAdapter(model.geo_decoder, decoded, bounds)
+            grid_bounds, grid_resolution = adapter.mesh_udf_grid(args.mesh_udf_resolution)
+            _, _, mesh = get_mesh_udf_fast(
+                adapter, None, N_MC=grid_resolution, gradient=False,
+                vertex_max_batch=65536,
+                surface_threshold=args.mesh_udf_surface_threshold,
+                grid_bounds=grid_bounds, device=device,
+            )
+            if mesh is not None:
+                mesh = adapter.mesh_to_world(mesh)
+    else:
+        meshes = export_to_trimesh(outputs)
+        mesh = meshes[0] if isinstance(meshes, list) else meshes
     if mesh is None or not len(mesh.vertices) or not len(mesh.faces):
         raise RuntimeError("The VAE decoder did not produce a surface")
     mesh = colorize_trimesh_vertices(mesh, model, decoded)

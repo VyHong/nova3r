@@ -19,7 +19,7 @@ DEFAULT_FSCORE_THRESHOLDS = (0.1, 0.05, 0.02)
 DEFAULT_ALIGNMENT_ITERATIONS = 300
 DEFAULT_ALIGNMENT_LR = 0.1
 InputProjection = Literal["cubemap", "erp"]
-DatasetLayout = Literal["sage10k", "scannetpp"]
+DatasetLayout = Literal["sage10k", "scannetpp", "3dfront"]
 SCANNETPP_SCANNER_TO_OPENCV = np.asarray(
     [[0, 1, 0, 0], [0, 0, -1, 0], [-1, 0, 0, 0], [0, 0, 0, 1]],
     dtype=np.float32,
@@ -37,15 +37,24 @@ class SageSample:
     dataset_layout: DatasetLayout = "sage10k"
 
 
-def read_manifest(path: Path) -> list[tuple[str, int]]:
+def read_manifest(
+    path: Path,
+    dataset_layout: DatasetLayout = "sage10k",
+) -> list[tuple[str, int]]:
     entries = json.loads(path.read_text())
     if not isinstance(entries, list):
         raise ValueError(f"Manifest must contain a JSON list: {path}")
     parsed = []
     for entry in entries:
         try:
-            scene, frame = entry.split()
-            parsed.append((scene, int(frame)))
+            if dataset_layout == "3dfront":
+                from nova3r.utils.three_d_front import parse_panorama_sample
+
+                sample = parse_panorama_sample(entry)
+                parsed.append((sample.room, sample.frame))
+            else:
+                scene, frame = entry.split()
+                parsed.append((scene, int(frame)))
         except (AttributeError, TypeError, ValueError) as exc:
             raise ValueError(f"Invalid manifest entry {entry!r} in {path}") from exc
     return parsed
@@ -58,13 +67,34 @@ def resolve_sample(
     pose_root: Path,
     scene_root: Path,
     dataset_layout: DatasetLayout = "sage10k",
+    cubemap_fov: float = 95.0,
 ) -> SageSample:
+    fov_label = str(int(cubemap_fov)) if float(cubemap_fov).is_integer() else str(cubemap_fov)
+    cube_suffix = f"cube_{fov_label}"
+    if dataset_layout == "3dfront":
+        room = Path(scene)
+        if len(room.parts) != 2:
+            raise ValueError(
+                f"Expected a 3D-FRONT scene/room identifier, got {scene!r}"
+            )
+        room_name = room.name
+        prefix = f"{room_name}_panorama_{frame:03d}"
+        cubemap_dir = cubemap_root / room / f"{prefix}_{cube_suffix}"
+        return SageSample(
+            key=f"{room.as_posix()} {frame:05d}",
+            scene=room.as_posix(),
+            frame=frame,
+            cubemap_dir=cubemap_dir,
+            pose_path=pose_root / room / "extrinsics.json",
+            surface_path=scene_root / room.parent / f"{room_name}_full_surface.npz",
+            dataset_layout=dataset_layout,
+        )
     if dataset_layout == "scannetpp":
         return SageSample(
             key=f"{scene} {frame:05d}",
             scene=scene,
             frame=frame,
-            cubemap_dir=cubemap_root / scene / "panocam" / "images" / f"{frame}_cube_95",
+            cubemap_dir=cubemap_root / scene / "panocam" / "images" / f"{frame}_{cube_suffix}",
             pose_path=pose_root / scene / "scans" / "scanner_poses.json",
             surface_path=scene_root / scene / "scans" / "mesh_aligned_0.05_surface.npz",
             dataset_layout=dataset_layout,
@@ -73,8 +103,8 @@ def resolve_sample(
         raise ValueError(f"Unsupported dataset layout: {dataset_layout!r}")
     prefix = f"{scene}_panorama_{frame:03d}"
     candidates = (
-        cubemap_root / scene / f"{prefix}_cube_95",
-        cubemap_root / scene / prefix / "rgb_cube_95",
+        cubemap_root / scene / f"{prefix}_{cube_suffix}",
+        cubemap_root / scene / prefix / f"rgb_{cube_suffix}",
     )
     cubemap_dir = next((path for path in candidates if path.is_dir()), candidates[0])
     surface_candidates = (
@@ -129,7 +159,9 @@ def load_cameras(sample: SageSample, face_order: list[int]):
 
 def resolve_erp_path(sample: SageSample, erp_root: Path) -> Path:
     """Find the source equirectangular RGB panorama for a SAGE sample."""
-    prefix = f"{sample.scene}_panorama_{sample.frame:03d}"
+    scene_path = Path(sample.scene)
+    basename = scene_path.name if sample.dataset_layout == "3dfront" else sample.scene
+    prefix = f"{basename}_panorama_{sample.frame:03d}"
     candidates = (
         erp_root / sample.scene / f"{prefix}.png",
         erp_root / sample.scene / f"{prefix}.jpg",
@@ -187,6 +219,21 @@ def _panorama_pose(sample: SageSample) -> np.ndarray:
     if not sample.pose_path.is_file():
         raise FileNotFoundError(f"Missing panorama poses: {sample.pose_path}")
     poses = json.loads(sample.pose_path.read_text())
+    if sample.dataset_layout == "3dfront":
+        from nova3r.utils.three_d_front import world_to_opencv_camera
+
+        panorama_name = f"{Path(sample.scene).name}_panorama_{sample.frame:03d}.png"
+        if panorama_name not in poses:
+            raise KeyError(f"Pose {panorama_name!r} is absent from {sample.pose_path}")
+        pose = np.asarray(poses[panorama_name], dtype=np.float32)
+        if pose.shape != (4, 4):
+            raise ValueError(
+                f"Expected a 4x4 3D-FRONT panorama pose for {panorama_name}, "
+                f"got {pose.shape}"
+            )
+        # The renderer stores Blender-world/Blender-camera poses, while the
+        # evaluation surfaces retain their source glTF Y-up coordinates.
+        return world_to_opencv_camera(pose)
     if sample.dataset_layout == "scannetpp":
         if not isinstance(poses, list):
             raise ValueError(f"Expected a pose list in {sample.pose_path}")

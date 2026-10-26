@@ -174,6 +174,8 @@ class GenReconAdapter:
         input_projection: InputProjection = "cubemap",
         erp_root: Path | None = None,
         erp_fov: float = 95.0,
+        scannet_root: Path | None = None,
+        scannet_chunk_source: str = "evaluation_surface",
     ):
         repo = repo.resolve()
         stage_config_files = {
@@ -212,6 +214,7 @@ class GenReconAdapter:
 
         self.SageGtChunker = chunks_module.SageGtChunker
         self.ScannetGtChunker = chunks_module.ScannetGtChunker
+        self.ScannetChunker = chunks_module.ScannetChunker
         self.SelectedImages = images_module.SelectedImages
         self.chunk_visible_in_camera = components_module.chunk_visible_in_camera
         self.data_root = data_root.resolve()
@@ -227,6 +230,8 @@ class GenReconAdapter:
         self.input_projection = input_projection
         self.erp_root = erp_root
         self.erp_fov = erp_fov
+        self.scannet_root = scannet_root.resolve() if scannet_root is not None else None
+        self.scannet_chunk_source = scannet_chunk_source
         self.last_prediction_mesh: tuple[np.ndarray, np.ndarray] | None = None
 
         stage_models = {
@@ -246,6 +251,40 @@ class GenReconAdapter:
     def _get_chunks(self, sample: SageSample, sample_work: Path):
         """Build GenRecon chunks from a layout JSON or the evaluation surface."""
         if sample.dataset_layout == "scannetpp":
+            if self.scannet_chunk_source == "colmap":
+                if self.scannet_root is None:
+                    raise ValueError(
+                        "COLMAP chunking requires --genrecon-scannet-root pointing to "
+                        "the ScanNet++ data directory"
+                    )
+                scene_root = self.scannet_root / sample.scene
+                points_path = scene_root / "dslr" / "colmap" / "points3D.txt"
+                if not points_path.is_file():
+                    raise FileNotFoundError(
+                        "GenRecon COLMAP chunking requires a text sparse model at "
+                        f"{points_path}. Convert points3D.bin with `colmap model_converter` "
+                        "or provide the correct --genrecon-scannet-root."
+                    )
+                chunker = self.ScannetChunker()
+                centers, m_o2c, m_c2o, relative_translations = chunker.get_chunks(
+                    scene_root,
+                    sample_work,
+                )
+                if not centers:
+                    raise RuntimeError(f"COLMAP chunking retained no chunks for {sample.scene}")
+                source = {
+                    "type": "scannetpp_colmap_sparse_points",
+                    "scene_root": str(scene_root),
+                    "points3d_path": str(points_path),
+                    "chunk_size_factor": chunker.chunk_size_factor,
+                    "num_chunks": len(centers),
+                }
+                return centers, m_o2c, m_c2o, relative_translations, source
+
+            if self.scannet_chunk_source != "evaluation_surface":
+                raise ValueError(
+                    f"Unknown ScanNet++ chunk source: {self.scannet_chunk_source!r}"
+                )
             chunker = self.ScannetGtChunker()
             x_min, x_max, y_min, y_max, z_floor, z_ceiling = infer_scannetpp_room_bounds(
                 sample.surface_path

@@ -56,17 +56,19 @@ class HunYuanDiTVelocityWrapper(nn.Module):
         t,
         contexts,
         visible_geometry_latents=None,
+        guidance_scale=1.0,
         **kwargs,
     ):
         if t.ndim == 0:
             t = t.expand(x.shape[0])
         elif t.ndim == 1 and t.shape[0] == 1 and x.shape[0] != 1:
             t = t.expand(x.shape[0])
-        return self.model(
+        return self.model.forward_with_cfg(
             x,
             t,
             contexts,
             visible_geometry_latents=visible_geometry_latents,
+            guidance_scale=guidance_scale,
             **kwargs,
         )
 
@@ -612,6 +614,7 @@ class HunYuanDiTPlain(nn.Module):
         timestep_mu: float = -0.8,
         timestep_sigma: float = 0.8,
         timestep_p_zero: float = 0.1,
+        conditioning_drop_prob: float = 0.0,
         **kwargs,
     ):
         super().__init__()
@@ -634,6 +637,9 @@ class HunYuanDiTPlain(nn.Module):
         if sample_posterior not in (True, False, "mode"):
             raise ValueError("sample_posterior must be true, false, or 'mode', got " f"{sample_posterior!r}")
         self.sample_posterior = sample_posterior
+        self.conditioning_drop_prob = float(conditioning_drop_prob)
+        if not 0.0 <= self.conditioning_drop_prob <= 1.0:
+            raise ValueError("conditioning_drop_prob must lie in [0, 1]")
         self.timestep_sampling = str(timestep_sampling).lower()
         if self.timestep_sampling not in {"uniform", "pointdit"}:
             raise ValueError("timestep_sampling must be 'uniform' or 'pointdit', got " f"{timestep_sampling!r}")
@@ -778,6 +784,7 @@ class HunYuanDiTPlain(nn.Module):
         t,
         contexts,
         visible_geometry_latents=None,
+        conditioning_drop_mask=None,
         **kwargs,
     ):
         """Predict flow velocity for ShapeVAE latent tokens.
@@ -790,16 +797,62 @@ class HunYuanDiTPlain(nn.Module):
         if isinstance(contexts, torch.Tensor):
             contexts = {"main": contexts}
 
-        cond = self.context_adapter(contexts["main"])
-        plucker_rays = self.panorama_plucker_rays.to(dtype=cond.dtype)
+        # A shared per-example mask removes every conditioning modality. Apply
+        # it after projections so their biases and spatial rays cannot leak
+        # conditioning into unconditional examples. An explicit mask also lets
+        # inference request the same null condition used during CFG training.
+        if conditioning_drop_mask is None:
+            conditioning_drop_mask = (
+                torch.rand(x.shape[0], device=x.device) < self.conditioning_drop_prob
+                if self.training and self.conditioning_drop_prob > 0
+                else torch.zeros(x.shape[0], device=x.device, dtype=torch.bool)
+            )
+        conditioning_drop_mask = torch.as_tensor(
+            conditioning_drop_mask, device=x.device, dtype=torch.bool
+        )
+        if conditioning_drop_mask.shape != (x.shape[0],):
+            raise ValueError("conditioning_drop_mask must have shape [B]")
+        drop_mask = conditioning_drop_mask[:, None, None]
+
+        cond = contexts["main"]
+        backbone = self._uniform_context_value(
+            contexts.get("backbone"), "DINO backbone", default=2
+        )
+        if backbone == 3:
+            cond = self.context_adapter(cond)
+        elif backbone != 2:
+            raise ValueError(f"Unsupported DINO backbone version: {backbone}")
+
+        grid_size = self._uniform_grid_size(contexts.get("grid_size"), cond.shape[1])
+        includes_cls = bool(
+            self._uniform_context_value(
+                contexts.get("includes_cls_token"),
+                "CLS-token flag",
+                default=cond.shape[1] == grid_size[0] * grid_size[1] + 1,
+            )
+        )
+        expected_tokens = grid_size[0] * grid_size[1] + int(includes_cls)
+        if cond.shape[1] != expected_tokens:
+            raise ValueError(
+                f"Condition token count {cond.shape[1]} does not match grid_size="
+                f"{grid_size} with includes_cls_token={includes_cls}"
+            )
+        plucker_rays = make_equirectangular_plucker_grid(grid_size, 1)
+        if includes_cls:
+            # CLS has no spatial ray. Prepending its neutral embedding keeps
+            # every patch token aligned with the corresponding panorama ray.
+            plucker_rays = torch.cat((plucker_rays.new_zeros(1, plucker_rays.shape[-1]), plucker_rays))
+        plucker_rays = plucker_rays.unsqueeze(0).to(device=cond.device, dtype=cond.dtype)
         cond = cond + self.plucker_embedder(plucker_rays)
+        cond = cond.masked_fill(drop_mask, 0)
 
         t = self.t_embedder(t, condition=kwargs.get("guidance_cond"))
         x = self.x_embedder(x)
 
         if visible_geometry_latents is not None:
             visible_geometry_latents = visible_geometry_latents.to(device=x.device, dtype=x.dtype)
-            x = x + self.visible_geometry_embedder(visible_geometry_latents)
+            visible_condition = self.visible_geometry_embedder(visible_geometry_latents)
+            x = x + visible_condition.masked_fill(drop_mask, 0)
 
         if self.use_pos_emb:
             pos_embed = self.pos_embed.to(x.dtype)
@@ -813,6 +866,7 @@ class HunYuanDiTPlain(nn.Module):
 
         if self.with_decoupled_ca:
             additional_cond = self.additional_cond_proj(contexts["additional"])
+            additional_cond = additional_cond.masked_fill(drop_mask, 0)
             cond = torch.cat([cond, additional_cond], dim=1)
 
         x = torch.cat([c, x], dim=1)
@@ -826,6 +880,80 @@ class HunYuanDiTPlain(nn.Module):
 
         x = self.final_layer(x)
         return x
+
+    def forward_with_cfg(
+        self,
+        x,
+        t,
+        contexts,
+        visible_geometry_latents=None,
+        guidance_scale=1.0,
+        **kwargs,
+    ):
+        """Predict ``uncond + scale * (cond - uncond)`` flow velocity.
+
+        Scale 1 uses only the conditional prediction; scale 0 uses only the
+        unconditional prediction. The null branch drops image features,
+        spatial rays, and visible geometry using the training dropout mask.
+        Call in eval mode for inference. Branches run sequentially to limit
+        peak memory, and both return the original batch shape.
+        """
+        guidance_scale = float(guidance_scale)
+        if not math.isfinite(guidance_scale):
+            raise ValueError("guidance_scale must be finite")
+        if "conditioning_drop_mask" in kwargs:
+            raise ValueError("forward_with_cfg controls conditioning_drop_mask")
+        drop_mask = torch.zeros(x.shape[0], device=x.device, dtype=torch.bool)
+        if guidance_scale != 0.0:
+            conditional = self(
+                x, t, contexts,
+                visible_geometry_latents=visible_geometry_latents,
+                conditioning_drop_mask=drop_mask,
+                **kwargs,
+            )
+            if guidance_scale == 1.0:
+                return conditional
+        unconditional = self(
+            x, t, contexts,
+            visible_geometry_latents=visible_geometry_latents,
+            conditioning_drop_mask=~drop_mask,
+            **kwargs,
+        )
+        if guidance_scale == 0.0:
+            return unconditional
+        return unconditional + guidance_scale * (conditional - unconditional)
+
+    @staticmethod
+    def _uniform_context_value(value, description, default):
+        if value is None:
+            return default
+        values = torch.as_tensor(value).detach().cpu().reshape(-1).unique()
+        if values.numel() != 1:
+            raise ValueError(f"A batch cannot mix different {description} values")
+        return int(values.item())
+
+    def _uniform_grid_size(self, value, token_count):
+        if value is not None:
+            grids = torch.as_tensor(value).detach().cpu().reshape(-1, 2).unique(dim=0)
+            if grids.shape[0] != 1:
+                raise ValueError("A batch cannot mix panorama feature grid sizes")
+            grid_size = tuple(int(item) for item in grids[0].tolist())
+            if min(grid_size) < 1:
+                raise ValueError(f"Invalid panorama feature grid size: {grid_size}")
+            return grid_size
+        if token_count in {
+            self.panorama_grid_size[0] * self.panorama_grid_size[1],
+            self.panorama_grid_size[0] * self.panorama_grid_size[1] + 1,
+        }:
+            return self.panorama_grid_size
+        patch_tokens = token_count - 1
+        height = math.isqrt(max(patch_tokens // 2, 0))
+        if height > 0 and height * height * 2 == patch_tokens:
+            return height, height * 2
+        raise ValueError(
+            "Missing image_feature_grid_size metadata for condition tokens that "
+            "do not match the configured panorama grid"
+        )
 
     def _prepare_lightning_batch(self, batch, deterministic_seed):
         latent_parameter = self.x_embedder.weight
@@ -865,13 +993,20 @@ class HunYuanDiTPlain(nn.Module):
             non_blocking=True,
         ).contiguous()
         gt_latents = gt_latents * self.latent_scale_factor
-        return tokens, gt_latents, visible_geometry_latents
+        contexts = {
+            "main": tokens,
+            "backbone": batch.get("image_feature_backbone"),
+            "grid_size": batch.get("image_feature_grid_size"),
+            "includes_cls_token": batch.get("image_features_include_cls"),
+        }
+        return contexts, gt_latents, visible_geometry_latents
 
     def _reconstruct_lightning_latents(
         self,
-        tokens,
+        contexts,
         gt_latents,
         visible_geometry_latents,
+        guidance_scale=1.0,
     ):
         with torch.no_grad():
             wrapped_vf = HunYuanDiTVelocityWrapper(self)
@@ -886,8 +1021,9 @@ class HunYuanDiTPlain(nn.Module):
                 method="euler",
                 step_size=0.01,
                 return_intermediates=False,
-                contexts={"main": tokens},
+                contexts=contexts,
                 visible_geometry_latents=visible_geometry_latents,
+                guidance_scale=guidance_scale,
             )
 
         return sol / self.latent_scale_factor
@@ -899,9 +1035,10 @@ class HunYuanDiTPlain(nn.Module):
         kl_weight=0.0,
         recon_latents=False,
         deterministic_seed=None,
+        guidance_scale=1.0,
     ):
         (
-            tokens,
+            contexts,
             gt_latents,
             visible_geometry_latents,
         ) = self._prepare_lightning_batch(batch, deterministic_seed)
@@ -917,7 +1054,7 @@ class HunYuanDiTPlain(nn.Module):
         v_pred = self(
             x_t,
             t,
-            {"main": tokens},
+            contexts,
             visible_geometry_latents=visible_geometry_latents,
         )
         loss, velocity_loss, reconstruction_loss, pred_latents = flow_matching_losses(
@@ -948,9 +1085,10 @@ class HunYuanDiTPlain(nn.Module):
         latents = None
         if recon_latents:
             latents = self._reconstruct_lightning_latents(
-                tokens,
+                contexts,
                 gt_latents,
                 visible_geometry_latents,
+                guidance_scale=guidance_scale,
             )
 
         return loss, details, latents

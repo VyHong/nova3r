@@ -74,8 +74,11 @@ class SAGE10KSDFDataset(SDFDatasetMixin):
         modalities=None,
         load_visible_geometry_latent=False,
         visible_geometry_latent_root=None,
+        geometry_coordinate_frame=None,
     ):
         super().__init__(common_conf)
+        if geometry_coordinate_frame is not None:
+            self.configure_geometry_coordinate_frame(geometry_coordinate_frame)
         self.data_root = Path(data_root)
         self.sdf_data_root = Path(sdf_data_root) if sdf_data_root else self.data_root
         self.pose_root = Path(pose_root)
@@ -190,19 +193,7 @@ class SAGE10KSDFDataset(SDFDatasetMixin):
         if not feature_path.is_file():
             raise FileNotFoundError(f"Missing panorama image features: {feature_path}")
         checkpoint = torch.load(feature_path, map_location="cpu", weights_only=True)
-        if not isinstance(checkpoint, dict):
-            raise ValueError(
-                f"Panorama feature file must include grid metadata: {feature_path}"
-            )
-        if checkpoint.get("projection") != "equirectangular":
-            raise ValueError(
-                f"Expected equirectangular panorama features in {feature_path}"
-            )
-        features = checkpoint.get("patch_features")
-        features = self._validate_single_latent(
-            features, feature_path, "panorama patch features"
-        )
-        return features
+        return self._load_panorama_image_features(checkpoint, feature_path)
 
     def _load_geometry(
         self,
@@ -244,11 +235,12 @@ class SAGE10KSDFDataset(SDFDatasetMixin):
         # The UDF points and panorama poses both use the exported glTF scene
         # coordinates, so image_w2c is already the complete geometry transform.
         transform = torch.from_numpy(world_to_first_camera).float()
+        transform = self.geometry_input_transform(transform)
         if surface is not None:
             surface[:, :3] = (
                 (transform[:3, :3] @ surface[:, :3].T).T + transform[:3, 3]
             )
-            if surface.shape[1] >= 6:
+            if self.return_normal:
                 surface[:, 3:6] = (transform[:3, :3] @ surface[:, 3:6].T).T
         if geo_points is not None:
             geo_points[:, :3] = (
@@ -391,7 +383,7 @@ class SAGE10KSDFDataset(SDFDatasetMixin):
         if self.load_visible_geometry_latent:
             batch["visible_geometry_latents"] = self._load_visible_geometry_latent(seq_name, ids)
         if "image_features" in self.modalities:
-            batch["image_features"] = self._load_image_features(seq_name, anno)
+            batch.update(self._load_image_features(seq_name, anno))
         if self.load_gt_latent:
             gt_latent = self._load_gt_latent(seq_name, ids)
             if isinstance(gt_latent, dict):

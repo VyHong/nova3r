@@ -163,6 +163,14 @@ def main():
     )
     parser.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1))
     parser.add_argument("--limit", type=int, help="Process at most this many panoramas")
+    parser.add_argument(
+        "--sample-list",
+        type=Path,
+        help=(
+            "Optional JSON manifest. SAGE entries are 'SCENE FRAME'; 3D-FRONT "
+            "entries are panorama paths relative to --input-root."
+        ),
+    )
     parser.add_argument("--shape", default="cube")
     parser.add_argument("--fov", type=float, default=95.0)
     parser.add_argument("--res", type=int, default=518)
@@ -185,11 +193,24 @@ def main():
 
     args.input_root = args.input_root.resolve()
     output_root = args.output_root.resolve()
-    panoramas = sorted(args.input_root.rglob("*_panorama_*.png"))
-    panoramas = [
-        path for path in panoramas
-        if path.is_file() and not any(part in {"depth", "logs"} for part in path.parts)
-    ]
+    if args.sample_list is not None:
+        entries = json.loads(args.sample_list.read_text())
+        panoramas = []
+        for entry in entries:
+            if args.dataset_layout == "sage10k":
+                scene, frame = entry.split()
+                path = args.input_root / scene / f"{scene}_panorama_{int(frame):03d}.png"
+            else:
+                path = args.input_root / entry
+            if not path.is_file():
+                parser.error(f"manifest panorama does not exist: {path}")
+            panoramas.append(path)
+    else:
+        panoramas = sorted(args.input_root.rglob("*_panorama_*.png"))
+        panoramas = [
+            path for path in panoramas
+            if path.is_file() and not any(part in {"depth", "logs"} for part in path.parts)
+        ]
     if args.limit is not None:
         panoramas = panoramas[: args.limit]
     if not panoramas:

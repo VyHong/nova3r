@@ -36,8 +36,23 @@ class SDFDatasetMixin(Dataset):
         self.sdf_near_size = common_conf.sdf_near_size
         self.sdf_sharpedge_size = common_conf.sdf_sharpedge_size
         self.sdf_label = common_conf.sdf_label
+        self.configure_geometry_coordinate_frame(
+            getattr(common_conf, "geometry_coordinate_frame", "hunyuan")
+        )
         if self.sdf_surface_size < 0:
             raise ValueError("sdf_surface_size must be non-negative")
+
+    def configure_geometry_coordinate_frame(self, coordinate_frame):
+        if coordinate_frame not in ("opencv", "hunyuan"):
+            raise ValueError("geometry_coordinate_frame must be 'opencv' or 'hunyuan'")
+        self.geometry_coordinate_frame = coordinate_frame
+
+    def geometry_input_transform(self, transform):
+        """Convert a world-to-OpenCV transform to the selected geometry axes."""
+        if self.geometry_coordinate_frame == "hunyuan":
+            conversion = transform.new_tensor([1.0, -1.0, -1.0, 1.0])
+            return conversion[:, None] * transform
+        return transform
 
     def configure_conditioning_latents(self, enabled, root):
         self.load_conditioning_latent = bool(enabled)
@@ -147,6 +162,48 @@ class SDFDatasetMixin(Dataset):
             )
         return tensor.float()
 
+    @classmethod
+    def _load_panorama_image_features(cls, checkpoint, path):
+        """Validate panorama features and retain token-layout metadata."""
+        if not isinstance(checkpoint, dict):
+            raise ValueError(f"Panorama feature file must include grid metadata: {path}")
+        if checkpoint.get("projection") != "equirectangular":
+            raise ValueError(f"Expected equirectangular panorama features in {path}")
+
+        features = cls._validate_single_latent(
+            checkpoint.get("patch_features"), path, "panorama patch features"
+        )
+        grid_size = checkpoint.get("grid_size")
+        if not isinstance(grid_size, (list, tuple)) or len(grid_size) != 2:
+            raise ValueError(f"Missing two-dimensional grid_size metadata in {path}")
+        grid_size = tuple(int(value) for value in grid_size)
+        if min(grid_size) < 1:
+            raise ValueError(f"Invalid panorama grid_size {grid_size} in {path}")
+
+        includes_cls = bool(checkpoint.get("includes_cls_token", False))
+        expected_tokens = grid_size[0] * grid_size[1] + int(includes_cls)
+        if features.shape[0] != expected_tokens:
+            raise ValueError(
+                f"Panorama feature/token metadata mismatch in {path}: got "
+                f"{features.shape[0]} tokens, expected {expected_tokens} from "
+                f"grid_size={grid_size}, includes_cls_token={includes_cls}"
+            )
+
+        model_name = str(checkpoint.get("model", "")).lower()
+        if "dinov3" in model_name:
+            backbone = 3
+        elif "dinov2" in model_name:
+            backbone = 2
+        else:
+            raise ValueError(f"Cannot identify DINO backbone from model metadata in {path}")
+
+        return {
+            "image_features": features,
+            "image_feature_grid_size": torch.tensor(grid_size, dtype=torch.long),
+            "image_features_include_cls": torch.tensor(includes_cls, dtype=torch.bool),
+            "image_feature_backbone": torch.tensor(backbone, dtype=torch.uint8),
+        }
+
     @staticmethod
     def _require_single_panorama(ids, description):
         if len(ids) != 1:
@@ -207,8 +264,7 @@ class SDFDatasetMixin(Dataset):
         latent = checkpoint.get("latent") if isinstance(checkpoint, dict) else checkpoint
         return self._validate_single_latent(latent, latent_path, "GT latent")
 
-    @staticmethod
-    def _normalize_extrinsics(extrinsics, translation_scale=None):
+    def _normalize_extrinsics(self, extrinsics, translation_scale=None):
         if extrinsics is None:
             return None
         normalized = extrinsics @ torch.linalg.inv(extrinsics[:, :1])
@@ -222,6 +278,8 @@ class SDFDatasetMixin(Dataset):
                 device=normalized.device,
             ).clamp(min=1e-6)
         normalized[..., :3, 3] /= translation_scale
+        if self.geometry_coordinate_frame == "hunyuan":
+            normalized = normalized * normalized.new_tensor([1.0, -1.0, -1.0, 1.0])
         return normalized
 
     @staticmethod
@@ -459,9 +517,10 @@ class SDFDatasetMixin(Dataset):
             )
         return torch.cat((geo_points, exact), dim=0)
 
-    @staticmethod
-    def sdf_rgb_kwargs(data):
+    def sdf_rgb_kwargs(self, data):
         """Extract optional RGB arrays from a UDF NPZ without requiring them."""
+        if not self.return_color:
+            return {}
         color_keys = ("vol_rgb", "random_near_rgb", "sharp_near_rgb")
         present = [key in data.files for key in color_keys]
         if any(present) and not all(present):

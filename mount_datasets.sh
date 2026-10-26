@@ -20,21 +20,21 @@ if ! command -v mount-zip >/dev/null 2>&1; then
 fi
 
 mount_specs=(
-  "$SHARED_DATA_ROOT/scannetpp/cubemap_data.zip|$MOUNT_ROOT/scannetpp|-o precache"
-  "$SCRIPT_DIR/datasets/scannetpp/udf_color.zip|$MOUNT_ROOT/scannetpp|-o precache"
-  "$SHARED_DATA_ROOT/scannetpp/panorama_latents.zip|$MOUNT_ROOT/scannetpp|-o precache"
-  "$SHARED_DATA_ROOT/scannetpp/vis_latent.zip|$MOUNT_ROOT/scannetpp|-o precache"
-  "$SCRIPT_DIR/datasets/scannetpp/cube_trans_latent.zip|$MOUNT_ROOT/scannetpp|-o precache"
+  "$SHARED_DATA_ROOT/scannetpp/cubemap_data.zip|$MOUNT_ROOT/scannetpp|"
+  "$SHARED_DATA_ROOT/scannetpp/udf_color.zip|$MOUNT_ROOT/scannetpp|"
+  "$SHARED_DATA_ROOT/scannetpp/dinov2_latents.zip|$MOUNT_ROOT/scannetpp|"
+  "$SHARED_DATA_ROOT/scannetpp/fix_vis_latents.zip|$MOUNT_ROOT/scannetpp|"
+  "$SHARED_DATA_ROOT/scannetpp/fix_gt_latents.zip|$MOUNT_ROOT/scannetpp|"
   "$SHARED_DATA_ROOT/sage-10k/udf.zip|$MOUNT_ROOT/sage-10k|"
-  "$SCRIPT_DIR/datasets/sage-10k/cubemap_data.zip|$MOUNT_ROOT/sage-10k|-o notrim"
-  "$SHARED_DATA_ROOT/sage-10k/pano_features.zip|$MOUNT_ROOT/sage-10k|"
-  "$SCRIPT_DIR/datasets/sage-10k/visible_latents.zip|$MOUNT_ROOT/sage-10k|"
-  "$SHARED_DATA_ROOT/sage-10k/latents.zip|$MOUNT_ROOT/sage-10k|"
-  "$SHARED_DATA_ROOT/3dfront/panoramas.zip|$MOUNT_ROOT/3dfront|"
-  "$SHARED_DATA_ROOT/3dfront/udf.zip|$MOUNT_ROOT/3dfront|"
-  "$SHARED_DATA_ROOT/3dfront/gt_latents.zip|$MOUNT_ROOT/3dfront|"
-  "$SHARED_DATA_ROOT/3dfront/panorama_latents.zip|$MOUNT_ROOT/3dfront|"
-  "$SHARED_DATA_ROOT/3dfront/visible_latents.zip|$MOUNT_ROOT/3dfront|"
+  "$SHARED_DATA_ROOT/sage-10k/cubemap_data.zip|$MOUNT_ROOT/sage-10k|-o notrim"
+  "$SHARED_DATA_ROOT/sage-10k/dinov2_latents.zip|$MOUNT_ROOT/sage-10k|"
+  "$SHARED_DATA_ROOT/sage-10k/fix_vis_latents.zip|$MOUNT_ROOT/sage-10k|"
+  "$SHARED_DATA_ROOT/sage-10k/fix_gt_latents.zip|$MOUNT_ROOT/sage-10k|"
+  "$SHARED_DATA_ROOT/3dfront/panorama_scenes.zip|$MOUNT_ROOT/3dfront|"
+  "$SHARED_DATA_ROOT/3dfront/better_udf.zip|$MOUNT_ROOT/3dfront|"
+  "$SHARED_DATA_ROOT/3dfront/better_gt_latents.zip|$MOUNT_ROOT/3dfront|"
+  "$SHARED_DATA_ROOT/3dfront/better_dinov2_latents.zip|$MOUNT_ROOT/3dfront|"
+  "$SHARED_DATA_ROOT/3dfront/better_vis_latents.zip|$MOUNT_ROOT/3dfront|"
 )
 
 # Validate every source before starting, avoiding a partially mounted dataset

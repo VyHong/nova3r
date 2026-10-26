@@ -82,6 +82,11 @@ panoramic, so `--model pager` requires `--input-projection erp` and runs the
 official spherical ERP→cubemap→ERP depth path. The resulting spherical cloud is
 converted from PaGeR axes into the SAGE/OpenCV world frame before evaluation.
 
+The same PaGeR evaluator supports 3D-FRONT with `--dataset-layout 3dfront`.
+Its path-based manifests are parsed as `scene/room` plus panorama index. Saved
+Blender-axis panorama poses are composed with the glTF-Y-up world conversion,
+so predictions are evaluated directly against `<scene>/<room>_full_surface.npz`.
+
 Use `--dataset-layout scannetpp` for ScanNet++. This selects
 `data/scannetpp/test_list.json` and the repository's standard ScanNet++ cubemap,
 scanner-pose, and aligned-surface paths. It reads scanner camera-to-world poses
@@ -143,6 +148,46 @@ python -m eval.baselines.run \
   --fail-fast
 ```
 
+Run the ScanNet++ final 100 with prepared 90-degree cubemaps, GT-layout
+chunking, two workers on one GPU, and xFormers for dense and sparse attention:
+
+```bash
+ATTN_BACKEND=xformers \
+SPARSE_ATTN_BACKEND=xformers \
+python -m eval.baselines.run \
+  --model genrecon \
+  --dataset-layout scannetpp \
+  --input-projection cubemap \
+  --cubemap-root datasets/scannetpp/cubemaps/final_test_100_prepared_cube_90 \
+  --cubemap-fov 90 \
+  --split-list data/scannetpp/final_test_list.json \
+  --genrecon-scannet-chunk-source evaluation_surface \
+  --genrecon-ss-ckpt third_party/GenRecon/sparse_structure.pt \
+  --genrecon-shape-ckpt third_party/GenRecon/shape_slat.pt \
+  --genrecon-tex-ckpt third_party/GenRecon/texture_slat.pt \
+  --workers 2 \
+  --device cuda:0 \
+  --output-dir eval_results/baselines/genrecon/scannetpp_final_test_100_cube90_gt_layout_xformers \
+  --save-predictions \
+  --fail-fast
+```
+
+Parallelize GenRecon across two GPUs by adding `--devices cuda:0 cuda:1`
+to the command. This defaults to one persistent model process per listed device.
+For multiple processes on one GPU, add `--workers 2 --device cuda:0`; each process
+loads its own model and requires its own GPU memory. Use `--workers 4 --devices
+cuda:0 cuda:1` for two processes per GPU. Device indices follow
+`CUDA_VISIBLE_DEVICES` when set. With neither option, execution stays sequential.
+
+Workers receive new samples as they finish, using the original manifest index
+for evaluation seeds. Only the parent writes `results.json` and the summary;
+records remain in manifest order even when samples finish out of order. Worker
+intermediates live under `genrecon_work/worker_<index>` (or the supplied
+`--genrecon-work-dir`). Prediction exports retain their usual paths. Parallel
+runs require unique scene/frame entries to avoid colliding prediction filenames.
+Sample errors retain the normal error records; `--fail-fast` stops scheduling
+new work after an error is observed and waits for already running samples to exit.
+
 The same `--input-projection erp --erp-root ROOT` options apply to GenRecon. In
 ERP mode the single image supplies spherical scene-wide `cond_3D` features and
 is also the unchanged direct `cond_2D` input for every chunk.
@@ -175,6 +220,20 @@ python -m eval.baselines.run \
   --pose-root /mnt/projects/theses/vyhong/sage-10k/poses
 ```
 
+Run PaGeR on the 3D-FRONT final test:
+
+```bash
+python -m eval.baselines.run \
+  --model pager \
+  --dataset-layout 3dfront \
+  --input-projection erp \
+  --erp-root /tmp/datasets/3dfront/panorama_scenes \
+  --split-list data/3dfront/final_test_list.json \
+  --pager-checkpoint pager \
+  --pager-scene-mode indoor \
+  --output-dir eval_results/baselines/pager/3dfront_final_test_100_erp
+```
+
 `--genrecon-data-root` is optional. If it contains
 `rooms_raw/<room-id>/layout_<room-id>.json`, that metadata is preferred;
 otherwise, the chunk footprint is inferred from `scene_surface.npz`. The source
@@ -183,6 +242,12 @@ SAGE surfaces are converted from their evaluator Y-up frame back to GenRecon's
 Z-up room frame. ScanNet++ surfaces instead use their native aligned Z-up frame:
 X/Y define the floor plan, Z defines floor and ceiling, and no SAGE axis
 conversion is applied.
+For the single-panorama ScanNet++ evaluation, GenRecon defaults to ground-truth
+scene bounds from the evaluation surface because one camera centre cannot
+produce a COLMAP sparse reconstruction. This is oracle layout information and
+is recorded in each sample's `chunk_source.json`. For multi-view experiments,
+`--genrecon-scannet-chunk-source colmap` enables GenRecon's `ScannetChunker` and
+reads `<genrecon-scannet-root>/<scene>/dslr/colmap/points3D.txt`.
 `--genrecon-surface-points` defaults to `--eval-points`. The adapter retains the
 loaded GenRecon pipeline across samples. Per-sample camera/chunk diagnostics are
 written below `<output-dir>/genrecon_work`; reduce projection memory with

@@ -58,22 +58,22 @@ RUN bash -c "
   }
 
   mount_dataset /mnt/projects/theses/vyhong/scannetpp/cubemap_data.zip /tmp/datasets/scannetpp -o precache
-  mount_dataset /mnt/home/vyhong/projects/nova3r/datasets/scannetpp/udf_color.zip /tmp/datasets/scannetpp -o precache
-  mount_dataset /mnt/projects/theses/vyhong/scannetpp/panorama_latents.zip /tmp/datasets/scannetpp -o precache
-  mount_dataset /mnt/projects/theses/vyhong/scannetpp/vis_latent.zip /tmp/datasets/scannetpp -o precache
-  mount_dataset /mnt/home/vyhong/projects/nova3r/datasets/scannetpp/cube_trans_latent.zip /tmp/datasets/scannetpp -o precache
+  mount_dataset /mnt/projects/theses/vyhong/scannetpp/udf_color.zip /tmp/datasets/scannetpp -o precache
+  mount_dataset /mnt/projects/theses/vyhong/scannetpp/dinov2_latents.zip /tmp/datasets/scannetpp -o precache
+  mount_dataset /mnt/projects/theses/vyhong/scannetpp/fix_vis_latents.zip /tmp/datasets/scannetpp -o precache
+  mount_dataset /mnt/projects/theses/vyhong/scannetpp/fix_gt_latents.zip /tmp/datasets/scannetpp -o precache
 
   mount_dataset /mnt/projects/theses/vyhong/sage-10k/udf.zip /tmp/datasets/sage-10k
-  mount_dataset /mnt/home/vyhong/projects/nova3r/datasets/sage-10k/cubemap_data.zip /tmp/datasets/sage-10k -o notrim
-  mount_dataset /mnt/projects/theses/vyhong/sage-10k/pano_features.zip /tmp/datasets/sage-10k
-  mount_dataset /mnt/home/vyhong/projects/nova3r/datasets/sage-10k/visible_latents.zip /tmp/datasets/sage-10k
-  mount_dataset /mnt/projects/theses/vyhong/sage-10k/latents.zip /tmp/datasets/sage-10k
+  mount_dataset /mnt/projects/theses/vyhong/sage-10k/cubemap_data.zip /tmp/datasets/sage-10k -o notrim
+  mount_dataset /mnt/projects/theses/vyhong/sage-10k/dinov2_latents.zip /tmp/datasets/sage-10k
+  mount_dataset /mnt/projects/theses/vyhong/sage-10k/fix_vis_latents.zip /tmp/datasets/sage-10k
+  mount_dataset /mnt/projects/theses/vyhong/sage-10k/fix_gt_latents.zip /tmp/datasets/sage-10k
 
-  mount_dataset /mnt/projects/theses/vyhong/3dfront/panoramas.zip /tmp/datasets/3dfront
-  mount_dataset /mnt/projects/theses/vyhong/3dfront/udf.zip /tmp/datasets/3dfront
-  mount_dataset /mnt/projects/theses/vyhong/3dfront/gt_latents.zip /tmp/datasets/3dfront
-  mount_dataset /mnt/projects/theses/vyhong/3dfront/panorama_latents.zip /tmp/datasets/3dfront
-  mount_dataset /mnt/projects/theses/vyhong/3dfront/visible_latents.zip /tmp/datasets/3dfront
+  mount_dataset /mnt/projects/theses/vyhong/3dfront/panorama_scenes.zip /tmp/datasets/3dfront
+  mount_dataset /mnt/projects/theses/vyhong/3dfront/better_udf.zip /tmp/datasets/3dfront
+  mount_dataset /mnt/projects/theses/vyhong/3dfront/better_gt_latents.zip /tmp/datasets/3dfront
+  mount_dataset /mnt/projects/theses/vyhong/3dfront/better_dinov2_latents.zip /tmp/datasets/3dfront
+  mount_dataset /mnt/projects/theses/vyhong/3dfront/better_vis_latents.zip /tmp/datasets/3dfront
 
   # Keep the allocated GPU active while mount-zip populates its caches. This
   # process is stopped before training claims the GPU.
@@ -106,7 +106,9 @@ RUN bash -c "
   export PYTHONPATH=\${PYTHONPATH}:/mnt/home/vyhong/projects/nova3r
   
   echo 'Running training...'
-  python -u training/resume_train.py
+  # Resume the full training state from experiment.resume_checkpoint in the config.
+  python -u training/resume_train.py \
+    --config checkpoints/hunyuan_dit/config_hunyuandit_panorama_visible_latent.yaml
 "
 training_status=$?
 

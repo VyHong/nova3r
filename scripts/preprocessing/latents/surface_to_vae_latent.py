@@ -36,6 +36,7 @@ DEFAULT_CHECKPOINT = REPO_ROOT / "exp_output/hunyuan_vae_v2_1_udf/checkpoints/la
 DEFAULT_CONFIG = REPO_ROOT / "checkpoints/hunyuan/.hydra/config.yaml"
 DEFAULT_SPLIT_LIST = REPO_ROOT / "data/sage-10k/surface_vae_latent_list.json"
 PANORAMA_TO_OPENCV = BLENDER_CAMERA_TO_OPENCV
+OPENCV_TO_HUNYUAN = np.diag([1.0, -1.0, -1.0, 1.0]).astype(np.float32)
 SCANNETPP_AXIS_CONVERSION = np.asarray(
     [[0, 1, 0, 0], [0, 0, -1, 0], [-1, 0, 0, 0], [0, 0, 0, 1]],
     dtype=np.float32,
@@ -134,9 +135,15 @@ def parse_args():
         help="Cubemap face used as the camera frame (default: 4).",
     )
     parser.add_argument(
+        "--vae-coordinate-frame",
+        choices=("hunyuan", "opencv"),
+        default="hunyuan",
+        help="VAE input axes: hunyuan (+Y up, -Z forward, default) or legacy OpenCV (+Y down, +Z forward).",
+    )
+    parser.add_argument(
         "--no-camera-extrinsics",
         action="store_true",
-        help=("Keep the latent camera-independent: only flip Y and Z, without " "loading or applying panorama poses or cubemap-face extrinsics."),
+        help="Keep the latent camera-independent; apply scene-axis and VAE-frame conversions without camera poses.",
     )
     parser.add_argument(
         "--panorama-camera",
@@ -144,7 +151,7 @@ def parse_args():
         help=(
             "For 3D-FRONT, transform geometry directly into the panorama "
             "OpenCV camera frame using extrinsics.json; no cubemap metadata "
-            "is required. This matches PaGeR's output frame."
+            "is required. The selected VAE-axis conversion is applied afterward."
         ),
     )
     parser.add_argument("--batch-size", type=int, default=1)
@@ -569,6 +576,7 @@ def prepare_job(
     sharp_count: int,
     point_feats: int,
     dataset_layout: str = "sage10k",
+    vae_coordinate_frame: str = "hunyuan",
 ):
     """Load and transform one surface on a CPU worker."""
     scene, frame = job.scene, job.frame
@@ -605,6 +613,14 @@ def prepare_job(
             if panorama_camera
             else f"{dataset_layout}_camera"
         )
+
+    if vae_coordinate_frame == "hunyuan":
+        input_transform = OPENCV_TO_HUNYUAN @ input_transform
+        coordinate_frame = coordinate_frame.replace("opencv_axes", "hunyuan_axes")
+        if not no_camera_extrinsics:
+            coordinate_frame += "_hunyuan_axes"
+    elif vae_coordinate_frame != "opencv":
+        raise ValueError(f"Unsupported VAE coordinate frame: {vae_coordinate_frame}")
 
     surface = make_surface(
         surface_path,
@@ -830,6 +846,7 @@ def result_metadata(item: PreparedSurface, args, normalization: str):
         "cube_bbox_center": item.cube_bbox_center,
         "normalized_camera_translation": item.normalized_camera_translation,
         "coordinate_frame": item.coordinate_frame,
+        "vae_coordinate_frame": args.vae_coordinate_frame,
         "input_transform": torch.from_numpy(item.input_transform.copy()),
         "bounds": item.bounds,
         "camera_transform_applied": camera_transform_applied,
@@ -946,6 +963,7 @@ def encode_jobs_on_device(args, pending, device, worker_rank=0, world_size=1):
         face_id=args.face_id,
         no_camera_extrinsics=args.no_camera_extrinsics,
         panorama_camera=args.panorama_camera,
+        vae_coordinate_frame=args.vae_coordinate_frame,
         base_seed=args.seed,
         center_room=args.center_room,
         cube_center_camera=args.cube_center_camera,

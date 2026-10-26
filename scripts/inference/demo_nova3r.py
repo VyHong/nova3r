@@ -96,7 +96,14 @@ def load_model(
 
     root_cfg = OmegaConf.load(config_path)
     OmegaConf.resolve(root_cfg)
-    cfg = root_cfg.experiment
+    if "experiment" in root_cfg:
+        cfg = root_cfg.experiment
+    elif "cfg" in root_cfg:
+        # Lightning's hparams.yaml stores the resolved experiment config under
+        # ``cfg`` and is useful for reproducing a trained run directly.
+        cfg = root_cfg.cfg
+    else:
+        raise ValueError(f"No experiment or cfg section in {config_path}")
     if "data" in root_cfg:
         cfg.data = root_cfg.data
 

@@ -65,6 +65,18 @@ def main():
     if not os.path.isfile(ckpt_path):
         raise FileNotFoundError(f"Resume checkpoint not found: {ckpt_path}")
 
+    if cfg.get("resume_weights_only", False):
+        # These are trusted local training checkpoints containing OmegaConf
+        # metadata. torch.load's weights_only flag controls unpickling safety,
+        # not whether Lightning restores optimizer/loop state.
+        checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        checkpoint.pop("optimizer_states", None)
+        module.on_load_checkpoint(checkpoint)
+        module.load_state_dict(checkpoint["state_dict"], strict=True)
+        del checkpoint
+        print(f"Loaded model weights from {ckpt_path}; starting fresh training state.")
+        ckpt_path = None
+
     os.makedirs(cfg.output_dir, exist_ok=True)
     logger = TensorBoardLogger(save_dir=cfg.output_dir, name="nova3r_training")
 

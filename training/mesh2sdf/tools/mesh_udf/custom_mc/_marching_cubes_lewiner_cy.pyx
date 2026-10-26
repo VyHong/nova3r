@@ -1352,7 +1352,7 @@ def marching_cubes_udf(float[:, :, :] im not None, float[:, :, :, :] grads not N
                             elif not non_zero_norm(grads[z_st,y_st,x_st]) == 0: #7
                                 base_vec[0], base_vec[1], base_vec[2] = grads[z_st,y_st,x_st][0], grads[z_st,y_st,x_st][1], grads[z_st,y_st,x_st][2]
                             else:
-                                print('all 0 vec...')
+                                pass
 
                             base_vec[0], base_vec[1], base_vec[2] = anchor_sign * base_vec[0], anchor_sign * base_vec[1], anchor_sign * base_vec[2]
 
@@ -1639,7 +1639,7 @@ def marching_cubes_udf(float[:, :, :] im not None, float[:, :, :, :] grads not N
                                 elif not non_zero_norm(grads[z_st,y_st,x_st]) == 0: #7
                                     base_vec[0], base_vec[1], base_vec[2] = grads[z_st,y_st,x_st][0], grads[z_st,y_st,x_st][1], grads[z_st,y_st,x_st][2]
                                 else:
-                                    print('all 0 vec...')
+                                    pass
 
                                 base_vec[0], base_vec[1], base_vec[2] = anchor_sign * base_vec[0], anchor_sign * base_vec[1], anchor_sign * base_vec[2]
 

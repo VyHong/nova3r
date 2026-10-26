@@ -70,6 +70,14 @@ def parse_args():
         default="auto",
         help="Marching-cubes level or 'auto' (default: auto).",
     )
+    parser.add_argument(
+        "--raw-decoder-logits",
+        action="store_true",
+        help=(
+            "Skip the modified UDF Softplus before marching cubes. This "
+            "matches the original Hunyuan signed-field decoding architecture."
+        ),
+    )
     args = parser.parse_args()
     if args.octree_resolution < 2:
         parser.error("--octree-resolution must be at least 2")
@@ -193,6 +201,7 @@ def main():
             octree_resolution=args.octree_resolution,
             mc_algo="mc",
             enable_pbar=True,
+            apply_softplus=not args.raw_decoder_logits,
         )
 
     meshes = export_to_trimesh(outputs)

@@ -69,6 +69,22 @@ conda run --no-capture-output -n nova3r \
   --res 518
 ```
 
+Generate only the final-test SAGE and 3D-FRONT 90-degree cubemaps:
+
+```bash
+conda run --no-capture-output -n nova3r python scripts/data/cubemap/sage10k.py \
+  --input-root /tmp/datasets/sage-10k/panorama-scenes \
+  --output-root datasets/sage-10k/cubemaps/final_test_100_prepared_cube_90 \
+  --sample-list data/sage-10k/final_test_list.json \
+  --dataset-layout sage10k --workers 8 --shape cube --fov 90 --res 518
+
+conda run --no-capture-output -n nova3r python scripts/data/cubemap/sage10k.py \
+  --input-root /tmp/datasets/3dfront/panorama_scenes \
+  --output-root datasets/3dfront/cubemaps/final_test_100_prepared_cube_90 \
+  --sample-list data/3dfront/final_test_list.json \
+  --dataset-layout 3dfront --workers 8 --shape cube --fov 90 --res 518
+```
+
 ## One centered RGB cubemap per SAGE-10k scene
 
 `render_centered_sage10k.py` deduplicates the `SCENE FRAME` list by scene and

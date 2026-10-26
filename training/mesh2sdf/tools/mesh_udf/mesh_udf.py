@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import torch
 import numpy as np
 from scipy.sparse import coo_matrix
@@ -270,10 +271,66 @@ def get_udf_normals_grid_fast(
     return df_values, vecs, samples
 
 
+def get_udf_normals_grid_streamed(
+    decoder,
+    latent_vec,
+    N,
+    max_batch=262144,
+    fourier=False,
+    grid_bounds=None,
+    device=None,
+):
+    """Fill only the dense UDF/normal arrays; generate XYZ batches on the GPU.
+
+    Unlike the legacy path this does not retain XYZ plus UDF plus normals in an
+    ``N**3 x 7`` CPU tensor, and it gathers near-surface gradient points directly
+    instead of allocating a full-grid boolean mask for every gradient batch.
+    """
+    decoder.eval()
+    resolution, grid_min, _, spacing = _grid_spec(N, grid_bounds)
+    nx, ny, nz = resolution
+    num_samples = nx * ny * nz
+    decoder_device = _decoder_device(decoder, latent_vec, device)
+    grid_min_t = torch.as_tensor(grid_min, device=decoder_device, dtype=torch.float32)
+    spacing_t = torch.as_tensor(spacing, device=decoder_device, dtype=torch.float32)
+    df_values = torch.empty(num_samples, dtype=torch.float32)
+
+    def coordinates(flat_indices):
+        flat_indices = flat_indices.to(decoder_device)
+        i = torch.div(flat_indices, ny * nz, rounding_mode="floor")
+        remainder = flat_indices - i * ny * nz
+        j = torch.div(remainder, nz, rounding_mode="floor")
+        k = remainder - j * nz
+        return grid_min_t + torch.stack((i, j, k), dim=1).float() * spacing_t
+
+    for start in range(0, num_samples, max_batch):
+        stop = min(start + max_batch, num_samples)
+        flat = torch.arange(start, stop, device=decoder_device, dtype=torch.long)
+        xyz = coordinates(flat)
+        encoded = ws.fourier_transform(xyz) if fourier else xyz
+        with torch.no_grad():
+            values = decoder(_make_decoder_input(latent_vec, encoded))
+        df_values[start:stop] = values.reshape(-1).float().cpu()
+
+    normals = torch.zeros((num_samples, 3), dtype=torch.float32)
+    near_indices = torch.where(df_values < 2 * float(np.max(spacing)))[0]
+    gradient_batch = max(1, max_batch // 4)
+    for start in range(0, len(near_indices), gradient_batch):
+        indices = near_indices[start : start + gradient_batch]
+        xyz = coordinates(indices).requires_grad_(True)
+        encoded = ws.fourier_transform(xyz) if fourier else xyz
+        values = decoder(_make_decoder_input(latent_vec, encoded))
+        gradients = torch.autograd.grad(values.sum(), xyz, only_inputs=True)[0]
+        normals[indices] = (-F.normalize(gradients, dim=1)).detach().cpu()
+    return df_values.reshape(*resolution), normals.reshape(*resolution, 3)
+
+
 def get_mesh_udf_fast(decoder, latent_vec, samples=None, indices=None, N_MC=128, fourier=False,
                         gradient=True, eps=0.1, border_gradients=False, smooth_borders=False,
                         vertex_max_batch=int(2 ** 16), surface_threshold=None,
-                        grid_bounds=None, device=None):
+                        grid_bounds=None, device=None, streamed_grid=False,
+                        query_batch=int(2 ** 18), fast_cleanup=False,
+                        mc_tile_cells=0):
     """
     Computes a triangulated mesh from a distance field network conditioned on the latent vector
     Inputs: 
@@ -303,22 +360,67 @@ def get_mesh_udf_fast(decoder, latent_vec, samples=None, indices=None, N_MC=128,
     resolution, grid_min, grid_max, spacing = _grid_spec(N_MC, grid_bounds)
     decoder_device = _decoder_device(decoder, latent_vec, device)
     ### 1: sample grid
-    df_values, normals, samples = get_udf_normals_grid_fast(
-        decoder,
-        latent_vec,
-        samples,
-        indices,
-        N=resolution,
-        fourier=fourier,
-        grid_bounds=np.concatenate([grid_min, grid_max]),
-        device=decoder_device,
-    )
+    if streamed_grid and samples is None and indices is None:
+        df_values, normals = get_udf_normals_grid_streamed(
+            decoder,
+            latent_vec,
+            resolution,
+            max_batch=query_batch,
+            fourier=fourier,
+            grid_bounds=np.concatenate([grid_min, grid_max]),
+            device=decoder_device,
+        )
+        samples = None
+    else:
+        df_values, normals, samples = get_udf_normals_grid_fast(
+            decoder,
+            latent_vec,
+            samples,
+            indices,
+            N=resolution,
+            max_batch=query_batch,
+            fourier=fourier,
+            grid_bounds=np.concatenate([grid_min, grid_max]),
+            device=decoder_device,
+        )
     df_values[df_values < 0] = 0
     ### 2: run our custom MC on it
-    verts, faces, _, _ = udf_mc_lewiner(df_values.cpu().detach().numpy(),
-                                        normals.cpu().detach().numpy(),
-                                        spacing=spacing)
-    verts = verts + grid_min
+    df_numpy = df_values.cpu().detach().numpy()
+    normals_numpy = normals.cpu().detach().numpy()
+    if mc_tile_cells and mc_tile_cells > 0:
+        tile_vertices, tile_faces, vertex_offset = [], [], 0
+        cell_counts = np.asarray(resolution) - 1
+        for sx in range(0, int(cell_counts[0]), mc_tile_cells):
+            ex = min(sx + mc_tile_cells, int(cell_counts[0]))
+            for sy in range(0, int(cell_counts[1]), mc_tile_cells):
+                ey = min(sy + mc_tile_cells, int(cell_counts[1]))
+                for sz in range(0, int(cell_counts[2]), mc_tile_cells):
+                    ez = min(sz + mc_tile_cells, int(cell_counts[2]))
+                    tile_normals = normals_numpy[sx : ex + 1, sy : ey + 1, sz : ez + 1]
+                    if not np.any(tile_normals):
+                        continue
+                    try:
+                        with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink):
+                            tile_v, tile_f, _, _ = udf_mc_lewiner(
+                                df_numpy[sx : ex + 1, sy : ey + 1, sz : ez + 1],
+                                tile_normals,
+                                spacing=spacing,
+                            )
+                    except RuntimeError as exc:
+                        if "No surface found" in str(exc):
+                            continue
+                        raise
+                    tile_v += grid_min + np.asarray((sx, sy, sz)) * spacing
+                    tile_vertices.append(tile_v)
+                    tile_faces.append(tile_f + vertex_offset)
+                    vertex_offset += len(tile_v)
+        if not tile_vertices:
+            return None, None, None
+        verts = np.concatenate(tile_vertices)
+        faces = np.concatenate(tile_faces)
+    else:
+        verts, faces, _, _ = udf_mc_lewiner(df_numpy, normals_numpy, spacing=spacing)
+        verts = verts + grid_min
     ### 3: evaluate vertices DF, and remove the ones that are too far
     if vertex_max_batch < 1:
         raise ValueError("vertex_max_batch must be at least 1")
@@ -352,16 +454,20 @@ def get_mesh_udf_fast(decoder, latent_vec, samples=None, indices=None, N_MC=128,
     # Fill single triangle holes
     filtered_mesh.fill_holes()
 
-    filtered_mesh_2 = trimesh.Trimesh(filtered_mesh.vertices, filtered_mesh.faces)
-    # Re-process the mesh until it is stable:
-    n_verts, n_faces, n_iter = 0, 0, 0
-    while (n_verts, n_faces) != (len(filtered_mesh_2.vertices), len(filtered_mesh_2.faces)) and n_iter<10:
-        filtered_mesh_2 = _clean_mesh(filtered_mesh_2, validate=False)
-        (n_verts, n_faces) = (len(filtered_mesh_2.vertices), len(filtered_mesh_2.faces))
-        n_iter += 1
-        filtered_mesh_2 = trimesh.Trimesh(filtered_mesh_2.vertices, filtered_mesh_2.faces)
-
-    filtered_mesh = trimesh.Trimesh(filtered_mesh_2.vertices, filtered_mesh_2.faces)
+    if fast_cleanup:
+        # One post-fill pass removes any duplicate/degenerate faces introduced
+        # while closing single-triangle holes without the legacy 10-pass loop.
+        filtered_mesh = _clean_mesh(filtered_mesh, validate=False)
+    else:
+        filtered_mesh_2 = trimesh.Trimesh(filtered_mesh.vertices, filtered_mesh.faces)
+        # Re-process the mesh until it is stable:
+        n_verts, n_faces, n_iter = 0, 0, 0
+        while (n_verts, n_faces) != (len(filtered_mesh_2.vertices), len(filtered_mesh_2.faces)) and n_iter<10:
+            filtered_mesh_2 = _clean_mesh(filtered_mesh_2, validate=False)
+            (n_verts, n_faces) = (len(filtered_mesh_2.vertices), len(filtered_mesh_2.faces))
+            n_iter += 1
+            filtered_mesh_2 = trimesh.Trimesh(filtered_mesh_2.vertices, filtered_mesh_2.faces)
+        filtered_mesh = trimesh.Trimesh(filtered_mesh_2.vertices, filtered_mesh_2.faces)
 
     if smooth_borders:
         # Identify borders: those appearing only once
@@ -498,6 +604,165 @@ def get_mesh_udf_fast(decoder, latent_vec, samples=None, indices=None, N_MC=128,
             samples,
             next_indices,
         )
+
+
+def _query_decoder(decoder, latent_vec, points, max_batch, fourier, device, gradients=False):
+    """Query UDF values, and optionally normalized negative gradients, in batches."""
+    values, vectors = [], []
+    for start in range(0, len(points), max_batch):
+        xyz = points[start : start + max_batch].to(device)
+        xyz.requires_grad_(gradients)
+        encoded = ws.fourier_transform(xyz) if fourier else xyz
+        if gradients:
+            value = decoder(_make_decoder_input(latent_vec, encoded))
+            grad = torch.autograd.grad(value.sum(), xyz, only_inputs=True)[0]
+            vectors.append((-F.normalize(grad, dim=1)).detach().cpu())
+        else:
+            with torch.no_grad():
+                value = decoder(_make_decoder_input(latent_vec, encoded))
+        values.append(value.detach().cpu())
+    value = torch.cat(values, dim=0).reshape(-1)
+    vector = torch.cat(vectors, dim=0) if gradients else None
+    return value, vector
+
+
+def get_mesh_udf_bricked(
+    decoder,
+    latent_vec,
+    N_MC=1024,
+    *,
+    fourier=False,
+    brick_cells=64,
+    cull_margin=1.25,
+    query_batch=262144,
+    vertex_max_batch=262144,
+    surface_threshold=None,
+    grid_bounds=None,
+    device=None,
+):
+    """Sparse narrow-band MeshUDF extraction using independently meshed bricks.
+
+    A coarse lattice with half-brick spacing conservatively identifies bricks
+    which may contain the surface.  Active bricks share their boundary grid
+    planes, and the final mesh welds coincident vertices once globally.
+    """
+    resolution, grid_min, grid_max, spacing = _grid_spec(N_MC, grid_bounds)
+    if brick_cells < 4 or query_batch < 1 or vertex_max_batch < 1:
+        raise ValueError("brick_cells must be >= 4 and batch sizes must be positive")
+    if not np.isfinite(cull_margin) or cull_margin <= 0:
+        raise ValueError("cull_margin must be positive and finite")
+    decoder_device = _decoder_device(decoder, latent_vec, device)
+    decoder.eval()
+
+    # Sample a shared lattice every half brick.  Any point in a brick lies no
+    # farther than sqrt(3) * half_step / 2 from one of these samples.
+    cell_counts = np.asarray(resolution, dtype=np.int64) - 1
+    coarse_step = max(2, brick_cells // 2)
+    coarse_axes = []
+    for count in cell_counts:
+        axis = np.arange(0, count + 1, coarse_step, dtype=np.int64)
+        if axis[-1] != count:
+            axis = np.append(axis, count)
+        coarse_axes.append(axis)
+    coarse_ijk = torch.cartesian_prod(
+        *(torch.as_tensor(axis, dtype=torch.float32, device=decoder_device) for axis in coarse_axes)
+    )
+    coarse_xyz = torch.as_tensor(grid_min, device=decoder_device, dtype=torch.float32) + coarse_ijk * torch.as_tensor(
+        spacing, device=decoder_device, dtype=torch.float32
+    )
+    coarse_values, _ = _query_decoder(
+        decoder, latent_vec, coarse_xyz, query_batch, fourier, decoder_device
+    )
+    coarse_values = coarse_values.reshape(*(len(axis) for axis in coarse_axes)).numpy()
+
+    active = []
+    brick_starts = [np.arange(0, count, brick_cells, dtype=np.int64) for count in cell_counts]
+    cover_radius = cull_margin * np.sqrt(3.0) * coarse_step * float(np.max(spacing)) * 0.5
+    for sx in brick_starts[0]:
+        ix = np.where((coarse_axes[0] >= sx) & (coarse_axes[0] <= min(sx + brick_cells, cell_counts[0])))[0]
+        for sy in brick_starts[1]:
+            iy = np.where((coarse_axes[1] >= sy) & (coarse_axes[1] <= min(sy + brick_cells, cell_counts[1])))[0]
+            for sz in brick_starts[2]:
+                iz = np.where((coarse_axes[2] >= sz) & (coarse_axes[2] <= min(sz + brick_cells, cell_counts[2])))[0]
+                if coarse_values[np.ix_(ix, iy, iz)].min() <= cover_radius:
+                    active.append((int(sx), int(sy), int(sz)))
+
+    all_vertices, all_faces = [], []
+    vertex_offset = 0
+    spacing_t = torch.as_tensor(spacing, device=decoder_device, dtype=torch.float32)
+    grid_min_t = torch.as_tensor(grid_min, device=decoder_device, dtype=torch.float32)
+    normal_band = 2.0 * float(np.max(spacing))
+    for sx, sy, sz in tqdm.tqdm(active, desc="MeshUDF bricks", leave=False):
+        ends = np.minimum(np.asarray((sx, sy, sz)) + brick_cells, cell_counts)
+        shape = tuple((ends - np.asarray((sx, sy, sz)) + 1).tolist())
+        axes = [torch.arange(n, device=decoder_device, dtype=torch.float32) for n in shape]
+        local_ijk = torch.stack(torch.meshgrid(*axes, indexing="ij"), dim=-1).reshape(-1, 3)
+        global_ijk = local_ijk + torch.tensor((sx, sy, sz), device=decoder_device)
+        xyz = grid_min_t + global_ijk * spacing_t
+        values, _ = _query_decoder(
+            decoder, latent_vec, xyz, query_batch, fourier, decoder_device
+        )
+        values.clamp_min_(0)
+        normals = torch.zeros((len(xyz), 3), dtype=torch.float32)
+        near = values < normal_band
+        if near.any():
+            _, near_normals = _query_decoder(
+                decoder,
+                latent_vec,
+                xyz[near.to(xyz.device)],
+                max(1, query_batch // 4),
+                fourier,
+                decoder_device,
+                gradients=True,
+            )
+            normals[near] = near_normals
+        try:
+            # The bundled Cython kernel prints one diagnostic per ambiguous
+            # zero-gradient case; suppress it for brick-wise extraction.
+            with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink):
+                verts, faces, _, _ = udf_mc_lewiner(
+                    values.reshape(shape).numpy(), normals.reshape(*shape, 3).numpy(), spacing=spacing
+                )
+        except RuntimeError as exc:
+            if "No surface found" in str(exc):
+                continue
+            raise
+        if not len(verts) or not len(faces):
+            continue
+        verts += grid_min + np.asarray((sx, sy, sz)) * spacing
+
+        pred_values = []
+        for start in range(0, len(verts), vertex_max_batch):
+            verts_t = torch.as_tensor(
+                verts[start : start + vertex_max_batch], device=decoder_device, dtype=torch.float32
+            )
+            value, _ = _query_decoder(
+                decoder, latent_vec, verts_t, vertex_max_batch, fourier, decoder_device
+            )
+            pred_values.append(value.numpy())
+        pred_values = np.concatenate(pred_values)
+        threshold = float(np.max(spacing)) / 6 if surface_threshold is None else float(surface_threshold)
+        faces = faces[np.max(pred_values[faces], axis=1) < threshold]
+        if not len(faces):
+            continue
+        all_vertices.append(verts)
+        all_faces.append(faces + vertex_offset)
+        vertex_offset += len(verts)
+
+    if not all_vertices:
+        return None, None, None
+    mesh = trimesh.Trimesh(
+        vertices=np.concatenate(all_vertices), faces=np.concatenate(all_faces), process=False
+    )
+    # One global weld is sufficient; avoid the dense path's repeated whole-mesh processing.
+    mesh.merge_vertices(digits_vertex=7)
+    mesh = _clean_mesh(mesh, validate=False)
+    mesh.fill_holes()
+    return (
+        torch.as_tensor(mesh.vertices, dtype=torch.float32, device=decoder_device),
+        torch.as_tensor(mesh.faces, dtype=torch.long, device=decoder_device),
+        mesh,
+    )
 
 
 def optimize(decoder, iterations, latent_start, mesh_target, lr=5e-3, fourier=False,

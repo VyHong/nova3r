@@ -18,9 +18,10 @@ WATERTIGHT_PROCESSING_SCRIPT = Path(__file__).with_name("watertight_and_sample.p
 UDF_PROCESSING_SCRIPT = Path(__file__).with_name("udf_sample.py").resolve()
 
 
-def output_prefix_for(mesh_path, data_root, output_root):
-    relative_path = mesh_path.relative_to(data_root)
-    return (output_root / relative_path).with_suffix("")
+def output_prefix_for(room_id, output_root):
+    """Keep the canonical ``scene/room_full`` UDF layout."""
+    room_path = Path(room_id)
+    return output_root / room_path.parent / f"{room_path.name}_full"
 
 
 def load_room_ids(json_paths):
@@ -36,16 +37,24 @@ def load_room_ids(json_paths):
 
         for value in ids:
             try:
-                room_ids.append(parse_room_id(value))
+                if isinstance(value, dict):
+                    scene = Path(value["scene"]).stem
+                    room_ids.append(parse_room_id(f"{scene}/{value['room']}"))
+                else:
+                    room_ids.append(parse_room_id(value))
             except (TypeError, ValueError) as error:
                 raise ValueError(f"Invalid entry in {json_path}: {error}") from error
+            except KeyError as error:
+                raise ValueError(
+                    f"Invalid manifest entry in {json_path}: missing {error.args[0]!r}"
+                ) from error
 
     # remove duplicates while preserving order
     return list(dict.fromkeys(room_ids))
 
 
 def find_selected_meshes(data_root, room_ids):
-    mesh_paths = []
+    meshes = []
     missing_rooms = []
     missing_meshes = []
 
@@ -56,18 +65,21 @@ def find_selected_meshes(data_root, room_ids):
             missing_rooms.append(room_id)
             continue
 
-        # The full room mesh is next to the room directory:
-        # scene_id/RoomName-1234_full.glb
-        full_mesh = room_dir.parent / f"{room_dir.name}_full.glb"
-
-        if not full_mesh.is_file():
+        # New renderer layout: scene_id/RoomName-1234/room.glb.
+        # Retain compatibility with the old sibling *_full.glb layout.
+        candidates = (
+            room_dir / "room.glb",
+            room_dir.parent / f"{room_dir.name}_full.glb",
+        )
+        mesh_path = next((path for path in candidates if path.is_file()), None)
+        if mesh_path is None:
             missing_meshes.append(room_id)
             continue
 
-        mesh_paths.append(full_mesh)
+        meshes.append((room_id, mesh_path))
 
-    mesh_paths = list(dict.fromkeys(mesh_paths))
-    return mesh_paths, missing_rooms, missing_meshes
+    meshes = list(dict.fromkeys(meshes))
+    return meshes, missing_rooms, missing_meshes
 
 
 def process_mesh(mesh_path, output_prefix, overwrite, udf_only, omit_color):
@@ -134,12 +146,12 @@ def main(
         print(f"  {path}")
 
     print(f"Searching selected rooms under {data_root}...")
-    mesh_paths, missing_rooms, missing_meshes = find_selected_meshes(data_root, room_ids)
+    meshes, missing_rooms, missing_meshes = find_selected_meshes(data_root, room_ids)
 
     if limit is not None:
-        mesh_paths = mesh_paths[:limit]
+        meshes = meshes[:limit]
 
-    print(f"Found {len(mesh_paths)} selected full GLB meshes.")
+    print(f"Found {len(meshes)} selected room GLB meshes.")
 
     if missing_rooms:
         print(f"Warning: {len(missing_rooms)} room directories were missing.")
@@ -151,14 +163,17 @@ def main(
     if missing_meshes:
         print(f"Warning: {len(missing_meshes)} room directories had no *_full.glb.")
         for room_id in missing_meshes[:10]:
-            print(f"  no mesh: {room_id}")
+            print(f"  no room.glb or *_full.glb: {room_id}")
         if len(missing_meshes) > 10:
             print("  ...")
 
-    if not mesh_paths:
+    if not meshes:
         return
 
-    jobs = [(mesh_path, output_prefix_for(mesh_path, data_root, output_root)) for mesh_path in mesh_paths]
+    jobs = [
+        (mesh_path, output_prefix_for(room_id, output_root))
+        for room_id, mesh_path in meshes
+    ]
 
     if dry_run:
         for mesh_path, output_prefix in jobs:
@@ -211,7 +226,9 @@ if __name__ == "__main__":
         "--data_root",
         type=Path,
         required=True,
-        help="Mounted 3D-FRONT scene directory, e.g. /tmp/datasets/3dfront/3D-FRONT-SCENE.",
+        help=("Room-render root containing scene/room/room.glb, e.g. "
+              "artifacts/3dfront_2100. The legacy scene/room_full.glb layout "
+              "is also accepted."),
     )
     parser.add_argument(
         "--output_root",
@@ -225,7 +242,8 @@ if __name__ == "__main__":
         nargs="+",
         required=True,
         help=("JSON lists containing scene/room ids, 'scene/room frame' samples, "
-              "or scene/room/room_panorama_N.png paths."),
+              "scene/room/room_panorama_N.png paths, or renderer manifest "
+              "objects with 'scene' and 'room' fields."),
     )
     parser.add_argument(
         "--workers",

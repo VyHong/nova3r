@@ -343,6 +343,12 @@ class Mesh2SDFLightningModule(pl.LightningModule):
             self.validation_options.num_save,
         )
 
+        sampling_kwargs = {}
+        if hasattr(self.model, "forward_with_cfg"):
+            sampling_kwargs["guidance_scale"] = float(
+                self.cfg.get("val_guidance_scale", self.cfg.get("test_guidance_scale", 1.0))
+            )
+
         with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
             _, recon_details, latents = self.model.lightning_forward(
                 val_batch_to_log,
@@ -350,6 +356,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                 kl_weight=0.0,
                 recon_latents=True,
                 deterministic_seed=42,
+                **sampling_kwargs,
             )
             latents = self._decode_latents_for_geometry(latents, decoder)
             surface = val_batch_to_log["surface"]
@@ -575,20 +582,83 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                 latent_target = latent_batch[sample_idx : sample_idx + 1].float().detach().clone()
                 udf_decoder = UDFGeoDecoderAdapter(decoder.geo_decoder, latent_target, bounds)
                 grid_bounds, grid_resolution = udf_decoder.mesh_udf_grid(self.mesh_options.udf_resolution)
-                _, _, mesh = get_mesh_udf_fast(
-                    udf_decoder,
-                    None,
-                    N_MC=grid_resolution,
-                    gradient=False,
-                    smooth_borders=self.mesh_options.smooth_borders,
-                    fourier=self.mesh_options.fourier,
-                    vertex_max_batch=self.mesh_options.vertex_batch_size,
-                    surface_threshold=self.mesh_options.surface_threshold,
-                    grid_bounds=grid_bounds,
-                    device=latent_target.device,
-                )
+                if self.mesh_options.udf_sparse_bricks:
+                    from training.mesh2sdf.tools.mesh_udf.mesh_udf import get_mesh_udf_bricked
+
+                    _, _, mesh = get_mesh_udf_bricked(
+                        udf_decoder,
+                        None,
+                        N_MC=grid_resolution,
+                        fourier=self.mesh_options.fourier,
+                        brick_cells=self.mesh_options.udf_brick_cells,
+                        cull_margin=self.mesh_options.udf_cull_margin,
+                        query_batch=self.mesh_options.udf_query_batch_size,
+                        vertex_max_batch=self.mesh_options.vertex_batch_size,
+                        surface_threshold=self.mesh_options.surface_threshold,
+                        grid_bounds=grid_bounds,
+                        device=latent_target.device,
+                    )
+                else:
+                    _, _, mesh = get_mesh_udf_fast(
+                        udf_decoder,
+                        None,
+                        N_MC=grid_resolution,
+                        gradient=False,
+                        smooth_borders=self.mesh_options.smooth_borders,
+                        fourier=self.mesh_options.fourier,
+                        vertex_max_batch=self.mesh_options.vertex_batch_size,
+                        surface_threshold=self.mesh_options.surface_threshold,
+                        grid_bounds=grid_bounds,
+                        device=latent_target.device,
+                        streamed_grid=self.mesh_options.udf_streamed_grid,
+                        query_batch=self.mesh_options.udf_query_batch_size,
+                        fast_cleanup=self.mesh_options.udf_fast_cleanup,
+                        mc_tile_cells=self.mesh_options.udf_mc_tile_cells,
+                    )
                 if mesh is not None:
                     mesh = udf_decoder.mesh_to_world(mesh)
+        elif method == "dualmeshudf":
+            from training.mesh2sdf.tools.dual_mesh_udf import extract_dual_mesh_udf
+
+            # Lightning's test loop uses inference mode, while DualMeshUDF
+            # needs spatial derivatives of the learned unsigned field.
+            with torch.inference_mode(False), torch.enable_grad():
+                latent_target = (
+                    latent_batch[sample_idx : sample_idx + 1]
+                    .float()
+                    .detach()
+                    .clone()
+                )
+                mesh = extract_dual_mesh_udf(
+                    decoder.geo_decoder,
+                    latent_target,
+                    bounds,
+                    max_depth=self.mesh_options.dualmesh_max_depth,
+                    batch_size=self.mesh_options.dualmesh_batch_size,
+                    reliability_threshold=self.mesh_options.dualmesh_reliability_threshold,
+                    subdivision_threshold=self.mesh_options.dualmesh_subdivision_threshold,
+                    projection_threshold=self.mesh_options.dualmesh_projection_threshold,
+                    qef_threshold=self.mesh_options.dualmesh_qef_threshold,
+                )
+        elif method == "dcx":
+            from training.mesh2sdf.tools.dcx_udf import extract_dcx_udf
+
+            with torch.inference_mode(False), torch.enable_grad():
+                latent_target = latent_batch[sample_idx : sample_idx + 1].float().detach().clone()
+                udf_decoder = UDFGeoDecoderAdapter(decoder.geo_decoder, latent_target, bounds)
+                mesh = extract_dcx_udf(
+                    udf_decoder,
+                    resolution=int(self.cfg.get("mesh_dcx_resolution", 128)),
+                    iterations=int(self.cfg.get("mesh_dcx_iterations", 25)),
+                    max_batch=int(self.cfg.get("mesh_dcx_max_batch", 262144)),
+                    threshold=float(self.cfg.get("mesh_dcx_threshold", 0.005)),
+                    learning_rate=float(self.cfg.get("mesh_dcx_learning_rate", 0.0005)),
+                    warm_up_end=int(self.cfg.get("mesh_dcx_warm_up_end", 25)),
+                    scan_block_size=int(self.cfg.get("mesh_dcx_scan_block_size", 1)),
+                    scan_lipschitz_safety=float(self.cfg.get("mesh_dcx_scan_lipschitz_safety", 1.5)),
+                    projection_batch_size=int(self.cfg.get("mesh_dcx_projection_batch_size", 50000)),
+                )
+                mesh = udf_decoder.mesh_to_world(mesh)
         elif method == "mind":
             try:
                 from mind import MIND
@@ -636,6 +706,34 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                     post_mesh.export(Path(artifact_dir) / "mind_after_postprocess.ply")
                 self.print(f"MIND postprocessing kept {len(mesh.vertices)} vertices and {len(mesh.faces)} faces")
                 mesh = udf_decoder.mesh_to_world(extractor.op_msdf_mesh(mesh, face_label))
+        elif method == "nsdudf":
+            from training.mesh2sdf.tools.nsdudf import extract_nsdudf
+
+            with torch.inference_mode(False), torch.enable_grad():
+                latent_target = latent_batch[sample_idx : sample_idx + 1].float().detach().clone()
+                udf_decoder = UDFGeoDecoderAdapter(decoder.geo_decoder, latent_target, bounds)
+                mesh = extract_nsdudf(
+                    udf_decoder,
+                    resolution=int(self.cfg.get("mesh_nsdudf_resolution", 129)),
+                    query_batch=int(self.cfg.get("mesh_nsdudf_query_batch_size", 10000)),
+                    max_avg_distance_factor=float(self.cfg.get("mesh_nsdudf_max_avg_factor", 1.2)),
+                    max_max_distance_factor=float(self.cfg.get("mesh_nsdudf_max_max_factor", 2.0)),
+                    target_faces=self.cfg.get("mesh_nsdudf_target_faces", None),
+                )
+                mesh = udf_decoder.mesh_to_world(mesh)
+        elif method == "hrudf":
+            from training.mesh2sdf.tools.hrudf import extract_hrudf
+
+            with torch.inference_mode(False), torch.enable_grad():
+                latent_target = latent_batch[sample_idx : sample_idx + 1].float().detach().clone()
+                udf_decoder = UDFGeoDecoderAdapter(decoder.geo_decoder, latent_target, bounds)
+                mesh = extract_hrudf(
+                    udf_decoder,
+                    resolution=int(self.cfg.get("mesh_hrudf_resolution", 129)),
+                    query_batch=int(self.cfg.get("mesh_hrudf_query_batch_size", 10000)),
+                    recursions=int(self.cfg.get("mesh_hrudf_recursions", 5)),
+                )
+                mesh = udf_decoder.mesh_to_world(mesh)
         else:
             raise ValueError(f"Unknown mesh extraction method: {method}")
 
@@ -763,6 +861,10 @@ class Mesh2SDFLightningModule(pl.LightningModule):
             mode=self.validation_options.normalization,
         )
 
+        sampling_kwargs = {}
+        if hasattr(self.model, "forward_with_cfg"):
+            sampling_kwargs["guidance_scale"] = float(self.cfg.get("test_guidance_scale", 1.0))
+
         with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
             _, _, latents = self.model.lightning_forward(
                 batch,
@@ -770,6 +872,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                 kl_weight=0.0,
                 recon_latents=True,
                 deterministic_seed=42 + batch_idx,
+                **sampling_kwargs,
             )
 
         if latents is None:

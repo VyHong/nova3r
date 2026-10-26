@@ -80,8 +80,10 @@ class Nova3RDataModule(pl.LightningDataModule):
             "data_root": params.pop("root_dir"),
         }
 
-        split_list_key = f"{split}_list_path"
-        kwargs["samples_list_path"] = params.pop(split_list_key)
+        if "list_path" in params:
+            kwargs["samples_list_path"] = params.pop("list_path")
+        else:
+            kwargs["samples_list_path"] = params.pop(f"{split}_list_path")
         kwargs.update(params)
         valid_params = set(inspect.signature(dataset_cls.__init__).parameters.keys())
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_params}

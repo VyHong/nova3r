@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract DINOv3 ViT features from equirectangular panoramas."""
+"""Extract DINOv2 or DINOv3 ViT features from equirectangular panoramas."""
 from __future__ import annotations
 
 import argparse
@@ -16,6 +16,7 @@ import numpy as np
 from PIL import Image, ImageOps
 import torch
 from torch.utils.data import DataLoader, Dataset
+from tqdm.auto import tqdm
 
 from nova3r.utils.three_d_front import parse_panorama_sample
 
@@ -94,12 +95,19 @@ def parse_args():
     parser.add_argument('--split-list', type=Path,
                         help=("Optional '<scene> <frame>' JSON list. For 3D-FRONT, "
                               "scene is '<scene-id>/<room-id>'."))
-    parser.add_argument('--model', default='facebook/dinov3-vitl16-pretrain-lvd1689m',
-                        help='Hugging Face DINOv3 ViT model ID or local pretrained directory.')
+    parser.add_argument('--backbone', choices=('dinov2', 'dinov3'), default='dinov3',
+                        help='Backbone family (default: dinov3).')
+    parser.add_argument('--model',
+                        help='Hugging Face model ID or local pretrained directory.')
     parser.add_argument('--batch-size', type=int, default=4,
-                        help='Panoramas per DINOv3 forward (default: 4).')
+                        help='Panoramas per forward (default: 4).')
     parser.add_argument('--num-workers', type=int, default=8,
                         help='Panorama decode/preprocess workers (default: 8).')
+    parser.add_argument(
+        '--include-cls-token',
+        action=argparse.BooleanOptionalAction, default=None,
+        help='Prepend CLS to patch_features (default: enabled for DINOv2).',
+    )
     parser.add_argument('--overwrite', action='store_true')
     parser.add_argument('--limit', type=int)
     parser.add_argument('--num-shards', type=int, default=1)
@@ -120,7 +128,13 @@ def parse_args():
     args.scannetpp = args.dataset_layout == 'scannetpp'
     if args.split_list is not None and args.dataset_layout == 'generic':
         parser.error('--split-list requires an explicit --dataset-layout')
-    args.resolution = RESOLUTION
+    args.model = args.model or {
+        'dinov2': 'facebook/dinov2-large',
+        'dinov3': 'facebook/dinov3-vitl16-pretrain-lvd1689m',
+    }[args.backbone]
+    if args.include_cls_token is None:
+        args.include_cls_token = args.backbone == 'dinov2'
+    args.resolution = 518 if args.backbone == 'dinov2' else RESOLUTION
     args.device = 'cuda'
     args.inference_dtype = INFERENCE_DTYPE
     args.save_dtype = SAVE_DTYPE
@@ -133,10 +147,22 @@ def parse_args():
 
 
 def load_model(args, device):
+    # Transformers 5 imports scikit-learn's generation helpers even for vision
+    # models. Some environments contain an optional pyarrow wheel built for a
+    # newer NumPy, which then prevents AutoModel from importing. Feature
+    # extraction does not use pyarrow, so treat that broken optional install as
+    # unavailable without changing the environment's NumPy stack.
+    try:
+        import pyarrow  # noqa: F401
+    except ImportError:
+        for module_name in tuple(sys.modules):
+            if module_name == 'pyarrow' or module_name.startswith('pyarrow.'):
+                sys.modules.pop(module_name, None)
+        sys.modules['pyarrow'] = None
     try:
         from transformers import AutoImageProcessor, AutoModel
     except ImportError as exc:
-        raise RuntimeError('Install DINOv3 support: pip install "transformers>=4.56.0" torchvision') from exc
+        raise RuntimeError(f'Could not import Transformers vision support: {exc}') from exc
     options = dict(
         revision=getattr(args, 'revision', 'main'),
         local_files_only=getattr(args, 'local_files_only', False),
@@ -147,17 +173,21 @@ def load_model(args, device):
     # Hugging Face automatically uses HF_TOKEN or the token saved by hf auth login.
     processor = AutoImageProcessor.from_pretrained(args.model, **options)
     model = AutoModel.from_pretrained(args.model, **options)
-    if model.config.model_type != 'dinov3_vit':
-        raise ValueError('--model must be a DINOv3 ViT backbone')
-    if model.config.patch_size != 16:
-        raise ValueError('Expected a DINOv3 ViT backbone with patch size 16')
+    expected_type = {'dinov2': 'dinov2', 'dinov3': 'dinov3_vit'}[args.backbone]
+    expected_patch_size = 14 if args.backbone == 'dinov2' else 16
+    if model.config.model_type != expected_type:
+        raise ValueError(f'--model must match --backbone {args.backbone}')
+    if model.config.patch_size != expected_patch_size:
+        raise ValueError(f'Expected patch size {expected_patch_size} for {args.backbone}')
+    if args.backbone == 'dinov2' and model.config.hidden_size != 1024:
+        raise ValueError('Expected a DINOv2-L backbone with width 1024')
     return model.to(device=device, dtype=torch.float32).eval(), processor
 
 
 @torch.inference_mode()
 def extract_features(model, images, device, batch_size, inference_dtype='float32'):
     patches, cls = [], []
-    patch_start = 1 + model.config.num_register_tokens
+    patch_start = 1 + getattr(model.config, 'num_register_tokens', 0)
     for chunk in images.split(batch_size):
         with torch.autocast(
             device_type=device.type,
@@ -195,6 +225,30 @@ def build_jobs(args):
             frame = f'{int(path.stem):05d}'
             if selected is None or (scene, frame) in selected:
                 jobs.append((path, args.output_root / scene / f'{frame}.pt'))
+    elif args.dataset_layout == 'sage10k':
+        selected = None
+        if args.split_list is not None:
+            selected = {
+                (scene, int(frame))
+                for scene, frame in (
+                    sample.split() for sample in json.loads(args.split_list.read_text())
+                )
+            }
+        jobs = []
+        for path in sorted(args.panorama_root.glob('*/*_panorama_*.*')):
+            if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
+                continue
+            scene = path.relative_to(args.panorama_root).parts[0]
+            marker = '_panorama_'
+            frame_text = path.stem.rsplit(marker, 1)[-1]
+            if marker not in path.stem or not frame_text.isdigit():
+                continue
+            frame = int(frame_text)
+            if selected is not None and (scene, frame) not in selected:
+                continue
+            jobs.append(
+                (path, args.output_root / scene / f'{path.stem}.pt')
+            )
     elif args.dataset_layout == '3dfront':
         selected = None
         if args.split_list is not None:
@@ -207,7 +261,13 @@ def build_jobs(args):
             }
         jobs = []
         for path in sorted(args.panorama_root.glob('*/*/*_panorama_*.png')):
-            if not path.is_file() or not (path.parent / '.complete.json').is_file():
+            # The current room renderer writes metadata.json. Retain support for
+            # archives produced by the older renderer, which used .complete.json.
+            room_complete = any(
+                (path.parent / marker).is_file()
+                for marker in ('metadata.json', '.complete.json')
+            )
+            if not path.is_file() or not room_complete:
                 continue
             relative_room = path.parent.relative_to(args.panorama_root).as_posix()
             marker = '_panorama_'
@@ -254,9 +314,9 @@ def main():
 
 def process_panoramas(args, pending, model, processor, device):
     """Batch panoramas and save one independent CPU feature file per image."""
-    completed = 0
     dtype = getattr(torch, args.save_dtype)
-    grid = [args.resolution // 16, args.resolution * 2 // 16]
+    patch_size = model.config.patch_size
+    grid = [args.resolution // patch_size, args.resolution * 2 // patch_size]
     loader_options = {
         'batch_size': args.batch_size,
         'shuffle': False,
@@ -282,59 +342,71 @@ def process_panoramas(args, pending, model, processor, device):
         f'pin_memory={loader_options["pin_memory"]}',
         flush=True,
     )
-    for indices, images, original_sizes, bottom_paddings, masked_pixel_counts in loader:
-        patches, cls = extract_features(
-            model, images, device, batch_size=len(images),
-            inference_dtype=args.inference_dtype,
-        )
-        if patches.ndim != 3 or patches.shape[1] != grid[0] * grid[1]:
-            raise RuntimeError(f'Unexpected patch feature shape: {tuple(patches.shape)}')
-        for batch_index, (index, original_size, bottom_padding, masked_pixels) in enumerate(
-            zip(
-                indices.tolist(), original_sizes.tolist(), bottom_paddings.tolist(),
-                masked_pixel_counts.tolist(),
+    progress = tqdm(total=len(pending), desc=f'Extracting {args.backbone}', unit='panorama')
+    try:
+        for indices, images, original_sizes, bottom_paddings, masked_pixel_counts in loader:
+            patches, cls = extract_features(
+                model, images, device, batch_size=len(images),
+                inference_dtype=args.inference_dtype,
             )
-        ):
-            path, output = pending[index]
-            mask_path = path.parents[1] / 'anon_mask' / f'{path.stem}.png'
-            result = {
-                'patch_features': patches[batch_index].to(dtype).clone(),
-                'cls_features': cls[batch_index].to(dtype).clone(),
-                'grid_size': grid,
-                'patch_size': 16,
-                'projection': 'equirectangular',
-                'dataset_layout': args.dataset_layout,
-                'original_size': original_size,
-                'padded_size': [original_size[0] + bottom_padding, original_size[1]],
-                'bottom_padding': bottom_padding,
-                'anonymization_mask': str(mask_path.resolve()) if args.scannetpp else None,
-                'masked_pixels': masked_pixels,
-                'masked_color_rgb': [0, 0, 0] if args.scannetpp else None,
-                'preprocessing': (
-                    'apply_anon_mask_then_pad_bottom_to_2to1_then_resize'
-                    if args.scannetpp
-                    else 'resize'
-                ),
-                'input_size': [args.resolution, args.resolution * 2],
-                'normalization_mean': list(processor.image_mean),
-                'normalization_std': list(processor.image_std),
-                'source': str(path.resolve()),
-                'model': args.model,
-                'revision': args.revision,
-                'model_commit': getattr(model.config, '_commit_hash', None),
-                'inference_dtype': args.inference_dtype,
-            }
-            output.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(dir=output.parent, suffix='.tmp', delete=False) as f:
-                temporary = Path(f.name)
-            try:
-                torch.save(result, temporary)
-                temporary.replace(output)
-            finally:
-                temporary.unlink(missing_ok=True)
-            completed += 1
-            print(f'[{completed}/{len(pending)}] Saved {tuple(result["patch_features"].shape)} to {output}', flush=True)
-        del images, patches, cls
+            if patches.ndim != 3 or patches.shape[1] != grid[0] * grid[1]:
+                raise RuntimeError(f'Unexpected patch feature shape: {tuple(patches.shape)}')
+            for batch_index, (index, original_size, bottom_padding, masked_pixels) in enumerate(
+                zip(
+                    indices.tolist(), original_sizes.tolist(), bottom_paddings.tolist(),
+                    masked_pixel_counts.tolist(),
+                )
+            ):
+                path, output = pending[index]
+                mask_path = path.parents[1] / 'anon_mask' / f'{path.stem}.png'
+                patch_features = patches[batch_index]
+                if args.include_cls_token:
+                    patch_features = torch.cat(
+                        (cls[batch_index].unsqueeze(0), patch_features), dim=0
+                    )
+                result = {
+                    'patch_features': patch_features.to(dtype).clone(),
+                    'cls_features': cls[batch_index].to(dtype).clone(),
+                    'grid_size': grid,
+                    'patch_size': patch_size,
+                    'includes_cls_token': args.include_cls_token,
+                    'projection': 'equirectangular',
+                    'dataset_layout': args.dataset_layout,
+                    'original_size': original_size,
+                    'padded_size': [original_size[0] + bottom_padding, original_size[1]],
+                    'bottom_padding': bottom_padding,
+                    'anonymization_mask': str(mask_path.resolve()) if args.scannetpp else None,
+                    'masked_pixels': masked_pixels,
+                    'masked_color_rgb': [0, 0, 0] if args.scannetpp else None,
+                    'preprocessing': (
+                        'apply_anon_mask_then_pad_bottom_to_2to1_then_resize'
+                        if args.scannetpp
+                        else 'resize'
+                    ),
+                    'input_size': [args.resolution, args.resolution * 2],
+                    'normalization_mean': list(processor.image_mean),
+                    'normalization_std': list(processor.image_std),
+                    'source': str(path.resolve()),
+                    'model': args.model,
+                    'revision': args.revision,
+                    'model_commit': getattr(model.config, '_commit_hash', None),
+                    'inference_dtype': args.inference_dtype,
+                }
+                if args.include_cls_token:
+                    result['cls_token_index'] = 0
+                output.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(dir=output.parent, suffix='.tmp', delete=False) as f:
+                    temporary = Path(f.name)
+                try:
+                    torch.save(result, temporary)
+                    temporary.replace(output)
+                finally:
+                    temporary.unlink(missing_ok=True)
+                progress.update(1)
+                progress.set_postfix_str(str(output), refresh=False)
+            del images, patches, cls
+    finally:
+        progress.close()
 
 
 if __name__ == '__main__':

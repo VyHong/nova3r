@@ -36,7 +36,7 @@ python -m pip install flash-attn==2.7.3 --no-build-isolation
 
 cd /mnt/home/vyhong/projects/nova3r
 
-ATTN_BACKEND=xformers MALLOC_ARENA_MAX=2 \
+ATTN_BACKEND=xformers SPARSE_ATTN_BACKEND=xformers MALLOC_ARENA_MAX=2 \
 python -m eval.baselines.run \
   --model genrecon \
   --dataset-layout sage10k \
@@ -52,6 +52,28 @@ python -m eval.baselines.run \
   --eval-points 50000 \
   --genrecon-surface-points 50000 \
   --genrecon-proj-batch-voxels 2048 \
+  --save-predictions \
+  --fail-fast
+
+# ScanNet++ final 100: prepared 90-degree cubemaps, GT-layout chunking, and
+# two persistent GenRecon workers sharing one GPU.
+ATTN_BACKEND=xformers \
+SPARSE_ATTN_BACKEND=xformers \
+MALLOC_ARENA_MAX=2 \
+python -m eval.baselines.run \
+  --model genrecon \
+  --dataset-layout scannetpp \
+  --input-projection cubemap \
+  --cubemap-root datasets/scannetpp/cubemaps/final_test_100_prepared_cube_90 \
+  --cubemap-fov 90 \
+  --split-list data/scannetpp/final_test_list.json \
+  --genrecon-scannet-chunk-source evaluation_surface \
+  --genrecon-ss-ckpt third_party/GenRecon/sparse_structure.pt \
+  --genrecon-shape-ckpt third_party/GenRecon/shape_slat.pt \
+  --genrecon-tex-ckpt third_party/GenRecon/texture_slat.pt \
+  --workers 2 \
+  --device cuda:0 \
+  --output-dir eval_results/baselines/genrecon/scannetpp_final_test_100_cube90_gt_layout_xformers \
   --save-predictions \
   --fail-fast
   
@@ -83,7 +105,7 @@ CUDA_VISIBLE_DEVICES=0 python -m eval.baselines.run \
   --input-projection cubemap \
   --output-dir eval_results/baselines/da3/sage10k_cubemap
 
-ATTN_BACKEND=xformers MALLOC_ARENA_MAX=2 CUDA_VISIBLE_DEVICES=0 \
+ATTN_BACKEND=xformers SPARSE_ATTN_BACKEND=xformers MALLOC_ARENA_MAX=2 CUDA_VISIBLE_DEVICES=0 \
 python -m eval.baselines.run \
   "${COMMON_ARGS[@]}" \
   --model genrecon \
@@ -95,7 +117,7 @@ python -m eval.baselines.run \
   --genrecon-proj-batch-voxels 2048 \
   --output-dir eval_results/baselines/genrecon/sage10k_erp
 
-ATTN_BACKEND=xformers MALLOC_ARENA_MAX=2 CUDA_VISIBLE_DEVICES=0 \
+ATTN_BACKEND=xformers SPARSE_ATTN_BACKEND=xformers MALLOC_ARENA_MAX=2 CUDA_VISIBLE_DEVICES=0 \
 python -m eval.baselines.run \
   "${COMMON_ARGS[@]}" \
   --model genrecon \

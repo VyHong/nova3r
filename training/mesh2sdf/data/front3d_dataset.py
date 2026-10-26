@@ -29,8 +29,11 @@ class Front3DSDFDataset(SDFDatasetMixin):
         image_feature_root=None, gt_latent_root=None, gt_latent_source="latent",
         subseq_ids=None, modalities=None, load_visible_geometry_latent=False,
         visible_geometry_latent_root=None,
+        geometry_coordinate_frame=None,
     ):
         super().__init__(common_conf)
+        if geometry_coordinate_frame is not None:
+            self.configure_geometry_coordinate_frame(geometry_coordinate_frame)
         self.data_root = Path(data_root)
         self.sdf_data_root = Path(sdf_data_root) if sdf_data_root else self.data_root
         self.pose_root = Path(pose_root) if pose_root is not None else self.data_root
@@ -138,15 +141,15 @@ class Front3DSDFDataset(SDFDatasetMixin):
         if not path.is_file():
             raise FileNotFoundError(f"Missing panorama image features: {path}")
         checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-        if not isinstance(checkpoint, dict) or checkpoint.get("projection") != "equirectangular":
-            raise ValueError(f"Expected equirectangular feature dictionary: {path}")
-        return self._validate_single_latent(
-            checkpoint.get("patch_features"), path, "panorama patch features"
-        )
+        return self._load_panorama_image_features(checkpoint, path)
 
     def _load_views(self, annotation, subseq_ids, load_images, load_cameras, need_transform):
-        camera_data = json.loads(Path(annotation["camera_data"]).read_text()) if need_transform else None
         panorama_w2c = self._load_panorama_w2c(annotation) if need_transform else None
+        # Geometry-only ShapeVAE training uses the panorama camera frame and
+        # does not require materialized cubemap faces or camera_data.json.
+        if need_transform and not load_images and not load_cameras:
+            return [], [], [], panorama_w2c
+        camera_data = json.loads(Path(annotation["camera_data"]).read_text()) if need_transform else None
         images, extrinsics, intrinsics = [], [], []
         first_w2c = None
         for order, subseq_id in enumerate(subseq_ids):
@@ -200,9 +203,10 @@ class Front3DSDFDataset(SDFDatasetMixin):
                 )
         geo_points = self.add_exact_surface_points(rng, surface, geo_points)
         transform = torch.from_numpy(world_to_camera).float()
+        transform = self.geometry_input_transform(transform)
         if surface is not None:
             surface[:, :3] = surface[:, :3] @ transform[:3, :3].T + transform[:3, 3]
-            if surface.shape[1] >= 6:
+            if self.return_normal:
                 surface[:, 3:6] = surface[:, 3:6] @ transform[:3, :3].T
         if geo_points is not None:
             geo_points[:, :3] = geo_points[:, :3] @ transform[:3, :3].T + transform[:3, 3]
@@ -250,7 +254,7 @@ class Front3DSDFDataset(SDFDatasetMixin):
         if self.load_visible_geometry_latent:
             batch["visible_geometry_latents"] = self._load_visible_geometry_latent(seq_name, ids)
         if "image_features" in self.modalities:
-            batch["image_features"] = self._load_image_features(seq_name, annotation)
+            batch.update(self._load_image_features(seq_name, annotation))
         if self.load_gt_latent:
             latent = self._load_gt_latent(seq_name, ids)
             batch.update(latent if isinstance(latent, dict) else {"gt_latents": latent})
