@@ -51,29 +51,9 @@ RUN bash -c "
   
   echo 'Mounting dataset using FUSE...'
 
-  mount_pids=()
-  mount_dataset() {
-    bash bulk_mount_mount_zip.sh \"\$@\" &
-    mount_pids+=(\$!)
-  }
-
-  mount_dataset /mnt/projects/theses/vyhong/scannetpp/cubemap_data.zip /tmp/datasets/scannetpp -o precache
-  mount_dataset /mnt/projects/theses/vyhong/scannetpp/udf_color.zip /tmp/datasets/scannetpp -o precache
-  mount_dataset /mnt/projects/theses/vyhong/scannetpp/dinov2_latents.zip /tmp/datasets/scannetpp -o precache
-  mount_dataset /mnt/projects/theses/vyhong/scannetpp/fix_vis_latents.zip /tmp/datasets/scannetpp -o precache
-  mount_dataset /mnt/projects/theses/vyhong/scannetpp/fix_gt_latents.zip /tmp/datasets/scannetpp -o precache
-
-  mount_dataset /mnt/projects/theses/vyhong/sage-10k/udf.zip /tmp/datasets/sage-10k
-  mount_dataset /mnt/projects/theses/vyhong/sage-10k/cubemap_data.zip /tmp/datasets/sage-10k -o notrim
-  mount_dataset /mnt/projects/theses/vyhong/sage-10k/dinov2_latents.zip /tmp/datasets/sage-10k
-  mount_dataset /mnt/projects/theses/vyhong/sage-10k/fix_vis_latents.zip /tmp/datasets/sage-10k
-  mount_dataset /mnt/projects/theses/vyhong/sage-10k/fix_gt_latents.zip /tmp/datasets/sage-10k
-
-  mount_dataset /mnt/projects/theses/vyhong/3dfront/panorama_scenes.zip /tmp/datasets/3dfront
-  mount_dataset /mnt/projects/theses/vyhong/3dfront/better_udf.zip /tmp/datasets/3dfront
-  mount_dataset /mnt/projects/theses/vyhong/3dfront/better_gt_latents.zip /tmp/datasets/3dfront
-  mount_dataset /mnt/projects/theses/vyhong/3dfront/better_dinov2_latents.zip /tmp/datasets/3dfront
-  mount_dataset /mnt/projects/theses/vyhong/3dfront/better_vis_latents.zip /tmp/datasets/3dfront
+  # Share the mount definitions, including merged original/additional 3D-FRONT.
+  SCANNETPP_PRECACHE=1 bash mount_datasets.sh &
+  mount_pid=\$!
 
   # Keep the allocated GPU active while mount-zip populates its caches. This
   # process is stopped before training claims the GPU.
@@ -88,11 +68,9 @@ RUN bash -c "
   trap stop_gpu_keepalive EXIT INT TERM
 
   mount_failed=0
-  for pid in \"\${mount_pids[@]}\"; do
-    if ! wait \"\$pid\"; then
-      mount_failed=1
-    fi
-  done
+  if ! wait \"\$mount_pid\"; then
+    mount_failed=1
+  fi
   stop_gpu_keepalive
   trap - EXIT INT TERM
 
@@ -108,7 +86,7 @@ RUN bash -c "
   echo 'Running training...'
   # Resume the full training state from experiment.resume_checkpoint in the config.
   python -u training/resume_train.py \
-    --config checkpoints/hunyuan_dit/config_hunyuandit_panorama_visible_latent.yaml
+    --config checkpoints/hunyuan/.hydra/config.yaml
 "
 training_status=$?
 

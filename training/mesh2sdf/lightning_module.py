@@ -1,3 +1,5 @@
+from training.mesh2sdf.empty_space_sampling import append_horizontal_empty_points
+
 import hashlib
 import json
 import traceback
@@ -128,6 +130,14 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         self.val_criterion = SDFReconstructionLoss(MSE)
         self.test_criterion = None
 
+        self.horizontal_empty_points = int(cfg.get("horizontal_empty_points", 0))
+        self.empty_space_vertical_axis = int(cfg.get("empty_space_vertical_axis", 1))
+        if self.horizontal_empty_points < 0:
+            raise ValueError("horizontal_empty_points must be non-negative")
+        if self.empty_space_vertical_axis not in (0, 1, 2):
+            raise ValueError("empty_space_vertical_axis must be 0, 1, or 2")
+        if self.horizontal_empty_points and cfg.get("surface_geo_normalize_mode", "median") == "none":
+            raise ValueError("horizontal_empty_points requires surface/geometry normalization")
         self.validation_options = ValidationOptions.from_config(cfg)
         self.mesh_options = MeshOptions.from_config(cfg)
         self.evaluation_options = EvaluationOptions.from_config(cfg)
@@ -216,6 +226,8 @@ class Mesh2SDFLightningModule(pl.LightningModule):
             )
             normalized_geo_points[..., 3:4] = normalized_geo_points[..., 3:4] * coord_scale
             normalized_batch["geo_points"] = normalized_geo_points
+        if "mesh_bounds_corners" in batch:
+            normalized_batch["mesh_bounds_corners"] = (batch["mesh_bounds_corners"] - center) * coord_scale
         normalized_batch["surface_geo_norm_center"] = center
         normalized_batch["surface_geo_norm_factor"] = norm_factor
         return normalized_batch
@@ -225,6 +237,11 @@ class Mesh2SDFLightningModule(pl.LightningModule):
             batch,
             mode=self.validation_options.normalization,
         )
+        if self.horizontal_empty_points:
+            batch = append_horizontal_empty_points(
+                batch, self.horizontal_empty_points, self.model.sdf_label_scale,
+                vertical_axis=self.empty_space_vertical_axis,
+            )
         loss, details, _ = self.model.lightning_forward(
             batch,
             self.train_criterion,

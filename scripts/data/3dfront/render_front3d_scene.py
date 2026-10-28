@@ -35,6 +35,14 @@ HDRI_ROTATION = math.radians(float(os.environ.get("FRONT3D_HDRI_ROTATION", "0"))
 HDRI_STRENGTH = float(os.environ.get("FRONT3D_HDRI_STRENGTH", "1"))
 CEILING_EMISSION_STRENGTH = float(os.environ.get("FRONT3D_CEILING_EMISSION_STRENGTH", "0.8"))
 LAMP_EMISSION_STRENGTH = float(os.environ.get("FRONT3D_LAMP_EMISSION_STRENGTH", "7.0"))
+DOOR_OPEN_PROBABILITY = float(os.environ.get("FRONT3D_OPEN_DOOR_PROBABILITY", "0.45"))
+DOOR_FULLY_OPEN_PROBABILITY = float(os.environ.get("FRONT3D_FULLY_OPEN_DOOR_PROBABILITY", "0.30"))
+DOOR_MIN_ANGLE = float(os.environ.get("FRONT3D_DOOR_MIN_ANGLE", "12"))
+DOOR_MAX_ANGLE = float(os.environ.get("FRONT3D_DOOR_MAX_ANGLE", "85"))
+if not (0 <= DOOR_OPEN_PROBABILITY <= 1 and 0 <= DOOR_FULLY_OPEN_PROBABILITY <= 1):
+    raise ValueError("Door probabilities must be in [0, 1]")
+if not (0 < DOOR_MIN_ANGLE <= DOOR_MAX_ANGLE <= 90):
+    raise ValueError("Door angles must satisfy 0 < min <= max <= 90 degrees")
 ROOM_INSTANCE = os.environ["FRONT3D_ROOM"]
 
 
@@ -53,7 +61,7 @@ window_uids = {
     uid for uid in room_mesh_uids if mesh_by_uid[uid].get("type") == "Window"
 }
 if not window_uids:
-    raise RuntimeError(f"{ROOM_INSTANCE} does not contain a window mesh")
+    print(f"{ROOM_INSTANCE} has no windows; rendering with environment and interior lighting", flush=True)
 
 # Source coordinates are X/Y-up/Z; BlenderProc converts them to Blender X/Y/Z.
 # Retain the target floor footprint for camera placement and for discovering
@@ -433,10 +441,15 @@ for opening in list(bpy.context.scene.objects):
         slab_depth = 0.045
         leaf_width = width - 2 * gap
         door_rng = random.Random(f"door:{SCENE.stem}:{opening.name}")
-        is_open = door_rng.random() < float(os.environ.get("FRONT3D_OPEN_DOOR_PROBABILITY", "0.45"))
+        is_open = door_rng.random() < DOOR_OPEN_PROBABILITY
         # Keep open doors only slightly ajar so the neighboring room provides
         # context without exposing most of its contents.
-        angle_degrees = door_rng.uniform(12.0, 32.0) if is_open else 0.0
+        if not is_open:
+            angle_degrees = 0.0
+        elif door_rng.random() < DOOR_FULLY_OPEN_PROBABILITY:
+            angle_degrees = 90.0
+        else:
+            angle_degrees = door_rng.uniform(DOOR_MIN_ANGLE, DOOR_MAX_ANGLE)
         hinge_at_high = door_rng.random() < 0.5
         swing_sign = -1.0 if door_rng.random() < 0.5 else 1.0
 
@@ -570,6 +583,24 @@ render_width = int(os.environ.get("FRONT3D_WIDTH", "1036"))
 render_samples = int(os.environ.get("FRONT3D_SAMPLES", "128"))
 encode_workers = int(os.environ.get("FRONT3D_ENCODE_WORKERS", "4"))
 num_views = int(os.environ.get("FRONT3D_VIEWS", "1"))
+requested_view_count = num_views
+adaptive_views = os.environ.get("FRONT3D_ADAPTIVE_VIEWS", "0") == "1"
+room_floor_area = 0.0
+if adaptive_views:
+    # Project floor polygons into world XY; this avoids counting wall/roof area.
+    for obj in target_sampler_objects:
+        if not obj.get_name().lower().startswith("floor"):
+            continue
+        mesh_obj = obj.blender_obj
+        for polygon in mesh_obj.data.polygons:
+            coords = [mesh_obj.matrix_world @ mesh_obj.data.vertices[i].co for i in polygon.vertices]
+            room_floor_area += abs(sum(
+                a.x * b.y - b.x * a.y
+                for a, b in zip(coords, coords[1:] + coords[:1])
+            )) * 0.5
+    if room_floor_area > 0:
+        num_views = min(num_views, 3 if room_floor_area < 8 else 5 if room_floor_area < 16 else num_views)
+    print(f"Adaptive views: floor area={room_floor_area:.2f} m², views={num_views}", flush=True)
 if min(render_width, render_samples, encode_workers, num_views) < 1:
     raise ValueError("render width, samples, encode workers, and views must be positive")
 camera_height_min = float(os.environ.get("FRONT3D_CAMERA_HEIGHT_MIN", "1.4"))
@@ -591,9 +622,43 @@ bproc.camera.set_resolution(512, 512)
 camera = bpy.context.scene.camera
 camera.data.type = "PERSP"
 camera.data.lens = 24
-point_sampler = bproc.sampler.Front3DPointInRoomSampler(
-    target_sampler_objects, amount_of_objects_needed_per_room=0
-)
+class FloorTriangleSampler:
+    """Sample target floor triangles by projected area, without furniture filters."""
+
+    def __init__(self, triangles):
+        triangles = np.asarray(triangles, dtype=float).reshape(-1, 3, 3)
+        edges_a = triangles[:, 1, :2] - triangles[:, 0, :2]
+        edges_b = triangles[:, 2, :2] - triangles[:, 0, :2]
+        areas = np.abs(edges_a[:, 0] * edges_b[:, 1] - edges_a[:, 1] * edges_b[:, 0]) * 0.5
+        valid = np.isfinite(triangles).all(axis=(1, 2)) & np.isfinite(areas) & (areas > 1e-10)
+        self.triangles = triangles[valid]
+        areas = areas[valid]
+        if not len(areas):
+            raise RuntimeError("Target room has no nondegenerate floor triangles")
+        self.probabilities = areas / areas.sum()
+
+    def sample(self, height):
+        triangle = self.triangles[np.random.choice(len(self.triangles), p=self.probabilities)]
+        u, v = np.random.random(2)
+        root_u = np.sqrt(u)
+        point = (1 - root_u) * triangle[0] + root_u * (1 - v) * triangle[1] + root_u * v * triangle[2]
+        point[2] += height
+        return point
+
+
+floor_triangles = []
+for obj in target_sampler_objects:
+    if not obj.get_name().lower().startswith("floor"):
+        continue
+    mesh_obj = obj.blender_obj
+    mesh_obj.data.calc_loop_triangles()
+    for triangle in mesh_obj.data.loop_triangles:
+        floor_triangles.append([
+            tuple(mesh_obj.matrix_world @ mesh_obj.data.vertices[index].co)
+            for index in triangle.vertices
+        ])
+point_sampler = FloorTriangleSampler(floor_triangles)
+print("floor_sampler=projected_triangle_area_v1", flush=True)
 bvh_tree = bproc.object.create_bvh_tree_multi_objects([
     obj for obj in loaded if isinstance(obj, bproc.types.MeshObject)
 ])
@@ -620,7 +685,7 @@ while sampling_attempts < camera_max_tries and len(camera_poses) < num_views:
     coverage_scores = []
     if camera_sampler == "legacy":
         # The earlier dataset renderer accepted positions using one exact BVH
-        # nearest-surface clearance query. Front3DPointInRoomSampler already
+        # nearest-surface clearance query. FloorTriangleSampler already
         # guarantees that the XY point lies on the target room's floor.
         nearest = bvh_tree.find_nearest(Vector(location))
         if nearest is not None and nearest[3] < camera_clearance:
@@ -809,6 +874,7 @@ metadata = {
                         if camera_sampler == "legacy" else
                         "BlenderProc Front3DPointInRoomSampler plus obstacle and coverage checks"),
     "camera_sampler": camera_sampler,
+    "floor_sampler": "projected_triangle_area_v1",
     "camera_sampling_attempts": sampling_attempts,
     "camera_sampling_seconds": camera_sampling_seconds,
     "camera_clearance_meters": camera_clearance,
@@ -821,6 +887,9 @@ metadata = {
     "panorama": panorama_names[0],
     "panoramas": panorama_names,
     "view_count": num_views,
+    "requested_view_count": requested_view_count,
+    "adaptive_views": adaptive_views,
+    "room_floor_area_m2": room_floor_area if adaptive_views else None,
     "glb": None if skip_glb else "room.glb",
     "glb_texture_max_size": glb_texture_max_size or None,
     "glb_image_format": glb_image_format,

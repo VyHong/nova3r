@@ -16,6 +16,7 @@ if __package__ in {None, ""}:
 from training.nova3r.data.dataset_utils import read_image_cv2
 from training.mesh2sdf.data.sdf_dataset_mixin import SDFDatasetMixin
 from nova3r.utils.batch_debug import save_batch_debug
+from eval.baselines.common import resolve_scannetpp_room
 
 
 class ScanNetPPSDFDataset(SDFDatasetMixin):
@@ -54,6 +55,8 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
         gt_latent_root=None,
         gt_latent_source="latent",
         geometry_coordinate_frame=None,
+        room_data_root=None,
+        room_gt_latent_root=None,
     ):
         super().__init__(common_conf)
         if geometry_coordinate_frame is not None:
@@ -66,6 +69,10 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
         self.pose_filename = pose_filename
         self.surface_filename = surface_filename
         self.geo_points_filename = geo_points_filename
+        self.room_data_root = Path(room_data_root) if room_data_root is not None else None
+        self.room_gt_latent_root = Path(room_gt_latent_root) if room_gt_latent_root is not None else None
+        if self.room_data_root is not None and not (self.room_data_root / "rooms").is_dir():
+            raise FileNotFoundError(f"Missing ScanNet++ room exports: {self.room_data_root / 'rooms'}")
         self.dataset_prefix = dataset_prefix
         self.split = split
         self.format = format
@@ -191,6 +198,10 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
         for sample in self.samples_list:
             scene, frame_id = sample.split(" ")
             frame_idx = int(frame_id)
+            room = (
+                resolve_scannetpp_room(self.room_data_root, scene, frame_idx)
+                if self.room_data_root is not None else None
+            )
             image_dir = self.data_root / scene / "panocam" / "images" / f"{frame_idx}_cube_95"
             anon_mask_dir = self.data_root / scene / "panocam" / "anon_mask" / f"{frame_idx}_cube_95"
             self.data_store.setdefault(scene, {})[frame_id] = {
@@ -199,8 +210,9 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
                 "subsequence_anon_masks": [anon_mask_dir / f"{face_idx:04d}.png" for face_idx in range(6)],
                 "camera_data": image_dir / "camera_data.json",
                 "pose_path": self.pose_root / scene / "scans" / self.pose_filename,
-                "surface": self.sdf_data_root / scene / "scans" / self.surface_filename,
-                "geo_points": self.sdf_data_root / scene / "scans" / self.geo_points_filename,
+                "surface": room / "mesh_surface.npz" if room is not None else self.sdf_data_root / scene / "scans" / self.surface_filename,
+                "geo_points": room / "mesh_udf.npz" if room is not None else self.sdf_data_root / scene / "scans" / self.geo_points_filename,
+                "room": room,
                 "frame_idx": frame_idx,
             }
 
@@ -234,7 +246,7 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
                 "Generate them or pass sdf_data_root/surface_filename/geo_points_filename in the dataset config."
             )
 
-        surface = geo_points = None
+        surface = geo_points = mesh_bounds = None
         if load_surface:
             with np.load(surface_path, allow_pickle=True) as surface_data:
                 surface = self.load_surface_points(
@@ -248,6 +260,7 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
 
         if load_geo_points:
             with np.load(geo_points_path, allow_pickle=True) as geo_points_data:
+                mesh_bounds = self.load_mesh_bounds(geo_points_data)
                 geo_points = self.load_sdf_points(
                     rng,
                     vol_points=geo_points_data["vol_points"],
@@ -271,7 +284,9 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
                 surface[:, 3:6] = (total_transform[:3, :3] @ surface[:, 3:6].T).T
         if geo_points is not None:
             geo_points[:, :3] = (total_transform[:3, :3] @ geo_points[:, :3].T).T + total_transform[:3, 3]
-        return surface, geo_points
+        if mesh_bounds is not None:
+            mesh_bounds = mesh_bounds @ total_transform[:3, :3].T + total_transform[:3, 3]
+        return surface, geo_points, mesh_bounds
 
     def get_data(
         self,
@@ -335,7 +350,7 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
                 image_extrinsics = face_w2c @ scanner_w2c
                 if subseq_order == 0 and load_geometry:
                     rng = self._pointcloud_rng(seq_name, ids[0], int(subseq_ids[0]))
-                    surface, geo_points = self._load_geometry(
+                    surface, geo_points, mesh_bounds = self._load_geometry(
                         anno, rng, image_extrinsics,
                         load_surface=load_surface, load_geo_points=load_geo_points,
                     )
@@ -367,6 +382,7 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
             batch["surface"] = surface
         if geo_points is not None:
             batch["geo_points"] = geo_points
+            batch["mesh_bounds_corners"] = mesh_bounds
         if self.load_conditioning_latent:
             batch["conditioning_latents"] = self._load_conditioning_latent(seq_name, ids)
         if self.load_visible_geometry_latent:
@@ -374,7 +390,13 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
         if "image_features" in self.modalities:
             batch.update(self._load_image_features(seq_name, ids[0]))
         if self.load_gt_latent:
-            gt_latent = self._load_gt_latent(seq_name, ids)
+            room = annos[0]["room"]
+            if room is not None and self.room_gt_latent_root is None:
+                raise ValueError("room_gt_latent_root is required for room-specific GT latents")
+            gt_latent = self._load_gt_latent(
+                seq_name, ids,
+                latent_root=self.room_gt_latent_root if room is not None else None,
+            )
             if isinstance(gt_latent, dict):
                 batch.update(gt_latent)
             else:

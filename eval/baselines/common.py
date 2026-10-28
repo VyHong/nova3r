@@ -60,6 +60,41 @@ def read_manifest(
     return parsed
 
 
+def resolve_scannetpp_room(root: Path, scene: str, frame: int) -> Path | None:
+    matches = []
+    for room in sorted((Path(root) / "rooms" / scene).glob("*")):
+        poses = room / "test_camera_poses.json"
+        images = room / "test_images.txt"
+        if poses.is_file():
+            frames = json.loads(poses.read_text())["frames"]
+            contains_frame = any(int(key) == int(frame) for key in frames)
+        elif images.is_file():
+            contains_frame = (scene, int(frame)) in [
+                (entry.split()[0], int(entry.split()[1]))
+                for entry in images.read_text().splitlines() if entry.strip()
+            ]
+        else:
+            continue
+        if contains_frame:
+            matches.append(room)
+    if len(matches) > 1:
+        raise ValueError(f"Multiple room meshes match {scene} {int(frame):05d}: {matches}")
+    return matches[0] if matches else None
+
+
+def resolve_scannetpp_surface(scene_root: Path, scene: str, frame: int) -> Path:
+    """Select a room export by camera frame, falling back to the full scan."""
+    room = resolve_scannetpp_room(scene_root, scene, frame)
+    if room is not None:
+        mesh = room / "mesh.ply"
+        if not mesh.is_file():
+            raise FileNotFoundError(f"Missing room mesh for {scene} {frame:05d}: {mesh}")
+        return mesh
+    scan = scene_root / scene / "scans"
+    mesh = scan / "mesh_aligned_0.05.ply"
+    return mesh if mesh.is_file() else scan / "mesh_aligned_0.05_surface.npz"
+
+
 def resolve_sample(
     scene: str,
     frame: int,
@@ -96,7 +131,7 @@ def resolve_sample(
             frame=frame,
             cubemap_dir=cubemap_root / scene / "panocam" / "images" / f"{frame}_{cube_suffix}",
             pose_path=pose_root / scene / "scans" / "scanner_poses.json",
-            surface_path=scene_root / scene / "scans" / "mesh_aligned_0.05_surface.npz",
+            surface_path=resolve_scannetpp_surface(scene_root, scene, frame),
             dataset_layout=dataset_layout,
         )
     if dataset_layout != "sage10k":

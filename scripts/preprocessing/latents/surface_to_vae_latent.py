@@ -22,6 +22,7 @@ if str(REPO_ROOT) not in sys.path:
 import numpy as np
 import torch
 import os
+from eval.baselines.common import resolve_scannetpp_room
 
 from nova3r.utils.three_d_front import (
     BLENDER_CAMERA_TO_OPENCV,
@@ -88,6 +89,10 @@ def parse_args():
         help="Input path and pose convention (default: sage10k).",
     )
     parser.add_argument("--split-list", type=Path, default=DEFAULT_SPLIT_LIST)
+    parser.add_argument(
+        "--scannetpp-room-root", type=Path,
+        help="Test-scene root with rooms/<scene>/<room>/mesh_surface.npz and frame mappings.",
+    )
     parser.add_argument(
         "--camera-poses",
         "--camera-pose-ids",
@@ -577,11 +582,16 @@ def prepare_job(
     point_feats: int,
     dataset_layout: str = "sage10k",
     vae_coordinate_frame: str = "hunyuan",
+    scannetpp_room_root: Path | None = None,
 ):
     """Load and transform one surface on a CPU worker."""
     scene, frame = job.scene, job.frame
     if dataset_layout == "scannetpp":
         surface_path = surface_root / scene / "scans" / "mesh_aligned_0.05_surface.npz"
+        if scannetpp_room_root is not None:
+            room = resolve_scannetpp_room(scannetpp_room_root, scene, int(frame))
+            if room is not None:
+                surface_path = room / "mesh_surface.npz"
         scene_axis_conversion = SCANNETPP_AXIS_CONVERSION
     elif dataset_layout == "3dfront":
         room = Path(scene)
@@ -972,6 +982,7 @@ def encode_jobs_on_device(args, pending, device, worker_rank=0, world_size=1):
         sharp_count=vae.encoder.pc_sharpedge_size,
         point_feats=vae.encoder.point_feats,
         dataset_layout=args.dataset_layout,
+        scannetpp_room_root=args.scannetpp_room_root,
     )
     preparation = "sequentially" if args.num_workers == 0 else f"with {args.num_workers} worker threads"
     print(f"{prefix}Preparing surfaces {preparation}")
@@ -1028,6 +1039,11 @@ def multi_device_worker(rank, args, pending, device_names):
 
 def main():
     args = parse_args()
+    if args.scannetpp_room_root is not None:
+        if args.dataset_layout != "scannetpp":
+            raise ValueError("--scannetpp-room-root requires --dataset-layout scannetpp")
+        if not (args.scannetpp_room_root / "rooms").is_dir():
+            raise FileNotFoundError(f"Missing ScanNet++ room exports: {args.scannetpp_room_root / 'rooms'}")
     torch.set_float32_matmul_precision("medium")
     for path, description in (
         (args.split_list, "split list"),

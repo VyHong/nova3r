@@ -252,6 +252,7 @@ class ReplicaPanoSDFDataset(SDFDatasetMixin):
                         sharpedge_surface=surface["sharp_surface"],
                         **self.surface_rgb_kwargs(surface),
                     )
+                    mesh_bounds = self.load_mesh_bounds(geo_points)
                     geo_points = self.load_sdf_points(
                         rng,
                         vol_points=geo_points["vol_points"],
@@ -268,6 +269,8 @@ class ReplicaPanoSDFDataset(SDFDatasetMixin):
                     surface[:, :3] = (total_transform[:3, :3] @ surface[:, :3].T).T + total_transform[:3, 3]
                     surface[:, 3:6] = (total_transform[:3, :3] @ surface[:, 3:6].T).T
                     geo_points[:, :3] = (total_transform[:3, :3] @ geo_points[:, :3].T).T + total_transform[:3, 3]
+
+                    mesh_bounds = mesh_bounds @ total_transform[:3, :3].T + total_transform[:3, 3]
 
                     camera_translation_scale = 1
 
@@ -295,6 +298,7 @@ class ReplicaPanoSDFDataset(SDFDatasetMixin):
             "intrinsics": intrinsics,
             "surface": surface,
             "geo_points": geo_points,
+            "mesh_bounds_corners": mesh_bounds,
         }
         if self.load_conditioning_latent:
             batch["conditioning_latents"] = self._load_conditioning_latent(seq_name, ids)

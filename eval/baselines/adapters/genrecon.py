@@ -80,11 +80,14 @@ def infer_sage_floorplan(surface_path: Path) -> tuple[float, float, float, float
 
 def infer_scannetpp_room_bounds(
     surface_path: Path,
+    world_to_chunk_frame: np.ndarray | None = None,
 ) -> tuple[float, float, float, float, float, float]:
-    """Return ScanNet++ XYZ bounds in its native aligned, Z-up frame."""
+    """Return XYZ bounds, optionally transforming surface points to a Z-up frame."""
     points = load_scene_points(surface_path)
     if not len(points):
         raise ValueError(f"Cannot infer room bounds from an empty surface: {surface_path}")
+    if world_to_chunk_frame is not None:
+        points = points @ world_to_chunk_frame[:3, :3].T + world_to_chunk_frame[:3, 3]
     lower = points.min(axis=0)
     upper = points.max(axis=0)
     if not np.isfinite(lower).all() or not np.isfinite(upper).all():
@@ -143,8 +146,10 @@ def chunk_transforms_to_eval_frame(
             [transform.float() for transform in original_to_chunk],
             [transform.float() for transform in chunk_to_original],
         )
-    if dataset_layout != "sage10k":
+    if dataset_layout not in ("sage10k", "3dfront"):
         raise ValueError(f"Unsupported dataset layout: {dataset_layout!r}")
+    # 3D-FRONT glTF -> Blender uses the same axis conversion as SAGE
+    # evaluator -> room; both evaluator frames are Y-up.
     eval_to_room = torch.linalg.inv(SAGE_ROOM_TO_EVAL)
     return (
         [transform.float() @ eval_to_room for transform in original_to_chunk],
@@ -250,6 +255,33 @@ class GenReconAdapter:
 
     def _get_chunks(self, sample: SageSample, sample_work: Path):
         """Build GenRecon chunks from a layout JSON or the evaluation surface."""
+        if sample.dataset_layout == "3dfront":
+            from nova3r.utils.three_d_front import GLTF_TO_BLENDER
+
+            # Surfaces/cameras use glTF Y-up; GenRecon's chunker expects Z-up.
+            # Preserve the actual room translation and height instead of using
+            # SAGE's origin-anchored footprint and fixed 2.7 m ceiling.
+            bounds = infer_scannetpp_room_bounds(sample.surface_path, GLTF_TO_BLENDER)
+            x_min, x_max, y_min, y_max, z_floor, z_ceiling = bounds
+            chunker = self.ScannetGtChunker()
+            chunk_size = (z_ceiling - z_floor) * chunker.chunk_size_factor
+            centers = chunker._define_centers(
+                x_min, x_max, y_min, y_max, z_floor, chunk_size, sample_work,
+            )
+            m_o2c, m_c2o, relative_translations = chunker._get_transforms(
+                centers, chunk_size, sample_work,
+            )
+            source = {
+                "type": "3dfront_evaluation_surface_bounds",
+                "surface_path": str(sample.surface_path),
+                "bounds": dict(zip(
+                    ("x_min", "x_max", "y_min", "y_max", "z_floor", "z_ceiling"), bounds,
+                )),
+                "chunk_size": chunk_size,
+                "coordinate_frame": "blender_z_up",
+            }
+            return centers, m_o2c, m_c2o, relative_translations, source
+
         if sample.dataset_layout == "scannetpp":
             if self.scannet_chunk_source == "colmap":
                 if self.scannet_root is None:

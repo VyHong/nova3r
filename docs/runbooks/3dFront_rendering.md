@@ -30,7 +30,7 @@ python \
   scripts/data/3dfront/render_front3d_scene.py
 ```
 
-Doors are deterministically opened by 12–32 degrees according to
+Doors are deterministically opened according to
 `FRONT3D_OPEN_DOOR_PROBABILITY` (default `0.45`). Set it to `0` for all closed
 or `1` for all open. Room-only GLBs omit dwelling-wide `SlabSide` records,
 which some 3D-FRONT rooms reference even when those slab edges are far outside
@@ -170,3 +170,23 @@ Lookup is recursive and accepts `.hdr` and `.exr`, so the old
 `<asset>/<asset>_2k.hdr` layout is no longer required. Paths saved by an older
 manifest are relocated by asset name when the original file no longer exists.
 `/tmp` may be cleared by the host, so persistent storage is recommended.
+
+### Fewer views in small rooms
+
+Add `--adaptive-views --views 10` to `render_rooms_batched.py` to select the
+view count from the target floor's projected area: 3 views below 8 m², 5 views
+from 8 to below 16 m², and 10 views for larger rooms. `--views` remains an upper
+limit. If floor area cannot be measured, the renderer uses that upper limit.
+Actual view count and floor area are recorded in `metadata.json`; completion
+checks accept the recorded reduced count. Camera placement can still fail if
+a room cannot accommodate the selected number of valid poses. Keep adaptive
+and fixed-count runs in separate output folders when comparing them.
+
+### Door opening variation
+
+`FRONT3D_OPEN_DOOR_PROBABILITY` defaults to 0.45. Among open doors,
+`FRONT3D_FULLY_OPEN_DOOR_PROBABILITY` (default 0.30) selects exactly 90 degrees;
+remaining open doors vary uniformly between `FRONT3D_DOOR_MIN_ANGLE` (12) and
+`FRONT3D_DOOR_MAX_ANGLE` (85). Door state is deterministic per scene/door and
+shared across that room's views. Set both probabilities to 1 to force every
+door fully open. Signed angles are saved in the existing door metadata.

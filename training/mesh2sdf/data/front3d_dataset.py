@@ -185,7 +185,7 @@ class Front3DSDFDataset(SDFDatasetMixin):
         return images, extrinsics, intrinsics, first_w2c
 
     def _load_geometry(self, annotation, rng, world_to_camera, load_surface, load_geo_points):
-        surface = geo_points = None
+        surface = geo_points = mesh_bounds = None
         if load_surface:
             with np.load(annotation["surface"], allow_pickle=True) as data:
                 surface = self.load_surface_points(
@@ -195,6 +195,7 @@ class Front3DSDFDataset(SDFDatasetMixin):
                 )
         if load_geo_points:
             with np.load(annotation["geo_points"], allow_pickle=True) as data:
+                mesh_bounds = self.load_mesh_bounds(data)
                 geo_points = self.load_sdf_points(
                     rng, vol_points=data["vol_points"], vol_label=data["vol_label"],
                     near_points=data["random_near_points"], near_label=data["random_near_label"],
@@ -210,7 +211,9 @@ class Front3DSDFDataset(SDFDatasetMixin):
                 surface[:, 3:6] = surface[:, 3:6] @ transform[:3, :3].T
         if geo_points is not None:
             geo_points[:, :3] = geo_points[:, :3] @ transform[:3, :3].T + transform[:3, 3]
-        return surface, geo_points
+        if mesh_bounds is not None:
+            mesh_bounds = mesh_bounds @ transform[:3, :3].T + transform[:3, 3]
+        return surface, geo_points, mesh_bounds
 
     def get_data(self, seq_name=None, id=None, seq_index=None, img_per_seq=1, subseq_ids=None, aspect_ratio=1.0):
         if seq_name is None:
@@ -227,10 +230,10 @@ class Front3DSDFDataset(SDFDatasetMixin):
         images, extrinsics, intrinsics, first_w2c = self._load_views(
             annotation, subseq_ids, load_images, load_cameras, load_cameras or load_geometry
         )
-        surface = geo_points = None
+        surface = geo_points = mesh_bounds = None
         if load_geometry:
             rng = self._pointcloud_rng(seq_name, frame_id, int(subseq_ids[0]))
-            surface, geo_points = self._load_geometry(
+            surface, geo_points, mesh_bounds = self._load_geometry(
                 annotation, rng, first_w2c, load_surface, load_geo_points
             )
         batch = {
@@ -249,6 +252,7 @@ class Front3DSDFDataset(SDFDatasetMixin):
             batch["surface"] = surface
         if geo_points is not None:
             batch["geo_points"] = geo_points
+            batch["mesh_bounds_corners"] = mesh_bounds
         if self.load_conditioning_latent:
             batch["conditioning_latents"] = self._load_conditioning_latent(seq_name, ids)
         if self.load_visible_geometry_latent:

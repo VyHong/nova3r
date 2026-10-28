@@ -150,6 +150,25 @@ CUDA_VISIBLE_DEVICES=0 python -u scripts/preprocessing/latents/surface_to_vae_la
   --seed 0
 ```
 
+### ScanNet++ split rooms
+
+Room surface/UDF samples and GT posteriors are already generated for the split rooms.
+
+Add these parameters to a `ScanNetPPSDFDataset` test configuration:
+
+```yaml
+room_data_root: datasets/scannetpp/test_scenes
+room_gt_latent_root: datasets/scannetpp/room_gt_latents
+```
+
+The dataset selects rooms using frame IDs in `test_camera_poses.json`, with
+`test_images.txt` as a fallback for older exports. Matching frames use room
+geometry and room GT latents; unmatched frames use the configured original
+`sdf_data_root` and `gt_latent_root`. Missing room data raises an error.
+Image features and visible-geometry conditioning continue to use the original
+scene/frame keys and roots. Overlapping room assignments raise an error.
+The Hunyuan DiT panorama config enables this for `final_test_10_images.json`.
+
 ### Sage-10K — cubemap face 4 camera
 
 ```bash

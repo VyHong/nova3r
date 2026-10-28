@@ -236,12 +236,13 @@ class SDFDatasetMixin(Dataset):
             "visible geometry latent",
         )
 
-    def _load_gt_latent(self, seq_name, ids):
+    def _load_gt_latent(self, seq_name, ids, *, latent_root=None):
         frame_id = self._require_single_panorama(ids, "GT latents")
         filename_suffix = self.GT_LATENT_FILENAME_SUFFIX
         if self.gt_latent_source == "posterior":
             filename_suffix += "_before_sampling"
-        latent_path = self.gt_latent_root / seq_name / f"{frame_id}{filename_suffix}.pt"
+        root = Path(latent_root) if latent_root is not None else self.gt_latent_root
+        latent_path = root / seq_name / f"{frame_id}{filename_suffix}.pt"
         if not latent_path.is_file():
             raise FileNotFoundError(f"Missing GT latent: {latent_path}")
         checkpoint = torch.load(latent_path, map_location="cpu", weights_only=True)
@@ -406,6 +407,21 @@ class SDFDatasetMixin(Dataset):
         if self.pc_sharpedge_size > 0:
             result["sharpedge_surface_rgb"] = data["sharp_surface_rgb"]
         return result
+
+    @staticmethod
+    def load_mesh_bounds(data):
+        """Prefer exact mesh bounds; legacy padded volume bounds also enclose it."""
+        key = "mesh_bounds" if "mesh_bounds" in data else "bounds"
+        if key not in data:
+            return torch.full((8, 3), float("nan"))
+        bounds = np.asarray(data[key], dtype=np.float32).reshape(2, 3)
+        if not np.isfinite(bounds).all() or np.any(bounds[1] <= bounds[0]):
+            raise ValueError("Geometry bounds must be finite with positive extents")
+        corners = np.array([
+            [bounds[i, 0], bounds[j, 1], bounds[k, 2]]
+            for i in range(2) for j in range(2) for k in range(2)
+        ], dtype=np.float32)
+        return torch.from_numpy(corners)
 
     def load_sdf_points(
         self,

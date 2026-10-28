@@ -95,6 +95,8 @@ def parse_args():
     parser.add_argument("--output", type=Path,
                         default=ROOT / "artifacts/3dfront_room_batches")
     parser.add_argument("--views", type=int, default=10)
+    parser.add_argument("--adaptive-views", action="store_true",
+                        help="Use 3 views below 8 m², 5 below 16 m², otherwise --views")
     parser.add_argument("--samples", type=int, default=64)
     parser.add_argument("--width", type=int, default=1036,
                         help="Equirectangular width; height is width // 2 (default: 1036x518)")
@@ -126,11 +128,17 @@ def parse_args():
 
 def complete(folder: Path, room: str, views: int, width: int, samples: int) -> bool:
     required = [folder / "room.glb", folder / "metadata.json", folder / "extrinsics.json"]
-    required += [folder / f"{room}_panorama_{index:03d}.png" for index in range(views)]
     if not all(path.is_file() and path.stat().st_size > 0 for path in required):
         return False
     metadata = json.loads((folder / "metadata.json").read_text())
-    return (metadata.get("view_count") == views
+    actual_views = metadata.get("view_count", 0)
+    if not isinstance(actual_views, int) or not 1 <= actual_views <= views:
+        return False
+    required += [folder / f"{room}_panorama_{index:03d}.png" for index in range(actual_views)]
+    if not all(path.is_file() and path.stat().st_size > 0 for path in required):
+        return False
+    metadata = json.loads((folder / "metadata.json").read_text())
+    return (metadata.get("requested_view_count", actual_views) == views
             and metadata.get("resolution") == [width, width // 2]
             and metadata.get("render_samples") == samples)
 
@@ -144,8 +152,9 @@ def previous_camera_sampling_failure(folder: Path) -> bool:
         tail = log_path.read_text(errors="replace")[-12000:]
     except OSError:
         return False
-    return ("valid camera poses in 10000 attempts" in tail
-            or "Cannot choose from an empty sequence" in tail)
+    # Failures from the old furniture-filtered sampler must be retried.
+    return ("floor_sampler=projected_triangle_area_v1" in tail
+            and "valid camera poses in 10000 attempts" in tail)
 
 
 def find_hdri(root: Path, name: str) -> Path:
@@ -208,6 +217,7 @@ def render_job(index, job, args, gpu_id, execute=True):
                               "transom", "awning", "arched_transom"][index % 7],
         FRONT3D_DOOR_STYLE=["flush", "two_panel", "six_panel", "glazed", "louvered"][index % 5],
         FRONT3D_VIEWS=str(args.views),
+        FRONT3D_ADAPTIVE_VIEWS="1" if args.adaptive_views else "0",
         FRONT3D_SAMPLES=str(args.samples),
         FRONT3D_WIDTH=str(args.width),
         FRONT3D_ENCODE_WORKERS=str(args.encode_workers),

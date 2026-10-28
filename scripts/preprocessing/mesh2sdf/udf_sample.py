@@ -337,6 +337,7 @@ def sample_udf(
         "sharp_near_points": sharp_near_points.astype(np.float16),
         "sharp_near_label": sharp_near_udf.astype(np.float16),
         "bounds": np.concatenate((volume_bounds[0], volume_bounds[1])).astype(np.float32),
+        "mesh_bounds": np.asarray(mesh.bounds, dtype=np.float32).reshape(6),
         "sampling_scale": np.float32(sampling_scale),
     }
 
@@ -402,6 +403,7 @@ def sample_mesh_udf(
     surface_data = {
         "random_surface": np.concatenate((random_surface, random_normal), axis=1).astype(np.float16),
         "bounds": np.concatenate((volume_bounds[0], volume_bounds[1])).astype(np.float32),
+        "mesh_bounds": np.asarray(mesh.bounds, dtype=np.float32).reshape(6),
         "sampling_scale": np.float32(sampling_scale),
     }
     if include_sharp_surface:

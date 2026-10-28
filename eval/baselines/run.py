@@ -182,10 +182,10 @@ def parse_args():
             "scene_root": Path("/tmp/datasets/sage-10k/udf"),
         },
         "scannetpp": {
-            "split_list": REPO_ROOT / "data/scannetpp/test_list.json",
+            "split_list": REPO_ROOT / "data/scannetpp/final_test_list.json",
             "cubemap_root": Path("/tmp/datasets/scannetpp/cubemap_data"),
-            "pose_root": Path("/mnt/projects/theses/vyhong/scannetpp/scan_poses"),
-            "scene_root": Path("/tmp/datasets/scannetpp/udf_color"),
+            "pose_root": REPO_ROOT / "datasets/scannetpp/test_scenes",
+            "scene_root": REPO_ROOT / "datasets/scannetpp/test_scenes",
         },
         "3dfront": {
             "split_list": REPO_ROOT / "data/3dfront/final_test_list.json",
