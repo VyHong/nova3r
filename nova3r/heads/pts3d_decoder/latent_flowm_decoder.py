@@ -192,7 +192,7 @@ def flow_matching_losses(
     """Compute the shared velocity and clean-latent flow-matching losses."""
     velocity_loss = F.mse_loss(v_pred, target_velocity)
     pred_latents = predict_clean_linear_path_latents(x_t, v_pred, t)
-    reconstruction_loss = F.mse_loss(pred_latents, target_latents)
+    reconstruction_loss = F.l1_loss(pred_latents, target_latents)
     return (
         velocity_loss + reconstruction_weight * reconstruction_loss,
         velocity_loss,

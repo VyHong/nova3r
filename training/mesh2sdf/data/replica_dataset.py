@@ -252,7 +252,7 @@ class ReplicaPanoSDFDataset(SDFDatasetMixin):
                         sharpedge_surface=surface["sharp_surface"],
                         **self.surface_rgb_kwargs(surface),
                     )
-                    mesh_bounds = self.load_mesh_bounds(geo_points)
+                    mesh_bounds = self.load_sampling_bounds(geo_points)
                     geo_points = self.load_sdf_points(
                         rng,
                         vol_points=geo_points["vol_points"],
@@ -298,7 +298,7 @@ class ReplicaPanoSDFDataset(SDFDatasetMixin):
             "intrinsics": intrinsics,
             "surface": surface,
             "geo_points": geo_points,
-            "mesh_bounds_corners": mesh_bounds,
+            "sampling_bounds_corners": mesh_bounds,
         }
         if self.load_conditioning_latent:
             batch["conditioning_latents"] = self._load_conditioning_latent(seq_name, ids)

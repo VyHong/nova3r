@@ -409,9 +409,24 @@ class SDFDatasetMixin(Dataset):
         return result
 
     @staticmethod
-    def load_mesh_bounds(data):
-        """Prefer exact mesh bounds; legacy padded volume bounds also enclose it."""
-        key = "mesh_bounds" if "mesh_bounds" in data else "bounds"
+    def load_sampling_bounds(data):
+        """Load the full padded UDF sampling domain, never the mesh enclosure."""
+        if "sampling_bounds_corners" in data:
+            corners = np.asarray(data["sampling_bounds_corners"], dtype=np.float32)
+            if corners.shape != (8, 3) or not np.isfinite(corners).all():
+                raise ValueError("Sampling bounds corners must be finite with shape (8, 3)")
+            edges = corners[[4, 2, 1]] - corners[0]
+            lengths = np.linalg.norm(edges, axis=-1)
+            if np.any(lengths <= 0):
+                raise ValueError("Sampling bounds edges must have positive lengths")
+            axes = edges / lengths[:, None]
+            bits = np.array([[x, y, z] for x in (0, 1)
+                             for y in (0, 1) for z in (0, 1)])
+            if (not np.allclose(axes @ axes.T, np.eye(3), atol=1e-4)
+                    or not np.allclose(corners, corners[0] + bits @ edges, atol=1e-4)):
+                raise ValueError("Sampling bounds corners must form an ordered orthogonal box")
+            return torch.from_numpy(corners.copy())
+        key = "bounds"
         if key not in data:
             return torch.full((8, 3), float("nan"))
         bounds = np.asarray(data[key], dtype=np.float32).reshape(2, 3)

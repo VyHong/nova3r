@@ -212,21 +212,23 @@ def closest_surface_rgb(
 
 
 def padded_mesh_bounds(mesh, padding_ratio=0.2, min_padding=0.1, sampling_scale=1.0):
-    bounds = np.array(mesh.bounds, dtype=np.float64, copy=True)
-    if bounds.shape != (2, 3) or not np.isfinite(bounds).all():
-        raise ValueError(f"Invalid mesh bounds: {bounds}")
-
-    extent = bounds[1] - bounds[0]
+    """Return ordered corners of a padded mesh-oriented bounding box."""
+    to_box, extent = trimesh.bounds.oriented_bounds(mesh)
+    extent = np.asarray(extent, dtype=np.float64)
+    if not np.isfinite(extent).all() or np.any(extent <= 0):
+        raise ValueError(f"Invalid oriented mesh extents: {extent}")
     padding = max(float(extent.max()) * padding_ratio, min_padding * sampling_scale)
-    bounds[0] -= padding
-    bounds[1] += padding
-    return bounds
+    half_extent = extent * 0.5 + padding
+    bits = np.array([[x, y, z] for x in (0, 1)
+                     for y in (0, 1) for z in (0, 1)], dtype=np.float64)
+    local_corners = (2 * bits - 1) * half_extent
+    return trimesh.transform_points(local_corners, np.linalg.inv(to_box))
 
 
 def sample_volume_points(bounds, num_points):
-    bounds = np.asarray(bounds, dtype=np.float64)
-    low, high = bounds[0], bounds[1]
-    return np.random.rand(num_points, 3) * (high - low) + low
+    corners = np.asarray(bounds, dtype=np.float64).reshape(8, 3)
+    edges = corners[[4, 2, 1]] - corners[0]
+    return np.random.rand(num_points, 3) @ edges + corners[0]
 
 
 def sample_udf(
@@ -336,7 +338,8 @@ def sample_udf(
         "random_near_label": random_near_udf.astype(np.float16),
         "sharp_near_points": sharp_near_points.astype(np.float16),
         "sharp_near_label": sharp_near_udf.astype(np.float16),
-        "bounds": np.concatenate((volume_bounds[0], volume_bounds[1])).astype(np.float32),
+        "bounds": np.stack((volume_bounds.min(axis=0), volume_bounds.max(axis=0))).astype(np.float32).reshape(6),
+        "sampling_bounds_corners": volume_bounds.astype(np.float32),
         "mesh_bounds": np.asarray(mesh.bounds, dtype=np.float32).reshape(6),
         "sampling_scale": np.float32(sampling_scale),
     }
@@ -378,8 +381,8 @@ def sample_mesh_udf(
     print(f"Bounds max: {mesh.vertices.max(axis=0)}")
     print(f"Sampling scale: {sampling_scale}")
     volume_bounds = padded_mesh_bounds(mesh, sampling_scale=sampling_scale)
-    print(f"Volume sample bounds min: {volume_bounds[0]}")
-    print(f"Volume sample bounds max: {volume_bounds[1]}")
+    print(f"Volume sample bounds min: {volume_bounds.min(axis=0)}")
+    print(f"Volume sample bounds max: {volume_bounds.max(axis=0)}")
 
     if vertex_rgb is None:
         random_surface, random_normal = random_sample_pointcloud(mesh, num=sample_num)
@@ -402,7 +405,8 @@ def sample_mesh_udf(
 
     surface_data = {
         "random_surface": np.concatenate((random_surface, random_normal), axis=1).astype(np.float16),
-        "bounds": np.concatenate((volume_bounds[0], volume_bounds[1])).astype(np.float32),
+        "bounds": np.stack((volume_bounds.min(axis=0), volume_bounds.max(axis=0))).astype(np.float32).reshape(6),
+        "sampling_bounds_corners": volume_bounds.astype(np.float32),
         "mesh_bounds": np.asarray(mesh.bounds, dtype=np.float32).reshape(6),
         "sampling_scale": np.float32(sampling_scale),
     }

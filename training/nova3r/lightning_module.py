@@ -11,6 +11,7 @@ from training.nova3r.validation_utils import (
 )
 from nova3r.losses import L21, FMVelocity, Pts3D_Regr3D_CD_V4, ReconstructionLoss
 from eval.mv_recon.metric import SSI3DScore_Scene_Multi
+from training.utils.lr_scheduler import scheduler_step_counts
 from training.utils.module_setup import OptimizerOptions, freeze_layers
 
 
@@ -166,13 +167,14 @@ class Nova3RLightningModule(pl.LightningModule):
         options = self.optimizer_options
         optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, self.parameters()), lr=options.learning_rate, weight_decay=self.cfg.weight_decay)
 
-        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.trainer.max_epochs)
+        warmup_steps, scheduler_steps = scheduler_step_counts(self.trainer, options.warmup_epochs)
+        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=scheduler_steps)
         exponential = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=1)
 
-        if options.warmup_epochs > 0:
-            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=options.warmup_epochs)
+        if warmup_steps > 0:
+            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=warmup_steps)
 
-            scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine], milestones=[options.warmup_epochs])
+            scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine], milestones=[warmup_steps])
         else:
             scheduler = exponential
 
@@ -181,7 +183,7 @@ class Nova3RLightningModule(pl.LightningModule):
         return [optimizer], [
             {
                 "scheduler": scheduler,
-                "interval": "epoch",
+                "interval": "step",
             },
             {"scheduler": plateau, "monitor": "train_loss_epoch", "interval": "epoch"},
         ]

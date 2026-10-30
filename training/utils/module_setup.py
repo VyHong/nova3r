@@ -11,7 +11,7 @@ from nova3r.models.nova3r_img_cond import _load_checkpoint_state_dict
 class OptimizerOptions:
     learning_rate: float
     scheduler: str
-    warmup_epochs: int
+    warmup_epochs: float
     eta_min: float
 
     @classmethod
@@ -19,7 +19,7 @@ class OptimizerOptions:
         return cls(
             learning_rate=float(cfg.lr),
             scheduler=str(cfg.get("lr_scheduler", "exponential")),
-            warmup_epochs=int(cfg.get("warmup_epochs", 0)),
+            warmup_epochs=float(cfg.get("warmup_epochs", 0)),
             eta_min=float(cfg.get("lr_scheduler_eta_min", 1e-6)),
         )
 

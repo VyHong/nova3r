@@ -112,21 +112,27 @@ python third_party/BlenderProc/cli.py download cc_textures \
   /tmp/datasets/ambientcg/cctextures \
   --workers 24
 
-## Horizontal empty-space supervision for ShapeVAE
+## Full-volume empty-space supervision for ShapeVAE
 
 In the experiment config, `horizontal_empty_points: 4096` appends this many
 volume queries per training example after surface/geometry normalization. Set it
-to `0` to disable. `empty_space_vertical_axis: 1` keeps training-frame Y within
-the enclosing box height and samples X/Z uniformly in `[-2, 2]` outside the box,
+to `0` to disable. Queries sample all three training-frame axes uniformly in
+`[-2, 2]`, outside the transformed padded sampling box,
 leaving a `1 / sdf_label_scale` safety margin. These queries receive saturated
 UDF targets; any RGB supervision is masked out. Validation samples are unchanged.
 
-New UDF preprocessing writes exact `mesh_bounds`. Existing NPZ files use their
-padded `bounds` as a conservative enclosure; bounds are never inferred from a
-sampled point cloud. All eight corners follow the geometry's camera transform
-and normalization before their enclosing axis-aligned box is computed. Thus the
-axes are training/camera axes, not necessarily gravity-aligned world axes.
-Missing bounds raise an error when this feature is enabled. If a box covers
-the whole horizontal target domain, the extra slots for that example resample
-existing geometry queries with their original distances and features. This
-keeps batch shapes consistent without assigning false empty-space labels.
+Empty-space supervision uses the NPZ's padded sampling `bounds`, not the
+unpadded `mesh_bounds`. All eight ordered corners follow the geometry's camera
+transform and normalization. Candidates fill the full `[-2, 2]^3` cube; rejection in the box's
+local axes excludes the rotated sampling box plus a `1 / sdf_label_scale`
+safety margin. This fills wedges within its axis-aligned enclosure too.
+The axes are training/camera axes, not necessarily gravity-aligned world axes.
+Missing sampling bounds raise an error when this feature is enabled.
+If the sampling box covers the full candidate domain, extra slots reuse existing
+queries with their original labels and features. Rejection sampling has a
+bounded budget: exceptionally narrow complements reuse verified accepted
+empty points, or original labeled queries if none were found.
+
+The legacy `horizontal_empty_points` name still controls the total query count.
+`empty_space_vertical_axis` is retained for compatibility but no longer limits Y.
+Mesh extraction bounds are configured independently.

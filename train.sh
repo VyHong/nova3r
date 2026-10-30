@@ -84,9 +84,8 @@ RUN bash -c "
   export PYTHONPATH=\${PYTHONPATH}:/mnt/home/vyhong/projects/nova3r
   
   echo 'Running training...'
-  # Resume the full training state from experiment.resume_checkpoint in the config.
-  python -u training/resume_train.py \
-    --config checkpoints/hunyuan/.hydra/config.yaml
+  python -u training/change_train.py \
+    --config checkpoints/hunyuan_dit/config_hunyuandit_panorama_visible_latent.yaml
 "
 training_status=$?
 

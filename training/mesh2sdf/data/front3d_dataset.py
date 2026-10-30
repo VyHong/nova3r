@@ -195,7 +195,7 @@ class Front3DSDFDataset(SDFDatasetMixin):
                 )
         if load_geo_points:
             with np.load(annotation["geo_points"], allow_pickle=True) as data:
-                mesh_bounds = self.load_mesh_bounds(data)
+                mesh_bounds = self.load_sampling_bounds(data)
                 geo_points = self.load_sdf_points(
                     rng, vol_points=data["vol_points"], vol_label=data["vol_label"],
                     near_points=data["random_near_points"], near_label=data["random_near_label"],
@@ -252,7 +252,7 @@ class Front3DSDFDataset(SDFDatasetMixin):
             batch["surface"] = surface
         if geo_points is not None:
             batch["geo_points"] = geo_points
-            batch["mesh_bounds_corners"] = mesh_bounds
+            batch["sampling_bounds_corners"] = mesh_bounds
         if self.load_conditioning_latent:
             batch["conditioning_latents"] = self._load_conditioning_latent(seq_name, ids)
         if self.load_visible_geometry_latent:

@@ -1,3 +1,4 @@
+from training.mesh2sdf.oriented_meshing import OrientedMeshBounds, surface_oriented_bounds, decoder_in_box_frame
 from training.mesh2sdf.empty_space_sampling import append_horizontal_empty_points
 
 import hashlib
@@ -39,6 +40,7 @@ from training.mesh2sdf.module_options import (
     MeshOptions,
     ValidationOptions,
 )
+from training.utils.lr_scheduler import scheduler_step_counts
 from training.utils.module_setup import (
     FlowTrainingOptions,
     OptimizerOptions,
@@ -226,8 +228,8 @@ class Mesh2SDFLightningModule(pl.LightningModule):
             )
             normalized_geo_points[..., 3:4] = normalized_geo_points[..., 3:4] * coord_scale
             normalized_batch["geo_points"] = normalized_geo_points
-        if "mesh_bounds_corners" in batch:
-            normalized_batch["mesh_bounds_corners"] = (batch["mesh_bounds_corners"] - center) * coord_scale
+        if "sampling_bounds_corners" in batch:
+            normalized_batch["sampling_bounds_corners"] = (batch["sampling_bounds_corners"] - center) * coord_scale
         normalized_batch["surface_geo_norm_center"] = center
         normalized_batch["surface_geo_norm_factor"] = norm_factor
         return normalized_batch
@@ -572,6 +574,11 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         return latents
 
     def mesh_from_latents(self, latent_batch, sample_idx, bounds, decoder, method=None, artifact_dir=None, world_scale=1.0):
+        original_decoder = decoder
+        oriented_frame = bounds if isinstance(bounds, OrientedMeshBounds) else None
+        if oriented_frame is not None:
+            bounds = oriented_frame.bounds
+            decoder = decoder_in_box_frame(decoder, oriented_frame)
         method = self.mesh_options.method if method is None else method
         mesh = None
         if method == "latent2mesh":
@@ -713,12 +720,16 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                 mesh, face_label = extractor.extract_mesh(point_cloud)
                 if artifact_dir is not None:
                     raw_mesh = udf_decoder.mesh_to_world(mesh.copy())
+                    if oriented_frame is not None:
+                        raw_mesh = oriented_frame.transform_mesh(raw_mesh)
                     raw_mesh.vertices = np.asarray(raw_mesh.vertices) * world_scale
                     raw_mesh.export(Path(artifact_dir) / "mind_before_postprocess.ply")
                 self.print(f"MIND extracted {len(mesh.vertices)} vertices and {len(mesh.faces)} faces")
                 mesh, face_label = extractor.postprocess_mesh(mesh, face_label)
                 if artifact_dir is not None:
                     post_mesh = udf_decoder.mesh_to_world(mesh.copy())
+                    if oriented_frame is not None:
+                        post_mesh = oriented_frame.transform_mesh(post_mesh)
                     post_mesh.vertices = np.asarray(post_mesh.vertices) * world_scale
                     post_mesh.export(Path(artifact_dir) / "mind_after_postprocess.ply")
                 self.print(f"MIND postprocessing kept {len(mesh.vertices)} vertices and {len(mesh.faces)} faces")
@@ -754,9 +765,11 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         else:
             raise ValueError(f"Unknown mesh extraction method: {method}")
 
+        if oriented_frame is not None:
+            mesh = oriented_frame.transform_mesh(mesh)
         return colorize_trimesh_vertices(
             mesh,
-            decoder,
+            original_decoder,
             latent_batch[sample_idx : sample_idx + 1],
             batch_size=self.mesh_options.rgb_vertex_batch_size,
         )
@@ -794,7 +807,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
     def _reconstruction_bounds(self, surface):
         if self.mesh_options.bounds is not None:
             return self.mesh_options.bounds.copy()
-        return self._surface_bounds(surface, self.mesh_options.bounds_padding)
+        return surface_oriented_bounds(surface, self.mesh_options.bounds_padding)
 
     @staticmethod
     def _batch_item(value, index):
@@ -1055,7 +1068,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
             filter(lambda p: p.requires_grad, self.parameters()), lr=options.learning_rate, weight_decay=self.cfg.weight_decay
         )
 
-        scheduler_epochs = max(1, int(self.trainer.max_epochs) - options.warmup_epochs)
+        warmup_steps, scheduler_steps = scheduler_step_counts(self.trainer, options.warmup_epochs)
         eta_min_factor = min(1.0, max(1e-12, options.eta_min / max(options.learning_rate, 1e-12)))
 
         if options.scheduler == "constant":
@@ -1063,7 +1076,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         elif options.scheduler == "cosine":
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer,
-                T_max=scheduler_epochs,
+                T_max=scheduler_steps,
                 eta_min=options.eta_min,
             )
         elif options.scheduler == "linear":
@@ -1071,26 +1084,26 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                 optimizer,
                 start_factor=1.0,
                 end_factor=eta_min_factor,
-                total_iters=scheduler_epochs,
+                total_iters=scheduler_steps,
             )
         elif options.scheduler == "exponential":
             scheduler = torch.optim.lr_scheduler.ExponentialLR(
                 optimizer,
-                gamma=eta_min_factor ** (1.0 / scheduler_epochs),
+                gamma=eta_min_factor ** (1.0 / scheduler_steps),
             )
         else:
             raise ValueError(f"Unknown lr_scheduler: {options.scheduler!r}")
 
-        if options.warmup_epochs > 0:
-            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.02, total_iters=options.warmup_epochs)
-            scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, scheduler], milestones=[options.warmup_epochs])
+        if warmup_steps > 0:
+            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.02, total_iters=warmup_steps)
+            scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, scheduler], milestones=[warmup_steps])
 
         plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=1000)
 
         return [optimizer], [
             {
                 "scheduler": scheduler,
-                "interval": "epoch",
+                "interval": "step",
             },
             {"scheduler": plateau, "monitor": "train_loss_epoch", "interval": "epoch"},
         ]

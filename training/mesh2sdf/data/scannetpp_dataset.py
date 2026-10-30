@@ -260,7 +260,7 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
 
         if load_geo_points:
             with np.load(geo_points_path, allow_pickle=True) as geo_points_data:
-                mesh_bounds = self.load_mesh_bounds(geo_points_data)
+                mesh_bounds = self.load_sampling_bounds(geo_points_data)
                 geo_points = self.load_sdf_points(
                     rng,
                     vol_points=geo_points_data["vol_points"],
@@ -382,7 +382,7 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
             batch["surface"] = surface
         if geo_points is not None:
             batch["geo_points"] = geo_points
-            batch["mesh_bounds_corners"] = mesh_bounds
+            batch["sampling_bounds_corners"] = mesh_bounds
         if self.load_conditioning_latent:
             batch["conditioning_latents"] = self._load_conditioning_latent(seq_name, ids)
         if self.load_visible_geometry_latent:
