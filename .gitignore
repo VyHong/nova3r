@@ -19,3 +19,4 @@ eval_results
 
 # Local dataset archive mounted by train.sh; do not stage its contents.
 /udf_color.zip
+/deps/

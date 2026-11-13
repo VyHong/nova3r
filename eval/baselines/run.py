@@ -10,6 +10,7 @@ import multiprocessing
 import json
 from pathlib import Path
 import sys
+import time
 import traceback
 
 import numpy as np
@@ -19,6 +20,16 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from eval.baselines.common import (
+    _panorama_pose,
+    align_lari_pointmap,
+    load_cameras,
+    load_scannetpp_valid_mask,
+    face_target_mask,
+    align_prediction_to_target,
+    panorama_visibility_mask,
+    load_visibility_geometry,
+    sample_mesh_surface,
+    compute_visibility_metrics,
     DEFAULT_ALIGNMENT_ITERATIONS,
     DEFAULT_ALIGNMENT_LR,
     DEFAULT_EVAL_POINTS,
@@ -28,6 +39,7 @@ from eval.baselines.common import (
     load_scene_points,
     read_manifest,
     resolve_sample,
+    resolve_erp_path,
     sample_points,
     write_evaluation_results,
 )
@@ -35,7 +47,7 @@ from eval.baselines.common import (
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", choices=("da3", "genrecon", "nova3r", "pager"), default="da3")
+    parser.add_argument("--model", choices=("genrecon", "nova3r", "pager", "lari", "volfill"), default="nova3r")
     parser.add_argument(
         "--dataset-layout",
         choices=("sage10k", "scannetpp", "3dfront"),
@@ -62,7 +74,7 @@ def parse_args():
     parser.add_argument(
         "--erp-root",
         type=Path,
-        help="Panorama root; supports SAGE and <scene>/panocam/images/<frame> ScanNet++ layouts",
+        help="Panorama root; defaults to prepared ScanNet++ ERPs or original SAGE/3D-FRONT panorama roots",
     )
     parser.add_argument(
         "--erp-fov",
@@ -99,6 +111,14 @@ def parse_args():
     )
     parser.add_argument("--alignment-iterations", type=int, default=DEFAULT_ALIGNMENT_ITERATIONS)
     parser.add_argument("--alignment-lr", type=float, default=DEFAULT_ALIGNMENT_LR)
+    parser.add_argument("--visibility-mesh-root", type=Path,
+                        help="Original GT mesh root, when separate from --scene-root")
+    parser.add_argument("--anonymization-root", type=Path,
+                        help="ScanNet++ root containing <scene>/scans/mesh_aligned_0.05_mask.txt")
+    parser.add_argument("--visibility-tolerance", type=float, default=0.01,
+                        help="First-hit distance tolerance in scene units (default: 0.01)")
+    parser.add_argument("--visibility-metrics", action="store_true",
+                        help="Report visible/occluded GT coverage and write table.md/table.csv")
     parser.add_argument("--save-predictions", action="store_true")
     parser.add_argument(
         "--resume",
@@ -158,6 +178,8 @@ def parse_args():
         help="Hydra config matching the selected checkpoint",
     )
     parser.add_argument("--nova3r-resolution", type=int, nargs=2, metavar=("WIDTH", "HEIGHT"), default=(518, 392))
+    parser.add_argument("--nova3r-independent-faces", action="store_true",
+                        help="Infer each cubemap face separately, GT-align each cloud, then merge")
     parser.add_argument("--nova3r-num-views", type=int, choices=range(1, 7), default=6)
     parser.add_argument("--nova3r-num-queries", type=int, default=50_000)
     parser.add_argument("--nova3r-method", choices=("euler", "midpoint", "rk4"))
@@ -166,7 +188,22 @@ def parse_args():
     parser.add_argument("--pager-scene-mode", choices=("indoor", "outdoor"), default="indoor")
     parser.add_argument("--pager-max-depth", type=float, default=75.0)
     parser.add_argument("--pager-sky-threshold", type=float, default=0.3)
+    parser.add_argument("--lari-repo", type=Path, default=REPO_ROOT / "third_party/LaRI")
+    parser.add_argument("--lari-python", default=sys.executable)
+    parser.add_argument("--lari-alignment", choices=("native", "all-chamfer", "visible-chamfer", "merged-chamfer"), default="native")
+    parser.add_argument("--lari-checkpoint", default="lari_scene_pointmap.pth")
+    parser.add_argument("--volfill-repo", type=Path, default=REPO_ROOT / "third_party/VolFill")
+    parser.add_argument("--volfill-python", default=sys.executable)
+    parser.add_argument("--volfill-checkpoint", default="TuanNgo/VolFill")
+    parser.add_argument("--volfill-raw-dir", type=Path, help="Keep upstream TUDF, bbox metadata, and input for each face")
+    parser.add_argument("--volfill-steps", type=int, default=50)
+    parser.add_argument("--volfill-cfg-strength", type=float, default=3.0)
+    parser.add_argument("--volfill-threshold", type=float, default=0.8,
+                        help="Surface threshold in voxel units, following upstream visualization")
     args = parser.parse_args()
+    args.independent_faces = args.nova3r_independent_faces or (args.model in ("lari", "volfill") and args.input_projection == "cubemap")
+    if args.volfill_steps < 1 or args.volfill_threshold < 0:
+        parser.error("VolFill requires positive steps and a nonnegative surface threshold")
     if args.workers is not None and args.workers < 1:
         parser.error("--workers must be positive")
     if args.model != "genrecon" and (args.workers is not None or args.devices is not None):
@@ -203,7 +240,13 @@ def parse_args():
             suffix += "_erp"
         args.output_dir = REPO_ROOT / f"eval_results/baselines/{args.model}/{suffix}"
     if args.input_projection == "erp" and args.erp_root is None:
-        parser.error("--erp-root is required when --input-projection erp")
+        args.erp_root = {
+            "scannetpp": REPO_ROOT / "datasets/scannetpp/panos/updated_final_test_100_prepared_erp",
+            "sage10k": Path("/tmp/datasets/sage-10k/panorama-scenes"),
+            "3dfront": Path("/tmp/datasets/3dfront/panorama_scenes"),
+        }[args.dataset_layout]
+    if args.input_projection == "erp" and not args.erp_root.is_dir():
+        parser.error(f"Panorama root does not exist: {args.erp_root}; supply --erp-root")
     if args.model == "pager" and args.input_projection != "erp":
         parser.error("PaGeR follows its official spherical pipeline and requires --input-projection erp")
     if args.model == "genrecon" and args.input_projection == "erp" and not 0 < args.erp_fov < 180:
@@ -212,6 +255,8 @@ def parse_args():
         parser.error("--cubemap-fov must be between 0 and 180 degrees")
     if sorted(args.face_order) != list(range(6)):
         parser.error("--face-order must be a permutation of 0 1 2 3 4 5")
+    if args.visibility_tolerance <= 0:
+        parser.error("--visibility-tolerance must be positive")
     if args.eval_points < 1:
         parser.error("--eval-points must be positive")
     if any(threshold <= 0 for threshold in args.fscore_thresholds):
@@ -230,6 +275,8 @@ def parse_args():
         parser.error("--nova3r-resolution values must be positive")
     if args.nova3r_num_queries < 1:
         parser.error("--nova3r-num-queries must be positive")
+    if args.nova3r_independent_faces and (args.model != "nova3r" or args.input_projection != "cubemap"):
+        parser.error("--nova3r-independent-faces requires --model nova3r --input-projection cubemap")
     if args.model == "nova3r" and args.input_projection == "erp" and args.nova3r_num_views != 1:
         parser.error("Nova3R ERP input requires --nova3r-num-views 1")
     if args.pager_max_depth <= 0:
@@ -247,7 +294,48 @@ def save_ply(points, path):
     o3d.io.write_point_cloud(str(path), cloud)
 
 
+def face_alignment_method(args):
+    if args.input_projection == "erp":
+        return "global_gt_scale_translation"
+    if args.model == "lari":
+        return {"merged-chamfer": "merged_layers_faces_global_gt_scale_translation",
+                "native": "lari_first_layer_scale_camera_z_shift",
+                "all-chamfer": "independent_face_frustum_gt_scale_translation",
+                "visible-chamfer": "independent_face_visible_gt_chamfer_scale_translation"}[args.lari_alignment]
+    return "independent_face_frustum_gt_scale_translation"
+
+
+def single_image_settings(args):
+    if args.model == "lari":
+        return {"checkpoint": args.lari_checkpoint, "input_projection": args.input_projection, "alignment": face_alignment_method(args), "iterations": args.alignment_iterations, "lr": args.alignment_lr, "empty_value_policy": "drop_nonfinite_and_exact_zero_xyz" if args.lari_alignment in ("merged-chamfer", "all-chamfer") else "drop_nonfinite"}
+    if args.model == "volfill":
+        return {"checkpoint": args.volfill_checkpoint, "input_projection": args.input_projection, "steps": args.volfill_steps,
+                "cfg_strength": args.volfill_cfg_strength, "threshold": args.volfill_threshold,
+                "pipeline": "upstream_export_v2",
+                "raw_dir": str(args.volfill_raw_dir) if args.volfill_raw_dir else None}
+    return None
+
+
+def single_image_settings_match(args, record):
+    saved = record.get("inference_settings")
+    if isinstance(saved, dict):
+        saved = dict(saved)
+        # Legacy cubemap records predate the explicit projection setting.
+        if args.model == "volfill":
+            saved.setdefault("input_projection", "cubemap")
+    return saved == single_image_settings(args)
+
+
 def build_adapter(args):
+    if args.model in ("lari", "volfill"):
+        from eval.baselines.adapters.single_image import SingleImageAdapter
+
+        settings = single_image_settings(args)
+        return SingleImageAdapter(
+            args.model, getattr(args, f"{args.model}_repo"),
+            getattr(args, f"{args.model}_python"), args.device, args.face_order, settings, args.seed,
+            input_projection=args.input_projection, erp_root=args.erp_root,
+        )
     if args.model == "da3":
         from eval.baselines.adapters.da3 import DA3Adapter
 
@@ -260,8 +348,6 @@ def build_adapter(args):
             input_projection=args.input_projection,
             erp_root=args.erp_root,
             erp_fov=args.erp_fov,
-            scannet_root=args.genrecon_scannet_root,
-            scannet_chunk_source=args.genrecon_scannet_chunk_source,
         )
     elif args.model == "genrecon":
         from eval.baselines.adapters.genrecon import GenReconAdapter
@@ -298,6 +384,7 @@ def build_adapter(args):
             erp_fov=args.erp_fov,
             resolution=tuple(args.nova3r_resolution),
             num_views=args.nova3r_num_views,
+            independent_faces=args.nova3r_independent_faces,
             num_queries=args.nova3r_num_queries,
             seed=args.seed,
             method=args.nova3r_method,
@@ -330,8 +417,11 @@ def evaluate_sample(args, adapter, index, entry, total):
         cubemap_fov=getattr(args, "cubemap_fov", 95.0),
     )
     print(f"[{index + 1}/{total}] {sample.key}", flush=True)
+    sample_started = time.perf_counter()
     try:
         prediction = adapter.predict(sample)
+        prediction_seconds = time.perf_counter() - sample_started
+        geometry_started = time.perf_counter()
         # 3D-FRONT scene identifiers contain ``scene/room``. Keep prediction
         # artifacts flat and avoid interpreting that slash as a subdirectory.
         sample_stem = f"{scene.replace('/', '_')}_{frame:05d}"
@@ -347,7 +437,64 @@ def evaluate_sample(args, adapter, index, entry, total):
             for name, points in adapter.last_diagnostic_pointclouds.items():
                 save_ply(points, diagnostic_dir / f"{sample_stem}_{name}.ply")
         pred = sample_points(prediction, args.eval_points, args.seed + index)
-        target = sample_points(load_scene_points(sample.surface_path), args.eval_points, args.seed + index)
+        if args.visibility_metrics or getattr(args, "independent_faces", False):
+            vertices, faces, evaluation_faces, mesh_path = load_visibility_geometry(
+                sample, args.visibility_mesh_root, args.anonymization_root,
+            )
+            target = sample_mesh_surface(vertices, evaluation_faces, args.eval_points, args.seed + index)
+        else:
+            target = sample_points(load_scene_points(sample.surface_path), args.eval_points, args.seed + index)
+        visible = None
+        if args.visibility_metrics or (args.independent_faces and args.model == "lari" and args.lari_alignment == "visible-chamfer"):
+            center = np.linalg.inv(_panorama_pose(sample))[:3, 3]
+            visible = panorama_visibility_mask(target, center, vertices, faces, args.visibility_tolerance)
+        geometry_seconds = time.perf_counter() - geometry_started
+        alignment_started = time.perf_counter()
+        face_alignments = {}
+        skipped_faces = {}
+        face_clouds = getattr(adapter, "last_face_pointclouds", {})
+        if face_clouds and not (args.model == "lari" and args.lari_alignment == "merged-chamfer"):
+            from PIL import Image
+
+            paths, intrinsics, extrinsics = load_cameras(sample, args.face_order)
+            cameras = {str(face): (path, intrinsic, extrinsic)
+                       for face, path, intrinsic, extrinsic in zip(args.face_order, paths, intrinsics, extrinsics)}
+            aligned_faces = []
+            for face, cloud in face_clouds.items():
+                path, intrinsic, extrinsic = cameras[face]
+                with Image.open(path) as image:
+                    width, height = image.size
+                valid_pixels = load_scannetpp_valid_mask(sample, path, width, height)
+                face_mask = face_target_mask(target, extrinsic, intrinsic, valid_pixels)
+                if args.model == "lari" and args.lari_alignment == "visible-chamfer":
+                    face_mask &= visible
+                face_target = target[face_mask]
+                if not len(face_target):
+                    skipped_faces[face] = "no_valid_gt_points"
+                    print(f"Skipping cubemap face {face}: no valid GT points", flush=True)
+                    continue
+                fit_details = {}
+                if args.model == "lari" and args.lari_alignment == "native":
+                    aligned_face, scale, shift, fit_details = align_lari_pointmap(
+                        adapter.last_face_pointmaps[face], vertices, faces,
+                        extrinsic, intrinsic, valid_pixels,
+                    )
+                    aligned_face = sample_points(aligned_face, args.eval_points, args.seed + index)
+                else:
+                    aligned_face, scale, shift = align_prediction_to_target(
+                        sample_points(cloud, args.eval_points, args.seed + index), face_target,
+                        device=args.device, seed=args.seed + index + int(face),
+                        max_iterations=args.alignment_iterations, lr=args.alignment_lr,
+                    )
+                aligned_faces.append(aligned_face)
+                face_alignments[face] = {"scale": scale, "shift": shift.tolist(),
+                                         "target_points": len(face_target), **fit_details}
+            if not aligned_faces:
+                raise ValueError("No cubemap faces with valid GT points remain for alignment")
+            merged_prediction = np.concatenate(aligned_faces)
+            pred = sample_points(merged_prediction, args.eval_points, args.seed + index)
+        alignment_seconds = time.perf_counter() - alignment_started
+        metrics_started = time.perf_counter()
         pred, evaluation = evaluate_point_clouds(
             pred,
             target,
@@ -356,16 +503,56 @@ def evaluate_sample(args, adapter, index, entry, total):
             seed=args.seed + index,
             alignment_iterations=args.alignment_iterations,
             alignment_lr=args.alignment_lr,
+            prealigned=bool(face_alignments),
         )
+        if face_alignments:
+            evaluation["face_alignments"] = face_alignments
+            evaluation["alignment_method"] = face_alignment_method(args)
+        if args.model == "lari" and args.lari_alignment in ("merged-chamfer", "all-chamfer"):
+            evaluation["alignment_method"] = face_alignment_method(args)
+            evaluation["empty_value_policy"] = "drop_nonfinite_and_exact_zero_xyz"
+        if skipped_faces:
+            evaluation["skipped_faces"] = skipped_faces
+        empty_faces = getattr(adapter, "last_empty_faces", [])
+        if empty_faces:
+            evaluation["empty_faces"] = empty_faces
+            evaluation["empty_face_metrics"] = {
+                face: {"status": "empty", "pred_points": 0,
+                       "chamfer_mean": None,
+                       **{f"f_score_{threshold}_full": 0.0
+                          for threshold in args.fscore_thresholds}}
+                for face in empty_faces
+            }
+        if args.visibility_metrics:
+            evaluation["visibility_mesh"] = str(mesh_path)
+            evaluation["visibility_protocol"] = "mesh_raycast_v3_directional"
+            evaluation["visibility_tolerance"] = args.visibility_tolerance
+            evaluation.update(compute_visibility_metrics(
+                pred, target, visible, args.fscore_thresholds,
+            ))
         record = {
             "sample": sample.key,
             "status": "ok",
+            "model": args.model,
+            "inference_settings": single_image_settings(args),
+            "independent_faces": bool(getattr(args, "independent_faces", False)),
+            "nova3r_independent_faces": bool(getattr(args, "nova3r_independent_faces", False)),
+            "erp_preprocessing": "aspect_preserving_v1" if args.input_projection == "erp" else None,
+            "input_erp": (str(resolve_erp_path(sample, args.erp_root).resolve())
+                          if args.input_projection == "erp" else None),
+            "timings": {
+                "prediction_seconds": prediction_seconds,
+                "ground_truth_seconds": geometry_seconds,
+                "face_alignment_seconds": alignment_seconds,
+                "metrics_seconds": time.perf_counter() - metrics_started,
+            },
             **evaluation,
         }
         if args.save_predictions:
             pred_dir = args.output_dir / "predictions"
             pred_dir.mkdir(exist_ok=True)
-            save_ply(target, pred_dir / f"{sample_stem}_gt.ply")
+            if not face_alignments:
+                save_ply(target, pred_dir / f"{sample_stem}_gt.ply")
             if hasattr(adapter, "save_aligned_mesh"):
                 adapter.save_aligned_mesh(
                     pred_dir / f"{sample_stem}_pred_aligned_mesh.ply",
@@ -373,7 +560,9 @@ def evaluate_sample(args, adapter, index, entry, total):
                     np.asarray(evaluation["alignment_shift"], dtype=np.float32),
                 )
             else:
-                save_ply(pred, pred_dir / f"{sample_stem}_pred_aligned.ply")
+                save_ply(merged_prediction if face_alignments else pred,
+                         pred_dir / f"{sample_stem}_pred_aligned.ply")
+        record["timings"]["total_seconds"] = time.perf_counter() - sample_started
     except Exception as exc:
         record = {"sample": sample.key, "status": "error", "error": str(exc)}
         traceback.print_exc()
@@ -463,7 +652,20 @@ def main():
         }
         for record in prior_records:
             index = index_by_key.get(record.get("sample"))
-            if index is not None and record.get("status") == "ok":
+            input_matches = (
+                args.input_projection != "erp"
+                or (record.get("erp_preprocessing") == "aspect_preserving_v1"
+                    and bool(record.get("input_erp"))
+                    and Path(record["input_erp"]).resolve().is_relative_to(args.erp_root.resolve()))
+            )
+            if (index is not None and record.get("status") == "ok" and input_matches
+                    and (args.model not in ("lari", "volfill")
+                         or (record.get("model") == args.model
+                             and single_image_settings_match(args, record)))
+                    and bool(record.get("nova3r_independent_faces", False)) == args.nova3r_independent_faces
+                    and (not args.independent_faces or record.get("alignment_method") == face_alignment_method(args))
+                    and (not args.visibility_metrics or (record.get("visibility_protocol") == "mesh_raycast_v3_directional"
+                        and record.get("visibility_tolerance") == args.visibility_tolerance))):
                 ordered_records[index] = record
         print(
             f"Resuming with {len(ordered_records)}/{len(entries)} successful samples complete",
@@ -493,9 +695,17 @@ def main():
         results_path.write_text(json.dumps(records, indent=2))
 
     metadata = {
+        "visibility_protocol": (
+            "mesh_raycast_v3_directional: first hit within visibility_tolerance; masked GT faces excluded; regional CD=GT-to-pred mean; "
+            "APD=GT coverage; complete CD=symmetric mean; table=cm and percent"
+            if args.visibility_metrics else None
+        ),
+        "visibility_tolerance": args.visibility_tolerance,
+        "visibility_mesh_root": str(args.visibility_mesh_root) if args.visibility_mesh_root else None,
         "split": str(args.split_list),
         "dataset_layout": args.dataset_layout,
         "input_projection": args.input_projection,
+        "erp_root": str(args.erp_root.resolve()) if args.erp_root is not None else None,
         "cubemap_fov": args.cubemap_fov if args.input_projection == "cubemap" else None,
         "erp_pinhole_horizontal_fov": (
             args.erp_fov
@@ -509,7 +719,8 @@ def main():
         metadata.update(
             {
                 "nova3r_checkpoint": str(args.nova3r_checkpoint),
-                "nova3r_num_views": args.nova3r_num_views,
+                "nova3r_num_views": 1 if args.nova3r_independent_faces else args.nova3r_num_views,
+                "nova3r_independent_faces": args.nova3r_independent_faces,
                 "nova3r_num_queries": args.nova3r_num_queries,
                 "nova3r_face_order": args.face_order if args.input_projection == "cubemap" else None,
             }
@@ -522,6 +733,14 @@ def main():
                 "pager_projection": "spherical_erp",
             }
         )
+    if args.model in ("lari", "volfill"):
+        metadata.update({"checkpoint": getattr(args, f"{args.model}_checkpoint"),
+                         "independent_faces": args.independent_faces,
+                         "face_order": args.face_order if args.independent_faces else None})
+        if args.model == "volfill":
+            metadata.update({"volfill_steps": args.volfill_steps,
+                             "volfill_cfg_strength": args.volfill_cfg_strength,
+                             "volfill_threshold_voxels": args.volfill_threshold})
     summary = build_evaluation_summary(
         records,
         model=args.model,
@@ -530,6 +749,11 @@ def main():
         alignment_lr=args.alignment_lr,
         metadata=metadata,
     )
+    if args.independent_faces:
+        summary["alignment"]["method"] = face_alignment_method(args)
+        if args.model == "lari" and args.lari_alignment == "native":
+            summary["alignment"] = {"method": "lari_first_layer_scale_camera_z_shift",
+                                    "solver": "least_squares", "gt_layers": 1}
     write_evaluation_results(records, summary, args.output_dir)
     print(json.dumps(summary, indent=2))
     successful = [record for record in records if record["status"] == "ok"]

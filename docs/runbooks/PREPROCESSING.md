@@ -305,3 +305,23 @@ pip install moviepy==1.0.3 plyfile pycolmap
 conda run -n nova3r python -m pip install -e .
 python -m pip install --upgrade "numpy>=2,<3"
 ```
+
+### ScanNet++ cropped-room anonymization masks
+
+Run after creating or updating room mesh exports:
+
+```bash
+python scripts/data/scannetpp/prepare_room_masks.py \
+  --root datasets/scannetpp/test_scenes
+```
+
+Full scans use `<scene>/scans/mesh_aligned_0.05_mask.txt` (original vertex
+indices). If any are missing, pass `--source-root ROOT` to copy them from
+`ROOT/<scene>/scans/`. Existing scan masks are preserved; empty lists are valid.
+Each cropped room receives `mesh_mask.txt` containing room-local masked vertex
+indices, plus `mesh_mask.json` documenting the source, counts, and tolerance.
+Masked source coordinates are matched within 1e-5 scene units because room
+exports reindex vertices. Regenerate masks whenever room meshes change.
+The shared baseline and model-test visibility evaluator reads room-local masks
+when available, with on-the-fly source-coordinate remapping as a fallback.
+Masked triangles are excluded from GT metric sampling and retained as occluders.

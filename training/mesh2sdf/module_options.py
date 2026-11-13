@@ -72,10 +72,27 @@ class MeshOptions:
     udf_streamed_grid: bool
     udf_fast_cleanup: bool
     udf_mc_tile_cells: int
+    udf_normal_band_voxels: float = 2.0
+    udf_reference_resolution: int | None = None
 
     @classmethod
     def from_config(cls, cfg):
-        threshold = cfg.get("mesh_udf_surface_threshold", 0.008)
+        normal_band = float(cfg.get("mesh_udf_normal_band_voxels", 2.0))
+        if not np.isfinite(normal_band) or normal_band <= 0:
+            raise ValueError("mesh_udf_normal_band_voxels must be positive and finite")
+        if cfg.get("mesh_udf_sparse_bricks", False) and normal_band != 2.0:
+            raise ValueError("Custom normal bands require dense MeshUDF extraction")
+        # The tuned dense 768 preset retains the 512-grid distance cutoffs.
+        # Sparse extraction does not support reference-resolution cutoffs.
+        tuned_udf = str(cfg.get("mesh_method", "latent2mesh")) == "mesh_udf"
+        dense_udf = tuned_udf and not cfg.get("mesh_udf_sparse_bricks", False)
+        reference = cfg.get("mesh_udf_reference_resolution", 512 if dense_udf else None)
+        if reference is not None:
+            if not np.isfinite(reference) or reference < 2 or int(reference) != reference:
+                raise ValueError("mesh_udf_reference_resolution must be an integer >= 2")
+            if cfg.get("mesh_udf_sparse_bricks", False):
+                raise ValueError("Reference-resolution cutoffs require dense MeshUDF extraction")
+        threshold = cfg.get("mesh_udf_surface_threshold", 0.01 if tuned_udf else 0.008)
         mind_resolution = int(cfg.get("mesh_mind_resolution", 256))
         mind_r2 = float(cfg.get("mesh_mind_r2", 0.01))
         if mind_resolution < 2:
@@ -132,18 +149,20 @@ class MeshOptions:
             dualmesh_qef_threshold=dualmesh_qef_threshold,
             smooth_borders=bool(cfg.get("smooth_borders", False)),
             fourier=bool(cfg.get("mesh_fourier", False)),
-            vertex_batch_size=int(cfg.get("mesh_udf_vertex_batch_size", 65536)),
+            vertex_batch_size=int(cfg.get("mesh_udf_vertex_batch_size", 131072 if tuned_udf else 65536)),
             rgb_vertex_batch_size=int(cfg.get("mesh_rgb_vertex_batch_size", 65536)),
-            bounds_padding=float(cfg.get("mesh_bounds_padding", 0.2)),
+            bounds_padding=float(cfg.get("mesh_bounds_padding", 0.05)),
             bounds=cls._validate_bounds(cfg.get("mesh_bounds")),
             surface_threshold=None if threshold is None else float(threshold),
             udf_sparse_bricks=bool(cfg.get("mesh_udf_sparse_bricks", False)),
             udf_brick_cells=int(cfg.get("mesh_udf_brick_cells", 64)),
             udf_cull_margin=float(cfg.get("mesh_udf_cull_margin", 1.25)),
             udf_query_batch_size=int(cfg.get("mesh_udf_query_batch_size", 262144)),
-            udf_streamed_grid=bool(cfg.get("mesh_udf_streamed_grid", False)),
-            udf_fast_cleanup=bool(cfg.get("mesh_udf_fast_cleanup", False)),
+            udf_streamed_grid=bool(cfg.get("mesh_udf_streamed_grid", tuned_udf)),
+            udf_fast_cleanup=bool(cfg.get("mesh_udf_fast_cleanup", tuned_udf)),
             udf_mc_tile_cells=int(cfg.get("mesh_udf_mc_tile_cells", 0)),
+            udf_normal_band_voxels=normal_band,
+            udf_reference_resolution=None if reference is None else int(reference),
         )
 
     @staticmethod

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -207,6 +208,16 @@ def resolve_erp_path(sample: SageSample, erp_root: Path) -> Path:
     if path is None:
         raise FileNotFoundError(
             "Missing ERP image; checked:\n  " + "\n  ".join(str(candidate) for candidate in candidates)
+        )
+    with Image.open(path) as panorama:
+        width, height = panorama.size
+    if width != 2 * height:
+        warnings.warn(
+            f"Panorama is not 2:1: {path} has size {width}x{height}. "
+            "Spherical lifting assumes a full 360x180-degree ERP; cropped or "
+            "unpadded inputs can produce incorrect geometry. Use a prepared 2:1 panorama.",
+            UserWarning,
+            stacklevel=2,
         )
     return path
 
@@ -616,18 +627,22 @@ def evaluate_point_clouds(
     seed: int,
     alignment_iterations: int = DEFAULT_ALIGNMENT_ITERATIONS,
     alignment_lr: float = DEFAULT_ALIGNMENT_LR,
+    prealigned: bool = False,
 ) -> tuple[np.ndarray, dict]:
     """Run the shared baseline alignment and point-cloud metric protocol."""
     from eval.mv_recon.metric import accuracy, completion
 
-    aligned, alignment_scale, alignment_shift = align_prediction_to_target(
-        prediction,
-        target,
-        device=device,
-        seed=seed,
-        max_iterations=alignment_iterations,
-        lr=alignment_lr,
-    )
+    if prealigned:
+        aligned, alignment_scale, alignment_shift = prediction, 1.0, np.zeros(3)
+    else:
+        aligned, alignment_scale, alignment_shift = align_prediction_to_target(
+            prediction,
+            target,
+            device=device,
+            seed=seed,
+            max_iterations=alignment_iterations,
+            lr=alignment_lr,
+        )
     chamfer_forward, accuracy_median = accuracy(target, aligned)
     chamfer_backward, completion_median = completion(target, aligned)
     fscores = compute_ssi3d_fscores(aligned, target, thresholds, device)
@@ -644,6 +659,233 @@ def evaluate_point_clouds(
         **fscores,
     }
     return aligned, details
+
+
+def resolve_visibility_mesh(sample: SageSample, mesh_root: Path | None = None) -> Path:
+    """Resolve original triangles, never silently fall back to point visibility."""
+    surface = sample.surface_path
+    if sample.dataset_layout == "scannetpp":
+        # resolve_sample already selects the room belonging to this frame.
+        if surface.name == "mesh.ply" and surface.is_file():
+            return surface
+        if mesh_root is not None:
+            room = resolve_scannetpp_room(Path(mesh_root), sample.scene, sample.frame)
+            if room is not None:
+                return room / "mesh.ply"
+    if mesh_root is not None:
+        root = Path(mesh_root)
+        if sample.dataset_layout == "scannetpp":
+            candidates = [root / sample.scene / "scans" / "mesh_aligned_0.05.ply"]
+        elif sample.dataset_layout == "3dfront":
+            room = root / sample.scene
+            candidates = [room / "room.glb", room.parent / f"{room.name}_full.glb"]
+        else:
+            candidates = [root / sample.scene / name for name in ("scene.glb", "scene.ply")]
+    else:
+        candidates = [surface] if surface.suffix.lower() in (".ply", ".glb", ".obj") else []
+        if sample.dataset_layout == "scannetpp":
+            candidates += [surface.with_name("mesh_aligned_0.05.ply")]
+        elif sample.dataset_layout == "3dfront":
+            candidates += [surface.parent / Path(sample.scene).name / "room.glb",
+                           surface.with_name(surface.name.replace("_surface.npz", ".glb"))]
+        else:
+            candidates += [surface.parent / "scene.glb", surface.parent / "scene.ply"]
+    for path in candidates:
+        if path.is_file():
+            return path
+    raise FileNotFoundError(f"No visibility mesh for {sample.key}; supply --visibility-mesh-root. Tried: {candidates}")
+
+
+def load_visibility_geometry(sample, mesh_root=None, mask_root=None):
+    """Return original occluders and non-anonymized triangles for GT sampling."""
+    import trimesh
+
+    path = resolve_visibility_mesh(sample, mesh_root)
+    # Visibility and point sampling consume geometry only. Loading GLB textures
+    # also makes scene concatenation build an unused texture atlas, which can
+    # dominate evaluation time on textured SAGE/3D-FRONT scenes.
+    mesh = trimesh.load(str(path), process=False, skip_materials=True)
+    if isinstance(mesh, trimesh.Scene):
+        mesh = mesh.dump(concatenate=True)
+    vertices = np.asarray(mesh.vertices, dtype=np.float32)
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    if not len(faces) or not np.isfinite(vertices).all():
+        raise ValueError(f"Expected finite triangle geometry: {path}")
+    evaluation_faces = faces
+    room_mask = path.with_name("mesh_mask.txt")
+    if sample.dataset_layout == "scannetpp" and path.name == "mesh.ply" and room_mask.is_file() and mask_root is None:
+        indices = (np.loadtxt(room_mask, dtype=np.int64, ndmin=1).reshape(-1)
+                   if room_mask.stat().st_size else np.empty(0, dtype=np.int64))
+        if np.any(indices < 0) or np.any(indices >= len(vertices)):
+            raise ValueError(f"Out-of-range room vertex indices: {room_mask}")
+        excluded = np.zeros(len(vertices), dtype=bool)
+        excluded[indices] = True
+        evaluation_faces = faces[~excluded[faces].any(axis=1)]
+        if not len(evaluation_faces):
+            raise ValueError(f"Anonymization excludes every triangle: {path}")
+    elif sample.dataset_layout == "scannetpp":
+        # Indices must refer to the original scan, not a reindexed room crop.
+        mask = (Path(mask_root) / sample.scene / "scans" / "mesh_aligned_0.05_mask.txt"
+                if mask_root else path.with_name("mesh_aligned_0.05_mask.txt"))
+        original_vertices = vertices
+        if path.name == "mesh.ply":
+            # Room export removes unused vertices but preserves coordinates.
+            scene_root = path.parents[3] if path.parents[2].name == "rooms" else None
+            roots = [Path(root) for root in (mask_root, mesh_root, scene_root) if root is not None]
+            original_path = next((root / sample.scene / "scans" / "mesh_aligned_0.05.ply"
+                                  for root in roots
+                                  if (root / sample.scene / "scans" / "mesh_aligned_0.05.ply").is_file()), None)
+            if original_path is None:
+                raise FileNotFoundError("Room anonymization requires the original scan; supply --visibility-mesh-root")
+            original_vertices = np.asarray(trimesh.load(str(original_path), process=False).vertices, dtype=np.float32)
+            mask = (Path(mask_root) / sample.scene / "scans" / "mesh_aligned_0.05_mask.txt"
+                    if mask_root else original_path.with_name("mesh_aligned_0.05_mask.txt"))
+        elif path.name != "mesh_aligned_0.05.ply":
+            raise ValueError(f"Unsupported ScanNet++ mesh: {path}")
+        if not mask.is_file():
+            raise FileNotFoundError(f"Missing ScanNet++ vertex anonymization list: {mask}")
+        indices = np.loadtxt(mask, dtype=np.int64, ndmin=1).reshape(-1)
+        if np.any(indices < 0) or np.any(indices >= len(original_vertices)):
+            raise ValueError(f"Out-of-range anonymized vertex indices: {mask}")
+        original_excluded = np.zeros(len(original_vertices), dtype=bool)
+        original_excluded[indices] = True
+        if path.name == "mesh.ply":
+            from scipy.spatial import cKDTree
+
+            # Match only masked positions: duplicate scan vertices with different
+            # indices must still be treated as anonymized at that position.
+            correspondence = cKDTree(original_vertices).query(vertices)[0]
+            if np.any(correspondence > 1e-5):
+                raise ValueError(f"Room vertices do not match original scan coordinates: {path}")
+            excluded = (cKDTree(original_vertices[original_excluded]).query(vertices)[0] <= 1e-5
+                        if len(indices) else np.zeros(len(vertices), dtype=bool))
+        else:
+            excluded = original_excluded
+        evaluation_faces = faces[~excluded[faces].any(axis=1)]
+        if not len(evaluation_faces):
+            raise ValueError(f"Anonymization excludes every triangle: {path}")
+    return vertices, faces, evaluation_faces, path
+
+
+def panorama_visibility_mask(target, camera_center, vertices, faces, tolerance=0.01):
+    """Visible iff the GT point agrees with the first mesh hit (scene units)."""
+    import open3d as o3d
+
+    offsets = np.asarray(target, dtype=np.float32) - camera_center
+    distances = np.linalg.norm(offsets, axis=1)
+    if np.any(distances <= 0) or tolerance <= 0:
+        raise ValueError("Require positive camera distances and visibility tolerance")
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(o3d.core.Tensor(np.asarray(vertices, dtype=np.float32)),
+                        o3d.core.Tensor(np.asarray(faces, dtype=np.uint32)))
+    visible = np.zeros(len(target), dtype=bool)
+    for start in range(0, len(target), 100_000):
+        stop = min(start + 100_000, len(target))
+        directions = offsets[start:stop] / distances[start:stop, None]
+        origins = np.broadcast_to(camera_center, directions.shape)
+        rays = np.concatenate([origins, directions], axis=1).astype(np.float32)
+        hit = scene.cast_rays(o3d.core.Tensor(rays))["t_hit"].numpy()
+        visible[start:stop] = np.isfinite(hit) & (np.abs(hit - distances[start:stop]) <= tolerance)
+    return visible
+
+
+def align_lari_pointmap(pointmap, vertices, faces, world_to_camera, intrinsics, valid_pixels):
+    """Fit camera-space scale and Z shift from first-layer pixel correspondences.
+
+    Uses the least-squares transform family in LaRI's native evaluator. The
+    first GT layer comes from mesh raycasting; all predicted layers share the fit.
+    """
+    import open3d as o3d
+
+    height, width, layers, _ = pointmap.shape
+    image_h, image_w = valid_pixels.shape
+    intrinsic = np.asarray(intrinsics, dtype=np.float64).copy()
+    intrinsic[0] *= width / image_w
+    intrinsic[1] *= height / image_h
+    xx, yy = np.meshgrid(np.arange(width) + 0.5, np.arange(height) + 0.5)
+    directions = np.stack([xx, yy, np.ones_like(xx)], axis=-1) @ np.linalg.inv(intrinsic).T
+    c2w = np.linalg.inv(world_to_camera)
+    world_directions = directions @ c2w[:3, :3].T
+    origins = np.broadcast_to(c2w[:3, 3], world_directions.shape)
+    rays = np.concatenate([origins, world_directions], axis=-1).astype(np.float32)
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(o3d.core.Tensor(np.asarray(vertices, dtype=np.float32)),
+                        o3d.core.Tensor(np.asarray(faces, dtype=np.uint32)))
+    depth = scene.cast_rays(o3d.core.Tensor(rays))["t_hit"].numpy()
+    px = np.minimum((xx * image_w / width).astype(int), image_w - 1)
+    py = np.minimum((yy * image_h / height).astype(int), image_h - 1)
+    mask = (np.isfinite(depth) & (depth > 0) & valid_pixels[py, px]
+            & np.isfinite(pointmap[:, :, 0]).all(axis=-1))
+    if mask.sum() < 3:
+        raise ValueError("LaRI alignment requires at least 3 valid first-hit correspondences")
+    pred = pointmap[:, :, 0][mask].astype(np.float64)
+    target = directions[mask] * depth[mask, None]
+    pred_z_mean, target_z_mean = pred[:, 2].mean(), target[:, 2].mean()
+    denominator = np.mean(np.sum(pred * pred, axis=1)) - pred_z_mean ** 2
+    if denominator <= 1e-12:
+        raise ValueError("Degenerate LaRI pointmap scale fit")
+    scale = (np.mean(np.sum(pred * target, axis=1)) - pred_z_mean * target_z_mean) / denominator
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError(f"Invalid LaRI alignment scale: {scale}")
+    z_shift = target_z_mean - scale * pred_z_mean
+    aligned_camera = pointmap.reshape(-1, 3).astype(np.float64) * scale
+    aligned_camera[:, 2] += z_shift
+    aligned_world = aligned_camera @ c2w[:3, :3].T + c2w[:3, 3]
+    aligned_world = aligned_world[np.isfinite(aligned_world).all(axis=1)]
+    # Equivalent transform applied to already world-space raw predictions.
+    shift_world = (1 - scale) * c2w[:3, 3] + z_shift * c2w[:3, 2]
+    return aligned_world.astype(np.float32), float(scale), shift_world, {
+        "camera_z_shift": float(z_shift), "correspondence_points": int(mask.sum()),
+        "alignment_method": "lari_first_layer_scale_camera_z_shift",
+    }
+
+
+def face_target_mask(target, world_to_camera, intrinsics, valid_pixels):
+    """Select all GT inside a calibrated face, including occluded surfaces."""
+    camera = target @ world_to_camera[:3, :3].T + world_to_camera[:3, 3]
+    projected = camera @ intrinsics.T
+    pixels = projected[:, :2] / np.where(camera[:, 2:3] > 0, projected[:, 2:3], 1)
+    height, width = valid_pixels.shape
+    inside = ((camera[:, 2] > 0)
+              & np.isfinite(pixels).all(axis=1)
+              & (pixels[:, 0] >= 0) & (pixels[:, 0] < width)
+              & (pixels[:, 1] >= 0) & (pixels[:, 1] < height))
+    indices = np.flatnonzero(inside)
+    uv = np.floor(pixels[indices]).astype(np.int64)
+    inside[indices] &= valid_pixels[uv[:, 1], uv[:, 0]]
+    return inside
+
+
+def compute_visibility_metrics(prediction, target, visible, thresholds):
+    """Regional CD/APD use GT-to-prediction distances; complete CD is symmetric.
+
+    APD is thresholded GT coverage, expressed as a fraction. No regional refit
+    is performed. Empty GT regions are reported as null, never as perfect scores.
+    """
+    from scipy.spatial import cKDTree
+
+    visible = np.asarray(visible, dtype=bool)
+    if visible.shape != (len(target),) or not len(target) or not len(prediction):
+        raise ValueError("Require nonempty clouds and one visibility flag per GT point")
+    backward = cKDTree(prediction).query(target)[0]
+    forward = cKDTree(target).query(prediction)[0]
+    metrics = {"complete_cd": float((forward.mean() + backward.mean()) / 2)}
+    for name, mask in (("visible", visible), ("occluded", ~visible)):
+        distances = backward[mask]
+        metrics[f"{name}_points"] = int(mask.sum())
+        metrics[f"{name}_cd"] = float(distances.mean()) if len(distances) else None
+        # Each region is a GT subset evaluated against the entire prediction.
+        regional_forward = cKDTree(target[mask]).query(prediction)[0] if mask.any() else None
+        metrics[f"{name}_chamfer_forward"] = float(regional_forward.mean()) if mask.any() else None
+        metrics[f"{name}_chamfer_backward"] = metrics[f"{name}_cd"]
+        metrics[f"{name}_chamfer_mean"] = (
+            float((regional_forward.mean() + distances.mean()) / 2) if mask.any() else None
+        )
+        for threshold in thresholds:
+            metrics[f"{name}_apd_{threshold}"] = (
+                float(np.mean(distances < threshold)) if len(distances) else None
+            )
+    return metrics
 
 
 def build_evaluation_summary(
@@ -676,6 +918,23 @@ def build_evaluation_summary(
             if successful
             else None
         )
+    regional_names = sorted({key for record in successful for key in record
+                             if key.startswith(("visible_cd", "occluded_cd", "visible_apd_", "occluded_apd_", "complete_cd", "visible_chamfer_", "occluded_chamfer_"))})
+    for name in regional_names:
+        values = [record[name] for record in successful if record.get(name) is not None]
+        summary[name] = float(np.mean(values)) if values else None
+    if regional_names:
+        summary["metric_samples"] = {
+            region: sum(record.get(f"{region}_cd") is not None for record in successful)
+            for region in ("visible", "occluded", "complete")
+        }
+    exceptions = [
+        {"sample": record["sample"], "evaluated_faces": record.get("evaluated_faces"),
+         "skipped_faces": record["skipped_faces"]}
+        for record in successful if record.get("skipped_faces")
+    ]
+    if exceptions:
+        summary["face_exceptions"] = exceptions
     return summary
 
 
@@ -684,6 +943,27 @@ def write_evaluation_results(records: list[dict], summary: dict, output_dir: Pat
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "results.json").write_text(json.dumps(records, indent=2))
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+
+    if "complete_cd" in summary:
+        columns = ["Method", "Visible CD↓", "Visible APD0.1↑", "Visible APD0.05↑", "Visible APD0.02↑",
+                   "Occluded CD↓", "Occluded APD0.1↑", "Occluded APD0.05↑", "Occluded APD0.02↑",
+                   "Complete CD↓", "Complete FS0.1↑", "Complete FS0.05↑", "Complete FS0.02↑"]
+        keys = ["visible_cd", "visible_apd_0.1", "visible_apd_0.05", "visible_apd_0.02",
+                "occluded_cd", "occluded_apd_0.1", "occluded_apd_0.05", "occluded_apd_0.02",
+                "complete_cd", "f_score_0.1_full", "f_score_0.05_full", "f_score_0.02_full"]
+        # Table distances use cm (assuming scene units are meters); rates use %.
+        values = [summary.get(key) for key in keys]
+        row = [summary["model"]] + [
+            f"{value * 100:.2f}" if value is not None else "—" for value in values
+        ]
+        (output_dir / "table.md").write_text(
+            "| " + " | ".join(columns) + " |\n| " + " | ".join(["---"] * len(columns))
+            + " |\n| " + " | ".join(row) + " |\n"
+        )
+        with (output_dir / "table.csv").open("w", newline="") as file:
+            writer = csv.writer(file)
+            writer.writerow(columns)
+            writer.writerow(row)
 
     fields = sorted({key for record in records for key in record})
     with (output_dir / "results.csv").open("w", newline="") as file:

@@ -56,11 +56,21 @@ podman run -v /mnt:/mnt:rw \
     --name=nova3r2 \
     --shm-size=1024gb \
     -e CUDA_VISIBLE_DEVICES \
+    -e GPU_KEEPALIVE_MEMORY_FRACTION="${GPU_KEEPALIVE_MEMORY_FRACTION:-0.5}" \
     -e PYTHONPATH="\$PYTHONPATH:/absolute/path/to/nova3r" \
     --device=/dev/fuse \
     -d \
     nova3r \
-    bash -c 'apt update && apt install -y openssh-server && mkdir -p /var/run/sshd && start-ssh-server $PORT && sleep infinity'
+    bash -c '
+        /opt/conda/envs/nova3r/bin/python -u scripts/training/gpu_keepalive.py \
+            --memory-fraction "$GPU_KEEPALIVE_MEMORY_FRACTION" &
+        keepalive_pid=$!
+        trap '\''kill "$keepalive_pid" 2>/dev/null; wait "$keepalive_pid" 2>/dev/null'\'' EXIT
+        trap '\''exit 0'\'' INT TERM
+        apt update && apt install -y openssh-server && mkdir -p /var/run/sshd && start-ssh-server "$PORT" || exit 1
+        sleep infinity &
+        wait $!
+    '
 
 sleep 1m
 

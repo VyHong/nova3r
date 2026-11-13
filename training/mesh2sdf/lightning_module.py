@@ -13,6 +13,10 @@ from scripts.inference.demo_nova3r import render_360_video
 from nova3r.heads.hunyuan_model.autoencoders.model import DiagonalGaussianDistribution
 from nova3r.losses import L21, FMVelocity, Pts3D_Regr3D_CD_V4, ReconstructionLoss, SDFReconstructionLoss, MSE
 from eval.baselines.common import (
+    SageSample,
+    load_visibility_geometry,
+    panorama_visibility_mask,
+    compute_visibility_metrics,
     build_evaluation_summary,
     evaluate_point_clouds,
     sample_mesh_surface,
@@ -576,9 +580,16 @@ class Mesh2SDFLightningModule(pl.LightningModule):
     def mesh_from_latents(self, latent_batch, sample_idx, bounds, decoder, method=None, artifact_dir=None, world_scale=1.0):
         original_decoder = decoder
         oriented_frame = bounds if isinstance(bounds, OrientedMeshBounds) else None
+        snug_clip_frame = None
         if oriented_frame is not None:
-            bounds = oriented_frame.bounds
-            decoder = decoder_in_box_frame(decoder, oriented_frame)
+            if self.cfg.get("mesh_axis_aligned_snug_clip", True):
+                from training.mesh2sdf.oriented_meshing import enclosing_axis_aligned_bounds
+                snug_clip_frame = oriented_frame
+                bounds = enclosing_axis_aligned_bounds(oriented_frame)
+                oriented_frame = None
+            else:
+                bounds = oriented_frame.bounds
+                decoder = decoder_in_box_frame(decoder, oriented_frame)
         method = self.mesh_options.method if method is None else method
         mesh = None
         if method == "latent2mesh":
@@ -638,6 +649,8 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                         query_batch=self.mesh_options.udf_query_batch_size,
                         fast_cleanup=self.mesh_options.udf_fast_cleanup,
                         mc_tile_cells=self.mesh_options.udf_mc_tile_cells,
+                        normal_band_voxels=self.mesh_options.udf_normal_band_voxels,
+                        reference_resolution=self.mesh_options.udf_reference_resolution,
                     )
                 if mesh is not None:
                     mesh = udf_decoder.mesh_to_world(mesh)
@@ -760,6 +773,8 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                     resolution=int(self.cfg.get("mesh_hrudf_resolution", 129)),
                     query_batch=int(self.cfg.get("mesh_hrudf_query_batch_size", 10000)),
                     recursions=int(self.cfg.get("mesh_hrudf_recursions", 5)),
+                    max_avg_distance_factor=self.cfg.get("mesh_hrudf_max_avg_factor", None),
+                    max_max_distance_factor=self.cfg.get("mesh_hrudf_max_max_factor", None),
                 )
                 mesh = udf_decoder.mesh_to_world(mesh)
         else:
@@ -767,6 +782,9 @@ class Mesh2SDFLightningModule(pl.LightningModule):
 
         if oriented_frame is not None:
             mesh = oriented_frame.transform_mesh(mesh)
+        if snug_clip_frame is not None and mesh is not None:
+            from training.mesh2sdf.oriented_meshing import remove_triangles_outside_oriented_bounds
+            mesh = remove_triangles_outside_oriented_bounds(mesh, snug_clip_frame)
         return colorize_trimesh_vertices(
             mesh,
             original_decoder,
@@ -797,7 +815,7 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         return value
 
     @staticmethod
-    def _surface_bounds(surface, padding_fraction=0.1):
+    def _surface_bounds(surface, padding_fraction=0.05):
         points = surface[..., :3]
         minimum = points.min(dim=0).values.detach().cpu().numpy()
         maximum = points.max(dim=0).values.detach().cpu().numpy()
@@ -844,6 +862,42 @@ class Mesh2SDFLightningModule(pl.LightningModule):
         if isinstance(norm_factor, torch.Tensor):
             norm_factor = norm_factor.detach().cpu()
         return float(norm_factor) / target
+
+    def _test_visibility_target(self, batch, sample_idx, seed, count):
+        """Load metric GT in the same unnormalized camera frame as the decoder."""
+        def item(key):
+            return self._batch_item(batch[key], sample_idx)
+
+        layout = str(item("evaluation_layout"))
+        default_roots = {
+            "scannetpp": "datasets/scannetpp/test_scenes",
+            "sage10k": "/tmp/datasets/sage-10k/panorama-scenes",
+            "3dfront": "/tmp/datasets/3dfront/panorama_scenes",
+        }
+        roots = self.cfg.get("test_visibility_mesh_roots", {})
+        root = Path(roots.get(layout, default_roots[layout]))
+        scene, frame = str(item("evaluation_scene")), int(item("evaluation_frame"))
+        from eval.baselines.common import resolve_scannetpp_surface
+
+        surface = (resolve_scannetpp_surface(root, scene, frame) if layout == "scannetpp"
+                   else Path(str(item("evaluation_surface_path"))))
+        sample = SageSample(f"{scene} {frame:05d}", scene, frame, Path("."),
+                            Path(str(item("evaluation_pose_path"))), surface, layout)
+        vertices, faces, evaluation_faces, mesh_path = load_visibility_geometry(sample, root)
+        transform = item("evaluation_world_to_geometry").detach().float().cpu().numpy()
+        vertices = vertices @ transform[:3, :3].T + transform[:3, 3]
+        center = np.zeros(3, dtype=np.float32)
+        if "surface_geo_norm_center" in batch:
+            offset = item("surface_geo_norm_center").detach().float().cpu().numpy().reshape(3)
+            vertices = vertices - offset
+            center = center - offset
+        target = sample_mesh_surface(vertices, evaluation_faces, count, seed)
+        # Cubemap faces share the panorama optical centre, at geometry origin.
+        visible = panorama_visibility_mask(
+            target, center, vertices, faces,
+            float(self.cfg.get("test_visibility_tolerance", 0.01)),
+        )
+        return target, visible, mesh_path
 
     def on_test_epoch_start(self):
         self.test_results = []
@@ -939,13 +993,17 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                     artifact_dir=sample_dir,
                     world_scale=world_scale,
                 )
+                clip_bounds = self.cfg.get("test_mesh_clip_bounds")
+                if mesh is not None and clip_bounds is not None:
+                    from training.mesh2sdf.oriented_meshing import clip_mesh_to_bounds
+
+                    mesh = clip_mesh_to_bounds(mesh, MeshOptions._validate_bounds(clip_bounds))
                 if mesh is None or len(mesh.vertices) == 0 or len(mesh.faces) == 0:
                     raise ValueError(f"{self.mesh_options.method} did not produce a non-empty mesh")
 
                 world_mesh = mesh.copy()
                 world_mesh.vertices = np.asarray(world_mesh.vertices) * world_scale
                 mesh_path = sample_dir / "test_mesh.ply"
-                world_mesh.export(mesh_path)
 
                 if getattr(decoder, "rgb_decoder", None) is not None:
                     try:
@@ -972,13 +1030,18 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                     self.evaluation_options.points,
                     seed,
                 )
+                visibility = None
+                if self.cfg.get("test_visibility_metrics", True) and "evaluation_layout" in batch:
+                    target, visibility, visibility_mesh = self._test_visibility_target(
+                        batch, sample_idx, seed, self.evaluation_options.points or len(target),
+                    )
                 pred = sample_mesh_surface(
                     world_mesh.vertices,
                     world_mesh.faces,
                     self.evaluation_options.points or len(target),
                     seed,
                 )
-                _, evaluation = evaluate_point_clouds(
+                aligned, evaluation = evaluate_point_clouds(
                     pred,
                     target,
                     thresholds=self.evaluation_options.fscore_thresholds,
@@ -987,10 +1050,25 @@ class Mesh2SDFLightningModule(pl.LightningModule):
                     alignment_iterations=self.evaluation_options.alignment_iterations,
                     alignment_lr=self.evaluation_options.alignment_lr,
                 )
+                # Save the same GT-aligned geometry used to compute metrics.
+                # LPIPS and alignment fitting above still use the raw prediction.
+                world_mesh.vertices = (
+                    np.asarray(world_mesh.vertices) * evaluation["alignment_scale"]
+                    + np.asarray(evaluation["alignment_shift"])
+                )
+                world_mesh.export(mesh_path)
+                if visibility is not None:
+                    evaluation.update(compute_visibility_metrics(
+                        aligned, target, visibility, self.evaluation_options.fscore_thresholds,
+                    ))
+                    evaluation["visibility_mesh"] = str(visibility_mesh)
+                    evaluation["visibility_protocol"] = "mesh_raycast_v3_directional"
+                    evaluation["visibility_tolerance"] = float(self.cfg.get("test_visibility_tolerance", 0.01))
                 record.update(
                     {
                         "status": "ok",
                         "mesh": str(mesh_path),
+                        "mesh_alignment_applied": True,
                         **evaluation,
                     }
                 )

@@ -10,7 +10,7 @@ import os
 
 def configure() -> int | None:
     """Configure CUDA visibility and the validated NCCL transport workaround."""
-    parser = argparse.ArgumentParser(add_help=False)
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument("--devices", type=int, default=None)
     args, _ = parser.parse_known_args()
 

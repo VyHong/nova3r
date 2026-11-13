@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 import torch
 import torchvision.transforms as transforms
 
@@ -28,6 +28,7 @@ def prepare_official_inputs(
     paths: list[Path],
     resolution: tuple[int, int],
     num_views: int,
+    preserve_aspect: bool = False,
 ):
     """Reproduce official demo image normalization and N=1 duplication."""
     if not 1 <= num_views <= 6:
@@ -49,7 +50,11 @@ def prepare_official_inputs(
     images = []
     for index, path in enumerate(selected):
         with Image.open(path) as opened:
-            image = opened.convert("RGB").resize((width, height), Image.Resampling.LANCZOS)
+            image = opened.convert("RGB")
+            if preserve_aspect:
+                image = ImageOps.pad(image, (width, height), method=Image.Resampling.LANCZOS, color=(0, 0, 0))
+            else:
+                image = image.resize((width, height), Image.Resampling.LANCZOS)
         images.append(
             {
                 "img": normalize(image)[None],
@@ -77,6 +82,7 @@ class Nova3RAdapter:
         num_queries: int,
         seed: int,
         method: str | None = None,
+        independent_faces: bool = False,
     ):
         if not checkpoint.is_file():
             raise FileNotFoundError(f"Missing Nova3R checkpoint: {checkpoint}")
@@ -116,6 +122,10 @@ class Nova3RAdapter:
         self.num_views = num_views
         self.num_queries = num_queries
         self.seed = seed
+        self.independent_faces = independent_faces
+        if independent_faces and input_projection != "cubemap":
+            raise ValueError("Independent faces require cubemap inputs")
+        self.last_face_pointclouds = {}
 
     def predict(self, sample: SageSample) -> np.ndarray:
         if self.input_projection == "erp":
@@ -132,14 +142,26 @@ class Nova3RAdapter:
                 erp_fov=self.erp_fov,
             )
         paths = [Path(path) for path in paths]
-        images, single_view = prepare_official_inputs(paths, self.resolution, self.num_views)
+        self.last_face_pointclouds = {}
+        if self.independent_faces:
+            for face, path, extrinsic in zip(self.face_order, paths, extrinsics):
+                points = self._predict_views([path], 1, self.seed + sample.frame * 6 + face)
+                self.last_face_pointclouds[str(face)] = camera_to_world_points(points, extrinsic)
+            return np.concatenate(list(self.last_face_pointclouds.values()))
+        points = self._predict_views(paths, self.num_views, self.seed + sample.frame)
+        return camera_to_world_points(points, extrinsics[0])
+
+    def _predict_views(self, paths, num_views, seed):
+        images, _ = prepare_official_inputs(
+            paths, self.resolution, num_views, preserve_aspect=self.input_projection == "erp"
+        )
 
         from nova3r.inference import inference_nova3r_views
         cuda_devices = []
         if self.device.type == "cuda":
             cuda_devices = [self.device.index if self.device.index is not None else torch.cuda.current_device()]
         with torch.random.fork_rng(devices=cuda_devices), torch.inference_mode():
-            torch.manual_seed(self.seed + sample.frame)
+            torch.manual_seed(seed)
             output = inference_nova3r_views(
                 self.cfg,
                 images,
@@ -149,4 +171,4 @@ class Nova3RAdapter:
                 method=self.method,
             )
         points_camera = np.asarray(output["pred"]["pts3d_xyz"])[0]
-        return camera_to_world_points(points_camera, extrinsics[0])
+        return points_camera

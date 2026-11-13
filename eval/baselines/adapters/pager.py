@@ -97,6 +97,13 @@ class PaGeRAdapter:
 
     def predict(self, sample: SageSample) -> np.ndarray:
         path = resolve_erp_path(sample, self.erp_root)
+        points, valid = self.predict_pointmap(path)
+        height, width = valid.shape
+        valid &= load_scannetpp_valid_mask(sample, path, width, height)
+        return pager_points_to_world(points[valid], _panorama_pose(sample))
+
+    def predict_pointmap(self, path: Path) -> tuple[np.ndarray, np.ndarray]:
+        """Return native PaGeR XYZ and validity in ERP pixel order."""
         with Image.open(path) as opened:
             image = opened.convert("RGB")
             if image.width > 2048:
@@ -132,7 +139,6 @@ class PaGeRAdapter:
 
         valid = np.isfinite(depth.numpy()) & (depth.numpy() > 0)
         valid &= self.compute_edge_mask(depth.numpy())
-        valid &= load_scannetpp_valid_mask(sample, path, width, height)
         if sky is not None:
             sky_erp = geometry_sky_to_erp(
                 self.cubemap_to_erp,
@@ -142,7 +148,7 @@ class PaGeRAdapter:
                 width,
             )
             valid &= sky_erp < self.sky_threshold
-        return pager_points_to_world(points[valid], _panorama_pose(sample))
+        return points, valid
 
 
 def geometry_sky_to_erp(

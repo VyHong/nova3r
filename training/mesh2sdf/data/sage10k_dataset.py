@@ -377,6 +377,17 @@ class SAGE10KSDFDataset(SDFDatasetMixin):
                 translation_scale=1.0,
             ).squeeze(0)
             batch["intrinsics"] = torch.from_numpy(np.asarray(intrinsics))
+        if load_geometry and self.split == "test":
+            batch.update({
+                "evaluation_layout": "sage10k",
+                "evaluation_scene": seq_name,
+                "evaluation_frame": int(ids[0]),
+                "evaluation_surface_path": str(anno["surface"]),
+                "evaluation_pose_path": str(anno["pose_path"]),
+                "evaluation_world_to_geometry": self.geometry_input_transform(
+                    torch.as_tensor(first_image_extrinsics, dtype=torch.float32)
+                ),
+            })
         if surface is not None:
             batch["surface"] = surface
         if geo_points is not None:

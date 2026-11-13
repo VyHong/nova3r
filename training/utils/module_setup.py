@@ -32,10 +32,14 @@ class FlowTrainingOptions:
     timestep_mu: float
     timestep_sigma: float
     timestep_p_zero: float
+    flow_matching_steps: int = 100
 
     @classmethod
     def from_config(cls, cfg):
         sample_posterior = cfg.get("sample_posterior", True)
+        steps = cfg.get("test_flow_matching_steps", 100)
+        if isinstance(steps, bool) or not isinstance(steps, int) or steps < 1:
+            raise ValueError("test_flow_matching_steps must be a positive integer")
         if sample_posterior not in (True, False, "mode"):
             raise ValueError(
                 "sample_posterior must be true, false, or 'mode', "
@@ -50,6 +54,7 @@ class FlowTrainingOptions:
             timestep_mu=float(cfg.get("timestep_mu", -0.8)),
             timestep_sigma=float(cfg.get("timestep_sigma", 0.8)),
             timestep_p_zero=float(cfg.get("timestep_p_zero", 0.1)),
+            flow_matching_steps=steps,
         )
 
     def apply_to(self, model):

@@ -605,6 +605,7 @@ class HunYuanDiTPlain(nn.Module):
         moe_top_k: int = 2,
         visible_geometry_dim: int = 64,
         plucker_ray_dim: int = 6,
+        use_panorama_plucker: bool = True,
         panorama_input_size=(512, 1024),
         panorama_patch_size: int = 16,
         latent_scale_factor: float = 1.0240224054295846,
@@ -679,7 +680,9 @@ class HunYuanDiTPlain(nn.Module):
         self.visible_geometry_embedder = nn.Linear(visible_geometry_dim, hidden_size)
         nn.init.zeros_(self.visible_geometry_embedder.weight)
         nn.init.zeros_(self.visible_geometry_embedder.bias)
+        self.use_panorama_plucker = bool(use_panorama_plucker)
         self.plucker_embedder = nn.Linear(plucker_ray_dim, context_dim)
+        self.plucker_embedder.requires_grad_(self.use_panorama_plucker)
         nn.init.zeros_(self.plucker_embedder.weight)
         nn.init.zeros_(self.plucker_embedder.bias)
         if len(panorama_input_size) != 2:
@@ -837,13 +840,14 @@ class HunYuanDiTPlain(nn.Module):
                 f"Condition token count {cond.shape[1]} does not match grid_size="
                 f"{grid_size} with includes_cls_token={includes_cls}"
             )
-        plucker_rays = make_equirectangular_plucker_grid(grid_size, 1)
-        if includes_cls:
-            # CLS has no spatial ray. Prepending its neutral embedding keeps
-            # every patch token aligned with the corresponding panorama ray.
-            plucker_rays = torch.cat((plucker_rays.new_zeros(1, plucker_rays.shape[-1]), plucker_rays))
-        plucker_rays = plucker_rays.unsqueeze(0).to(device=cond.device, dtype=cond.dtype)
-        cond = cond + self.plucker_embedder(plucker_rays)
+        if self.use_panorama_plucker:
+            plucker_rays = make_equirectangular_plucker_grid(grid_size, 1)
+            if includes_cls:
+                # CLS has no spatial ray. Prepending its neutral embedding keeps
+                # every patch token aligned with the corresponding panorama ray.
+                plucker_rays = torch.cat((plucker_rays.new_zeros(1, plucker_rays.shape[-1]), plucker_rays))
+            plucker_rays = plucker_rays.unsqueeze(0).to(device=cond.device, dtype=cond.dtype)
+            cond = cond + self.plucker_embedder(plucker_rays)
         cond = cond.masked_fill(drop_mask, 0)
 
         t = self.t_embedder(t, condition=kwargs.get("guidance_cond"))
@@ -1008,6 +1012,9 @@ class HunYuanDiTPlain(nn.Module):
         visible_geometry_latents,
         guidance_scale=1.0,
     ):
+        steps = getattr(self, "flow_matching_steps", 100)
+        if isinstance(steps, bool) or not isinstance(steps, int) or steps < 1:
+            raise ValueError("flow_matching_steps must be a positive integer")
         with torch.no_grad():
             wrapped_vf = HunYuanDiTVelocityWrapper(self)
             wrapped_vf.eval()
@@ -1016,10 +1023,10 @@ class HunYuanDiTPlain(nn.Module):
             noise_generator.manual_seed(42)
             x_init = torch.randn_like(gt_latents, generator=noise_generator)
             sol = ODESolver(velocity_model=wrapped_vf).sample(
-                time_grid=torch.linspace(0, 1, 101, device=gt_latents.device),
+                time_grid=torch.linspace(0, 1, steps + 1, device=gt_latents.device),
                 x_init=x_init,
                 method="euler",
-                step_size=0.01,
+                step_size=1.0 / steps,
                 return_intermediates=False,
                 contexts=contexts,
                 visible_geometry_latents=visible_geometry_latents,

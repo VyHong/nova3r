@@ -1,8 +1,8 @@
 #!/bin/sh
  
-#SBATCH --job-name=train_nova3r
-#SBATCH --output=train.out
-#SBATCH --error=train.err
+#SBATCH --job-name=train_ablation
+#SBATCH --output=train_ablation.out
+#SBATCH --error=train_ablation.err
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 
@@ -35,11 +35,11 @@ podman run -v /mnt:/mnt:rw \
     --cap-drop=MKNOD \
     --security-opt=apparmor:unconfined \
     --security-opt=seccomp=unconfined \
-    --name=nova3r-run -d nova3r sleep infinity
+    --name=nova3r-ablation -d nova3r sleep infinity
 
 
 # Run commands inside container
-RUN() { podman exec nova3r-run "$@"; }
+RUN() { podman exec nova3r-ablation "$@"; }
 RUN nvidia-smi
 
 echo "Setting up environment and running commands inside container..."
@@ -83,13 +83,13 @@ RUN bash -c "
   export PYTHONUNBUFFERED=1
   export PYTHONPATH=\${PYTHONPATH}:/mnt/home/vyhong/projects/nova3r
   
-  echo 'Running training...'
-  python -u training/change_train.py \
-    --config checkpoints/hunyuan_dit/config_hunyuandit_panorama_visible_latent.yaml
+  
+  python -u training/resume_train.py \
+    --config checkpoints/hunyuan_dit/config_hunyuandit_panorama_visible_latent_no_plucker.yaml\
 "
 training_status=$?
 
 # Stop and remove the container
 echo "Cleaning up..."
-podman rm -f nova3r-run
+podman rm -f nova3r-ablation
 exit "$training_status"

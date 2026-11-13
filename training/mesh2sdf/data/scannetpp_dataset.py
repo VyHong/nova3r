@@ -348,6 +348,8 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
 
                 face_w2c = np.asarray(camera_data[face_key]["extrinsics"], dtype=np.float32)
                 image_extrinsics = face_w2c @ scanner_w2c
+                if subseq_order == 0:
+                    first_image_extrinsics = image_extrinsics
                 if subseq_order == 0 and load_geometry:
                     rng = self._pointcloud_rng(seq_name, ids[0], int(subseq_ids[0]))
                     surface, geo_points, mesh_bounds = self._load_geometry(
@@ -378,6 +380,17 @@ class ScanNetPPSDFDataset(SDFDatasetMixin):
                 translation_scale=camera_translation_scale,
             ).squeeze(0)
             batch["intrinsics"] = torch.from_numpy(np.asarray(intrinsics))
+        if load_geometry and self.split == "test":
+            batch.update({
+                "evaluation_layout": "scannetpp",
+                "evaluation_scene": seq_name,
+                "evaluation_frame": int(ids[0]),
+                "evaluation_surface_path": str(annos[0]["surface"]),
+                "evaluation_pose_path": str(annos[0]["pose_path"]),
+                "evaluation_world_to_geometry": self.geometry_input_transform(
+                    torch.as_tensor(first_image_extrinsics @ self.SCANNER_AXIS_CONVERSION, dtype=torch.float32)
+                ),
+            })
         if surface is not None:
             batch["surface"] = surface
         if geo_points is not None:

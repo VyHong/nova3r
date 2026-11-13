@@ -132,8 +132,15 @@ def load_model(
             if kw.get(key) is None and cfg.get(key):
                 kw[key] = cfg.get(key)
 
+    low_cpu_mem_usage = bool(kw.pop("low_cpu_mem_usage", False))
     model_config = cfg.model
-    model = eval(model_config["name"])(**model_config["params"])
+    previous_dtype = torch.get_default_dtype()
+    try:
+        if low_cpu_mem_usage:
+            torch.set_default_dtype(dtype)
+        model = eval(model_config["name"])(**model_config["params"])
+    finally:
+        torch.set_default_dtype(previous_dtype)
 
     if not load_weights:
         model.to(device=device, dtype=dtype)
@@ -141,7 +148,8 @@ def load_model(
 
     # Avoid holding both the initialized model and checkpoint tensors on GPU.
     # Apply the state exactly once on CPU, then move the completed model.
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False,
+                      mmap=low_cpu_mem_usage)
 
     state_dict = extract_model_state_dict(ckpt)
 

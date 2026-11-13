@@ -248,6 +248,17 @@ class Front3DSDFDataset(SDFDatasetMixin):
                 torch.stack(extrinsics).unsqueeze(0), translation_scale=1.0
             ).squeeze(0)
             batch["intrinsics"] = torch.from_numpy(np.asarray(intrinsics))
+        if load_geometry and self.split == "test":
+            batch.update({
+                "evaluation_layout": "3dfront",
+                "evaluation_scene": seq_name,
+                "evaluation_frame": int(frame_id),
+                "evaluation_surface_path": str(annotation["surface"]),
+                "evaluation_pose_path": str(annotation["pose_path"]),
+                "evaluation_world_to_geometry": self.geometry_input_transform(
+                    torch.as_tensor(first_w2c, dtype=torch.float32)
+                ),
+            })
         if surface is not None:
             batch["surface"] = surface
         if geo_points is not None:

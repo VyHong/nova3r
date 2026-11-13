@@ -1,0 +1,265 @@
+# HRUDF512 near-surface retry preset. Room output validation is pending.
+cfg:
+  checkpoint: checkpoints/hunyuan_dit/model.fp16.ckpt
+  load_weights: true
+  vae_ckpt: exp_output/hunyuan_vae/checkpoints/last.ckpt
+  resume_checkpoint: exp_output/hunyuandit_panorama/checkpoints/last-v1.ckpt
+  vae:
+    params:
+      num_latents: 4096
+      embed_dim: 64
+      width: 1024
+      heads: 16
+      num_encoder_layers: 8
+      num_decoder_layers: 16
+      pc_size: 81920
+      pc_sharpedge_size: 0
+      point_feats: 4
+      num_freqs: 8
+      include_pi: false
+      qkv_bias: false
+      qk_norm: true
+      geo_decoder_mlp_expand_ratio: 4
+      geo_decoder_downsample_ratio: 1
+      geo_decoder_ln_post: true
+      scale_factor: 1.0039506158752403
+  model:
+    name: HunYuanDiTPlain
+    params:
+      input_size: 4096
+      in_channels: 64
+      hidden_size: 2048
+      context_dim: 1024
+      depth: 21
+      num_heads: 16
+      mlp_ratio: 4.0
+      norm_type: layer
+      qk_norm_type: rms
+      qk_norm: true
+      qkv_bias: false
+      text_len: 2048
+      with_decoupled_ca: false
+      use_pos_emb: false
+      use_attention_pooling: false
+      num_moe_layers: 6
+      num_experts: 8
+      moe_top_k: 2
+      visible_geometry_dim: 64
+      plucker_ray_dim: 6
+      panorama_input_size:
+      - 512
+      - 1024
+      panorama_patch_size: 16
+      latent_scale_factor: 1.0240224054295846
+      latent_reconstruction_loss_weight: 0.2
+      sample_posterior: true
+      conditioning_drop_prob: 0.1
+      timestep_sampling: uniform
+      timestep_mu: -0.8
+      timestep_sigma: 0.8
+      timestep_p_zero: 0.1
+  lightning_module: Mesh2SDFLightningModule
+  exp_name: hunyuandit_panorama
+  output_dir: exp_output/hunyuandit_panorama/hrudf512_near_surface
+  gpus: 1
+  amp_dtype: bf16-mixed
+  epochs: 10
+  accum_iter: 1
+  grad_clip_norm: 1.0
+  weight_decay: 0.01
+  lr: 1.0e-06
+  warmup_epochs: 0
+  lr_scheduler: cosine
+  lr_scheduler_eta_min: 2.0e-07
+  kl_weight: 0.001
+  sample_posterior: true
+  surface_geo_normalize_mode: cube
+  surface_geo_use_camera_translation: true
+  latent_reconstruction_loss_weight: 0.2
+  timestep_sampling: uniform
+  timestep_mu: -0.8
+  timestep_sigma: 0.8
+  timestep_p_zero: 0.1
+  eval_freq: 0.25
+  save_freq: 2
+  keep_freq: false
+  val_num_save: 2
+  test_guidance_scale: 5.0
+  test_mesh_clip_bounds:
+  - -2
+  - -2
+  - -2
+  - 2
+  - 2
+  - 2
+  test_visibility_metrics: true
+  test_visibility_tolerance: 0.01
+  test_fscore_thresholds:
+  - 0.1
+  - 0.05
+  - 0.02
+  test_visibility_mesh_roots:
+    scannetpp: datasets/scannetpp/test_scenes
+    sage10k: /tmp/datasets/sage-10k/panorama-scenes
+    3dfront: /tmp/datasets/3dfront/panorama_scenes
+  mesh_method: hrudf
+  mesh_octree_resolution: 512
+  mesh_mc_level: 0.5
+  mesh_num_chunks: 100000
+  mesh_mc_algo: mc
+  mesh_enable_pbar: true
+  mesh_mc: 512
+  mesh_udf_surface_threshold: 0.01
+  test_eval_points: 100000
+  data:
+    geometry_coordinate_frame: hunyuan
+    num_workers: 0
+    test_num_workers: 0
+    batch_size: 4
+    test_batch_size: 1
+    allow_duplicate_img: false
+    img_size: 252
+    patch_size: 14
+    aug_scale: null
+    rescale: null
+    rescale_aug: null
+    landscape_check: null
+    pc_size: 100000
+    pc_sharpedge_size: 0
+    pointcloud_sample: true
+    return_normal: true
+    return_color: false
+    sharpedge_label: true
+    sdf_size: 16384
+    sdf_surface_size: 0
+    sdf_near_size: 36864
+    sdf_sharpedge_size: 12288
+    sdf_label: true
+    train_datasets:
+      3dfront:
+        name: Front3DSDFDataset
+        params:
+          root_dir: /tmp/datasets/3dfront/panorama_scenes
+          sdf_data_root: /tmp/datasets/3dfront/better_udf
+          pose_root: /tmp/datasets/3dfront/panorama_scenes
+          list_path: data/3dfront/train_list.json
+          format: mesh
+          subseq_ids:
+          - 4
+          - 0
+          - 5
+          - 1
+          - 3
+          - 2
+          gt_latent_source: posterior
+          gt_latent_root: /tmp/datasets/3dfront/better_gt_latents
+          image_feature_root: /tmp/datasets/3dfront/better_dinov2_latents
+          visible_geometry_latent_root: /tmp/datasets/3dfront/better_vis_latents
+          modalities:
+          - image_features
+          - gt_latent
+          - visible_geometry_latent
+      sage10k:
+        name: SAGE10KDataset
+        params:
+          root_dir: /tmp/datasets/sage-10k/cubemap_data/cubemaps
+          sdf_data_root: /tmp/datasets/sage-10k/udf
+          pose_root: /mnt/projects/theses/vyhong/sage-10k/poses
+          list_path: data/sage-10k/train_list.json
+          format: mesh
+          subseq_ids:
+          - 4
+          - 0
+          - 5
+          - 1
+          - 3
+          - 2
+          gt_latent_source: posterior
+          gt_latent_root: /tmp/datasets/sage-10k/fix_gt_latents
+          image_feature_root: /tmp/datasets/sage-10k/dinov2_latents
+          visible_geometry_latent_root: /tmp/datasets/sage-10k/fix_vis_latents
+          modalities:
+          - image_features
+          - gt_latent
+          - visible_geometry_latent
+    val_datasets:
+      scannetpp:
+        name: ScanNetPPSDFDataset
+        params:
+          root_dir: /tmp/datasets/scannetpp/cubemap_data
+          sdf_data_root: /tmp/datasets/scannetpp/udf_color
+          pose_root: /mnt/projects/theses/vyhong/scannetpp/scan_poses
+          list_path: data/scannetpp/val_list.json
+          format: mesh
+          subseq_ids:
+          - 4
+          - 0
+          - 5
+          - 1
+          - 3
+          - 2
+          gt_latent_source: posterior
+          gt_latent_root: /tmp/datasets/scannetpp/fix_gt_latents
+          image_feature_root: /tmp/datasets/scannetpp/dinov2_latents
+          visible_geometry_latent_root: /tmp/datasets/scannetpp/fix_vis_latents
+          modalities:
+          - image_features
+          - gt_latent
+          - visible_geometry_latent
+          - surface
+      sage10k:
+        name: SAGE10KDataset
+        params:
+          root_dir: /tmp/datasets/sage-10k/cubemap_data/cubemaps
+          sdf_data_root: /tmp/datasets/sage-10k/udf
+          pose_root: /mnt/projects/theses/vyhong/sage-10k/poses
+          list_path: data/sage-10k/val_list.json
+          format: mesh
+          subseq_ids:
+          - 4
+          - 0
+          - 5
+          - 1
+          - 3
+          - 2
+          gt_latent_source: posterior
+          gt_latent_root: /tmp/datasets/sage-10k/fix_gt_latents
+          image_feature_root: /tmp/datasets/sage-10k/dinov2_latents
+          visible_geometry_latent_root: /tmp/datasets/sage-10k/fix_vis_latents
+          modalities:
+          - image_features
+          - gt_latent
+          - visible_geometry_latent
+          - surface
+    test_datasets:
+      3dfront:
+        name: Front3DSDFDataset
+        params:
+          root_dir: /tmp/datasets/3dfront/panorama_scenes
+          sdf_data_root: /tmp/datasets/3dfront/better_udf
+          pose_root: /tmp/datasets/3dfront/panorama_scenes
+          list_path: exp_output/hunyuandit_panorama/eval_epoch09_mesh_udf_1024_3dfront_selected4_padding10_seed43/test_list.json
+          format: mesh
+          subseq_ids:
+          - 4
+          - 0
+          - 5
+          - 1
+          - 3
+          - 2
+          gt_latent_source: posterior
+          gt_latent_root: /tmp/datasets/3dfront/better_gt_latents
+          image_feature_root: /tmp/datasets/3dfront/better_dinov2_latents
+          visible_geometry_latent_root: /tmp/datasets/3dfront/better_vis_latents
+          modalities:
+          - image_features
+          - gt_latent
+          - visible_geometry_latent
+          - surface
+  mesh_bounds_padding: 0.1
+  mesh_udf_normal_band_voxels: 2.0
+  mesh_hrudf_resolution: 512
+  mesh_hrudf_query_batch_size: 65536
+  mesh_hrudf_max_avg_factor: 1.2
+  mesh_hrudf_max_max_factor: 2.0
+  mesh_hrudf_recursions: 5
